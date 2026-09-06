@@ -9,12 +9,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	glamourstyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/saurabhahuja71/agenterm/internal/agent"
 	"github.com/saurabhahuja71/agenterm/internal/llm"
@@ -57,15 +60,13 @@ var (
 	styleErr    = lipgloss.NewStyle().Foreground(colorError)
 	styleBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
 
-	styleUserBubble = lipgloss.NewStyle().
-			Background(bgUser).
-			Foreground(fgBody).
-			Padding(0, 1)
-	styleAsstBubble = lipgloss.NewStyle().
-			Background(bgAsst).
-			Foreground(fgBody).
-			Padding(0, 1)
-	styleRoot = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)
+	// Message content deliberately has no background. Backgrounds belong to
+	// compact headers (below), code blocks, and semantic panels. Applying a
+	// background to a width-constrained multiline style paints a band behind
+	// every physical line in the conversation.
+	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
+	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
+	styleRoot       = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)
 )
 
 const todoSideThreshold = 90
@@ -158,6 +159,8 @@ type model struct {
 	pendingApproval  *permissions.Request
 	approvalDecision chan permissions.Decision
 	tokenUsage       *llm.Usage
+	// pendingRequests contains canonical, unrendered user input in FIFO order.
+	pendingRequests []string
 }
 
 // paintInterval is the minimum time between streaming viewport rebuilds.
@@ -265,8 +268,9 @@ func New(deps Deps) model {
 		Right: key.NewBinding(key.WithKeys("ctrl+right"), key.WithHelp("ctrl+→", "right")),
 	}
 
-	// Fixed dark style — WithAutoStyle() queries OSC 11 (bg color) and the
-	// reply often appears as garbage in the input line on first launch.
+	// Use an explicit style — WithAutoStyle() queries OSC 11 (bg color) and the
+	// reply often appears as garbage in the input line on first launch. The
+	// renderer is rebuilt on every theme switch in Update.
 	r := newGlamourRenderer(80, "dark")
 
 	m := model{
@@ -315,13 +319,19 @@ func newGlamourRenderer(width int, theme string) *glamour.TermRenderer {
 	if width < 20 {
 		width = 80
 	}
-	style := "dark"
+	style := glamourstyles.DarkStyleConfig
 	if theme == "light" {
-		style = "light"
+		style = glamourstyles.LightStyleConfig
 	}
+	// Glamour's standard styles reserve a two-cell document margin and another
+	// margin around code blocks. Those are Markdown document-layout choices,
+	// not source content, and make fenced code look padded or indented. Keep
+	// Chroma and all semantic Markdown styling, but remove only those margins.
+	style.Document.Margin = nil
+	style.CodeBlock.Margin = nil
 	// Prefer explicit styles over AutoStyle (no TTY color probes).
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(style),
+		glamour.WithStyles(style),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
@@ -411,7 +421,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modelPick != nil {
 			return m.handleModelPickKeys(msg)
 		}
-		if m.pendingApproval != nil {
+		if m.pendingApproval != nil && isApprovalDecisionKey(msg) {
 			return m.handleApprovalKey(msg)
 		}
 		// Chat scroll keys — handle before the textarea so large answers are reachable.
@@ -487,9 +497,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "theme: " + m.themeName
 			return m, nil
 		case "enter":
-			if m.busy {
-				return m, nil
-			}
 			text := strings.TrimSpace(m.ta.Value())
 			if text == "" {
 				return m, nil
@@ -497,18 +504,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ta.Reset()
 			return m.handleSubmit(text)
 		}
-		// While busy, arrow keys also scroll the transcript (textarea is inactive).
-		if m.busy {
-			switch msg.String() {
-			case "up", "k":
-				m.vp.ScrollUp(1)
-				return m, nil
-			case "down", "j":
-				m.vp.ScrollDown(1)
-				return m, nil
-			}
-		}
-
 	case tea.MouseMsg:
 		// Only interactive mouse mode consumes terminal mouse events. In SELECT
 		// mode the terminal retains native selection behavior.
@@ -589,9 +584,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, _ = m.deps.Agent.SaveSessionPath(m.deps.SessionPath)
 		}
 		m.refreshViewport()
+		if len(m.pendingRequests) > 0 {
+			return m.startNextQueued()
+		}
 	}
 
-	if !m.busy && m.modelPick == nil {
+	if m.modelPick == nil {
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
@@ -612,9 +610,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
+	if m.busy {
+		m.pendingRequests = append(m.pendingRequests, text)
+		m.lines = append(m.lines, chatLine{role: "queued", text: text})
+		m.status = fmt.Sprintf("queued · %d", len(m.pendingRequests))
+		m.refreshViewport()
+		return m, nil
+	}
 	if strings.HasPrefix(text, "/") {
 		return m.handleSlash(text)
 	}
+	return m.startTurn(text)
+}
+
+func (m model) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.lines = append(m.lines, chatLine{role: "user", text: text})
 	m.ensureStream().Reset()
 	m.turnAssistant = -1
@@ -654,6 +663,30 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	}()
 
 	return m, tea.Batch(waitNext(ch), busyTick())
+}
+
+func (m model) startNextQueued() (tea.Model, tea.Cmd) {
+	if len(m.pendingRequests) == 0 {
+		return m, nil
+	}
+	text := m.pendingRequests[0]
+	m.pendingRequests = m.pendingRequests[1:]
+	for i := range m.lines {
+		if m.lines[i].role == "queued" && m.lines[i].text == text {
+			m.lines = append(m.lines[:i], m.lines[i+1:]...)
+			break
+		}
+	}
+	return m.handleSubmit(text)
+}
+
+func isApprovalDecisionKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "1", "2", "3", "4", "y", "n", "enter", "esc":
+		return true
+	default:
+		return false
+	}
 }
 
 // waitNext reads the next event and coalesces consecutive tokens so the UI
@@ -1820,18 +1853,19 @@ func toolArgHint(argsJSON string) string {
 	return truncate(argsJSON, 48)
 }
 
-// chatBubble paints a full-width message block so light-grey vs white (or
-// dark-slate variants) separates user questions from agent answers.
-// Large bodies skip lipgloss Width (O(lines) and freezes the TUI on big answers).
+// chatBubble adds message-content padding without painting a full-width
+// background. The header is styled separately by refreshViewport, while body
+// renderers retain ownership of Markdown/code styling.
 func chatBubble(base lipgloss.Style, label, body string, width int) string {
 	if width < 10 {
 		width = 10
 	}
+	// Keep the size argument for the existing call sites and large-message
+	// policy. Width must not be combined with a background-bearing style here.
 	if len(body) > bubbleMaxBytes {
-		// Fast path: label strip + plain body (still scrollable).
-		return base.Width(width).Render(label) + "\n" + body
+		return base.Render(label) + "\n" + body
 	}
-	return base.Width(width).Render(label + "\n" + body)
+	return base.Render(label + "\n" + body)
 }
 
 func (m *model) renderAssistantBody(ln *chatLine, width int) string {
@@ -1851,12 +1885,70 @@ func (m *model) renderAssistantBody(ln *chatLine, width int) string {
 	}
 	if out, err := m.renderer.Render(ln.text); err == nil {
 		out = strings.TrimRight(out, "\n")
+		if hasFencedCodeBlock(ln.text) {
+			// Glamour's block writer pads every rendered line to the document
+			// width. Trim only that renderer padding for fenced-code responses;
+			// do not normalize newlines or prose whitespace.
+			out = trimANSIHorizontalPadding(out)
+		}
 		ln.mdCache = out
 		ln.mdSrc = ln.text
 		return out
 	}
 	return wrap(ln.text, width-4)
 }
+
+func hasFencedCodeBlock(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			return true
+		}
+	}
+	return false
+}
+
+// trimANSIHorizontalPadding removes visible trailing spaces while preserving
+// ANSI style sequences. Glamour's padding writer emits those spaces in styled
+// chunks, so strings.TrimRight alone cannot remove them.
+func trimANSIHorizontalPadding(s string) string {
+	var out strings.Builder
+	for _, line := range strings.SplitAfter(s, "\n") {
+		body := strings.TrimSuffix(line, "\n")
+		type token struct {
+			raw   string
+			style bool
+			space bool
+		}
+		var tokens []token
+		for len(body) > 0 {
+			if loc := ansiCSI.FindStringIndex(body); loc != nil && loc[0] == 0 {
+				tokens = append(tokens, token{raw: body[:loc[1]], style: true})
+				body = body[loc[1]:]
+				continue
+			}
+			r, size := utf8.DecodeRuneInString(body)
+			tokens = append(tokens, token{raw: body[:size], space: unicode.IsSpace(r)})
+			body = body[size:]
+		}
+		lastVisible := -1
+		for i, tok := range tokens {
+			if !tok.style && !tok.space {
+				lastVisible = i
+			}
+		}
+		for i, tok := range tokens {
+			if i <= lastVisible || tok.style {
+				out.WriteString(tok.raw)
+			}
+		}
+		if strings.HasSuffix(line, "\n") {
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
+}
+
+var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 func (m *model) refreshViewport() {
 	var b strings.Builder
@@ -1881,11 +1973,18 @@ func (m *model) refreshViewport() {
 			b.WriteString(chatBubble(styleAsstBubble, label, rendered, width) + "\n\n")
 		case "thinking":
 			label := styleAsst.Background(bgAsst).Render("Agent")
-			body := styleStatus.Background(bgAsst).Render(wrap(ln.text, width-4))
+			body := styleStatus.Render(wrap(ln.text, width-4))
 			b.WriteString(chatBubble(styleAsstBubble, label, body, width) + "\n\n")
 		case "tool":
 			b.WriteString(styleTool.Render("Tool") + "\n")
 			b.WriteString(styleTool.Render(wrap(ln.text, width)) + "\n\n")
+		case "queued":
+			queued := len(m.pendingRequests)
+			if queued < 1 {
+				queued = 1
+			}
+			b.WriteString(styleStatus.Render(fmt.Sprintf("Queued · %d", queued)) + "\n")
+			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n\n")
 		case "error":
 			b.WriteString(styleErr.Render("Error") + "\n")
 			b.WriteString(styleErr.Render(wrap(ln.text, width)) + "\n\n")
@@ -2084,8 +2183,8 @@ func applyTheme(name string) {
 	styleTool = lipgloss.NewStyle().Foreground(colorTool)
 	styleErr = lipgloss.NewStyle().Foreground(colorError)
 	styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
-	styleUserBubble = lipgloss.NewStyle().Background(bgUser).Foreground(fgBody).Padding(0, 1)
-	styleAsstBubble = lipgloss.NewStyle().Background(bgAsst).Foreground(fgBody).Padding(0, 1)
+	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
+	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
 	styleRoot = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)
 }
 

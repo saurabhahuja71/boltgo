@@ -11,6 +11,7 @@ import (
 	"github.com/saurabhahuja71/agenterm/internal/tools"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -74,6 +75,51 @@ func TestEventDoneKeepsInputBlockedUntilStreamCloses(t *testing.T) {
 	closed, _ := updated.Update(streamClosedMsg{})
 	if closed.(model).busy {
 		t.Fatal("stream close did not finish turn")
+	}
+}
+
+func TestInputRemainsEditableAndQueuesRequestsFIFO(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m.status = "streaming…"
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("next request")})
+	m = updated.(model)
+	if m.ta.Value() != "next request" {
+		t.Fatalf("input was not editable while busy: %q", m.ta.Value())
+	}
+	m.ta.SetValue("second line\nwith indentation")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if len(m.pendingRequests) != 1 || m.pendingRequests[0] != "second line\nwith indentation" {
+		t.Fatalf("queued request was not preserved exactly: %#v", m.pendingRequests)
+	}
+	if !strings.Contains(m.View(), "Queued · 1") {
+		t.Fatal("queued request was not visible")
+	}
+	m.pendingRequests = append(m.pendingRequests, "third", "fourth")
+	m.lines = append(m.lines, chatLine{role: "queued", text: "third"}, chatLine{role: "queued", text: "fourth"})
+	if m.pendingRequests[0] != "second line\nwith indentation" || m.pendingRequests[2] != "fourth" {
+		t.Fatalf("queue order changed: %#v", m.pendingRequests)
+	}
+}
+
+func TestQueuedRequestStartsAfterActiveStreamCloses(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m.lines = append(m.lines, chatLine{role: "queued", text: "follow-up"})
+	m.pendingRequests = []string{"follow-up"}
+	updated, _ := m.Update(streamClosedMsg{})
+	m = updated.(model)
+	defer func() {
+		if m.cancel != nil {
+			m.cancel()
+		}
+	}()
+	if !m.busy || len(m.pendingRequests) != 0 {
+		t.Fatalf("queued request did not become active: busy=%v queue=%#v", m.busy, m.pendingRequests)
+	}
+	if len(m.lines) < 2 || m.lines[len(m.lines)-1].role != "assistant-stream" {
+		t.Fatalf("next request did not start an assistant turn: %#v", m.lines)
 	}
 }
 
@@ -210,6 +256,96 @@ func TestLightThemeUsesWhiteBackgroundAndDarkText(t *testing.T) {
 		t.Fatalf("light theme did not render dark foreground text: %q", view)
 	}
 }
+
+func TestLightThemeHasNoStaleDarkComponentBackgrounds(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+
+	m := testModel(t)
+	m.themeName = "light"
+	applyTheme("light")
+	applyTextareaTheme(&m.ta, "light")
+	m.todosOpen = true
+	m.width, m.height = 120, 40
+	m.relayout()
+	m.lines = append(m.lines,
+		chatLine{role: "user", text: "light user"},
+		chatLine{role: "assistant", text: "light assistant"},
+		chatLine{role: "tool", text: "tool status"},
+	)
+	m.refreshViewport()
+	view := m.View()
+	if !strings.Contains(view, "48;2;255;255;255") {
+		t.Fatalf("light view has no light canvas background: %q", view)
+	}
+	if strings.Contains(view, "48;2;2;6;23") || strings.Contains(view, "48;2;15;23;42") {
+		t.Fatalf("light view retained a dark component background: %q", view)
+	}
+	if !strings.Contains(view, "Todos") || !strings.Contains(view, "message…") || !strings.Contains(view, "Bolt |") {
+		t.Fatalf("light view lost a themed component: %q", view)
+	}
+}
+
+func TestConversationBackgroundsStayOnHeaders(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	applyTheme("dark")
+
+	m := testModel(t)
+	m.vp.Width = 72
+	m.lines = []chatLine{
+		{role: "user", text: "normal user prose\nwith a second line"},
+		{role: "assistant-stream", text: "normal assistant prose\nwith a second line"},
+		{role: "thinking", text: "Thinking... 6s"},
+	}
+	m.refreshViewport()
+	content := m.vp.View()
+	backgrounds := strings.Count(content, "48;2;")
+	if backgrounds != 3 {
+		t.Fatalf("conversation painted %d background regions, want one per header: %q", backgrounds, content)
+	}
+}
+
+func TestConversationMarkdownCodeStylingIsRetained(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	applyTheme("dark")
+
+	m := testModel(t)
+	m.vp.Width = 72
+	m.lines = []chatLine{{role: "assistant", text: "```go\nfmt.Println(\"hello\")\n```"}}
+	body := m.renderAssistantBody(&m.lines[0], m.vp.Width)
+	logical := ansiForTest.ReplaceAllString(body, "")
+	logical = strings.TrimSpace(logical)
+	if !strings.Contains(logical, "fmt.Println(\"hello\")") {
+		t.Fatalf("rendered code block omitted source: %q", logical)
+	}
+	if strings.Contains(logical, "│") {
+		t.Fatalf("renderer decoration entered logical code content: %q", logical)
+	}
+	if !strings.Contains(body, "\x1b[") {
+		t.Fatal("rendered code block lost Markdown styling")
+	}
+}
+
+func TestFencedCodeRenderingPreservesLogicalLinesAndIndentation(t *testing.T) {
+	m := testModel(t)
+	m.lines = []chatLine{{role: "assistant", text: "```python\ndef one():\n    pass\n\ndef two():\n    pass\n```"}}
+	logical := ansiForTest.ReplaceAllString(m.renderAssistantBody(&m.lines[0], 80), "")
+	logical = strings.TrimSpace(logical)
+	want := "def one():\n    pass\n\ndef two():\n    pass"
+	if logical != want {
+		t.Fatalf("fenced code structure changed:\n got %q\nwant %q", logical, want)
+	}
+	if strings.Contains(logical, "\n\n\n") || strings.Contains(logical, "│") {
+		t.Fatalf("fenced code contains artificial spacing or decoration: %q", logical)
+	}
+}
+
+var ansiForTest = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 func TestInputUsesOnePromptMarker(t *testing.T) {
 	m := testModel(t)
