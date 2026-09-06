@@ -581,6 +581,10 @@ checksum, and replaces only the executable. Configuration, sessions,
 permissions, and workspace files are preserved. Slow connections are allowed
 up to ten minutes for the complete download and installation.
 
+Public upgrades work without a token while GitHub API quota permits. If the
+public API is rate-limited, set `GITHUB_TOKEN` (preferred) or `GH_TOKEN` and
+retry `bolt upgrade`. The token is optional and Bolt never stores it.
+
 On version tags, GitHub Actions publishes multi-platform binaries and a GHCR
 image:
 

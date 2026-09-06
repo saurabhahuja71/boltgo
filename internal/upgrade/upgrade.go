@@ -22,6 +22,8 @@ import (
 
 const DefaultRepository = "saurabhahuja71/boltgo"
 
+const githubAPIVersion = "2022-11-28"
+
 var checksumPattern = regexp.MustCompile(`(?i)\b([a-f0-9]{64})\b`)
 
 type Asset struct {
@@ -61,8 +63,7 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 	if err != nil {
 		return Release{}, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "bolt-upgrade")
+	setGitHubAPIHeaders(req)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return Release{}, fmt.Errorf("fetch latest release: %w", err)
@@ -70,7 +71,10 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return Release{}, fmt.Errorf("fetch latest release: HTTP %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		if isGitHubRateLimited(resp, body) {
+			return Release{}, errors.New("GitHub API rate limit exceeded. Set GITHUB_TOKEN or GH_TOKEN and retry `bolt upgrade`.")
+		}
+		return Release{}, fmt.Errorf("fetch latest release: HTTP %s: %s", resp.Status, sanitizeGitHubResponse(body))
 	}
 	var release Release
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
@@ -80,6 +84,40 @@ func (c Client) Latest(ctx context.Context) (Release, error) {
 		return Release{}, errors.New("latest release has no tag")
 	}
 	return release, nil
+}
+
+func setGitHubAPIHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "bolt-upgrade")
+	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+	if token := githubToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func githubToken() string {
+	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("GH_TOKEN"))
+}
+
+func isGitHubRateLimited(resp *http.Response, body []byte) bool {
+	if resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	if strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(string(body)), "rate limit exceeded")
+}
+
+func sanitizeGitHubResponse(body []byte) string {
+	message := strings.TrimSpace(string(body))
+	if token := githubToken(); token != "" {
+		message = strings.ReplaceAll(message, token, "[REDACTED]")
+	}
+	return message
 }
 
 func (c Client) Upgrade(ctx context.Context, executable, currentVersion string, output io.Writer) (Result, error) {

@@ -32,6 +32,94 @@ func TestNewer(t *testing.T) {
 	}
 }
 
+func TestLatestUsesGitHubTokenPrecedence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		github     string
+		gh         string
+		wantHeader string
+	}{
+		{name: "github token", github: "github-secret", wantHeader: "Bearer github-secret"},
+		{name: "gh token fallback", gh: "gh-secret", wantHeader: "Bearer gh-secret"},
+		{name: "github token wins", github: "github-secret", gh: "gh-secret", wantHeader: "Bearer github-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GITHUB_TOKEN", test.github)
+			t.Setenv("GH_TOKEN", test.gh)
+			var gotAuth, gotAccept, gotVersion string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				gotAccept = r.Header.Get("Accept")
+				gotVersion = r.Header.Get("X-GitHub-Api-Version")
+				fmt.Fprint(w, `{"tag_name":"v1.1.0","assets":[]}`)
+			}))
+			defer server.Close()
+			_, err := (Client{APIBaseURL: server.URL, Repository: "test/boltgo"}).Latest(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotAuth != test.wantHeader || gotAccept != "application/vnd.github+json" || gotVersion != githubAPIVersion {
+				t.Fatalf("headers auth=%q accept=%q version=%q", gotAuth, gotAccept, gotVersion)
+			}
+		})
+	}
+}
+
+func TestLatestRateLimitErrorDoesNotLeakToken(t *testing.T) {
+	secret := "github-secret-value"
+	t.Setenv("GITHUB_TOKEN", secret)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `{"message":"API rate limit exceeded; token=%s"}`, secret)
+	}))
+	defer server.Close()
+	_, err := (Client{APIBaseURL: server.URL, Repository: "test/boltgo"}).Latest(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "GitHub API rate limit exceeded") ||
+		strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "token=") {
+		t.Fatalf("unexpected rate-limit error: %v", err)
+	}
+}
+
+func TestLatestDoesNotClassifyNormalForbiddenAsRateLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`)
+	}))
+	defer server.Close()
+	_, err := (Client{APIBaseURL: server.URL, Repository: "test/boltgo"}).Latest(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || strings.Contains(strings.ToLower(err.Error()), "rate limit exceeded") {
+		t.Fatalf("unexpected forbidden error: %v", err)
+	}
+}
+
+func TestLatestHandlesNotFoundMalformedAndNetworkErrors(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		http func(http.ResponseWriter)
+		want string
+	}{
+		{name: "not found", http: func(w http.ResponseWriter) { http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound) }, want: "HTTP 404"},
+		{name: "malformed", http: func(w http.ResponseWriter) { fmt.Fprint(w, `{`) }, want: "decode latest release"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { test.http(w) }))
+			defer server.Close()
+			_, err := (Client{APIBaseURL: server.URL, Repository: "test/boltgo"}).Latest(context.Background())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	serverURL := server.URL
+	server.Close()
+	_, err := (Client{APIBaseURL: serverURL, Repository: "test/boltgo"}).Latest(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "fetch latest release") {
+		t.Fatalf("network error=%v", err)
+	}
+}
+
 func TestUpgradeVerifiesChecksumAndAtomicallyReplacesBinary(t *testing.T) {
 	t.Parallel()
 	old := []byte("old bolt binary")
