@@ -140,6 +140,27 @@ func TestTodoToggleRelayoutsConversationWithoutChangingFixedFooter(t *testing.T)
 	}
 }
 
+func TestTodoToggleAppearsInFinalView(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	m = updated.(model)
+	view := m.View()
+	if !m.todosOpen || !m.todoOnSide(160) {
+		t.Fatal("Ctrl+T did not enable the side todo panel")
+	}
+	if !strings.Contains(view, "Todos") || !strings.Contains(view, "(no todos)") {
+		t.Fatalf("final view omitted empty todo panel: %q", view)
+	}
+	if strings.Index(view, "Todos") > strings.Index(view, "Bolt |") {
+		t.Fatal("todo panel was composed below the fixed footer")
+	}
+	if m.vp.Width <= 0 || m.conversationWidth(160) <= 0 {
+		t.Fatal("todo layout produced a zero-width conversation")
+	}
+}
+
 func TestThemeChangeRebuildsVisibleStylesWithoutResettingState(t *testing.T) {
 	previous := lipgloss.ColorProfile()
 	defer lipgloss.SetColorProfile(previous)
@@ -166,6 +187,33 @@ func TestThemeChangeRebuildsVisibleStylesWithoutResettingState(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
 	if updated.(model).themeName != "dark" {
 		t.Fatal("theme did not cycle back to dark")
+	}
+}
+
+func TestInputUsesOnePromptMarker(t *testing.T) {
+	m := testModel(t)
+	m.width = 100
+	m.height = 30
+	m.relayout()
+	empty := m.ta.View()
+	if got := strings.Count(empty, "❯"); got != 1 {
+		t.Fatalf("empty input rendered %d prompt markers, want 1: %q", got, empty)
+	}
+	m.ta.SetValue("single line")
+	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+		t.Fatalf("single-line input rendered %d prompt markers, want 1", got)
+	}
+	m.ta.SetValue("first\nsecond")
+	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+		t.Fatalf("multiline input rendered %d prompt markers, want 1", got)
+	}
+	m.ta.SetValue(strings.Repeat("wrapped input ", 30))
+	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+		t.Fatalf("wrapped input rendered %d prompt markers, want 1", got)
+	}
+	m.ta.Reset()
+	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+		t.Fatalf("reset input rendered %d prompt markers, want 1", got)
 	}
 }
 

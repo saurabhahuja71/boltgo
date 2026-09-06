@@ -208,6 +208,15 @@ func New(deps Deps) model {
 	ta.Placeholder = "Message…  /help  /model  /quiet  /verbose"
 	ta.Focus()
 	ta.Prompt = "❯ "
+	// Bubbles renders a prompt for every physical and wrapped row by default.
+	// Keep the Bolt gutter on the first row only; continuation rows retain the
+	// prompt width without repeating the marker.
+	ta.SetPromptFunc(2, func(line int) string {
+		if line == 0 {
+			return "❯ "
+		}
+		return "  "
+	})
 	ta.CharLimit = 0
 	ta.SetHeight(3)
 	ta.ShowLineNumbers = false
