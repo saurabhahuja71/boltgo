@@ -50,7 +50,9 @@ download_release() {
   fi
   tmp="$(mktemp)"
   echo "Downloading ${url}"
-  code="$(curl -fsSL -o "$tmp" -w '%{http_code}' "$url" || true)"
+  # Keep the release download visible for interactive installs. Progress is
+  # written to stderr, so the script remains safe to pipe into bash.
+  code="$(curl -fL --progress-bar -o "$tmp" -w '%{http_code}' "$url" || true)"
   if [[ "$code" != "200" ]]; then
     rm -f "$tmp"
     echo "Release download failed (HTTP ${code:-error}) for ${asset}" >&2
