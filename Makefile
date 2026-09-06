@@ -1,4 +1,4 @@
-VERSION ?= 1.1.21
+VERSION ?= 1.1.22
 BINARY  := bolt
 MODULE  := ./cmd/agenterm
 LDFLAGS := -s -w -X main.version=$(VERSION)

@@ -272,6 +272,19 @@ func (m *model) relayout() {
 	m.renderer = newGlamourRenderer(max(40, m.messageWidth()), m.themeName)
 }
 
+func (m *model) syncLayout() bool {
+	if m.width <= 0 || m.height <= 0 {
+		return false
+	}
+	l := m.layoutFor(m.width, m.height)
+	changed := m.vp.Width != l.conversationWidth || m.vp.Height != l.conversationHeight ||
+		m.ta.Width() != max(20, m.width-2) || m.ta.Height() != l.inputHeight
+	if changed {
+		m.relayout()
+	}
+	return changed
+}
+
 func New(deps Deps) model {
 	ta := textarea.New()
 	ta.Placeholder = "Message…"
@@ -471,6 +484,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cleaned := scrubTerminalGarbage(v); cleaned != v {
 				m.ta.SetValue(cleaned)
 				m.ta.CursorEnd()
+				if m.syncLayout() {
+					m.refreshViewport()
+				}
 			}
 		}
 		// Limited startup retries — OSC replies can arrive a few frames late.
@@ -668,9 +684,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.modelPick == nil {
+		oldViewportWidth, oldViewportHeight := m.vp.Width, m.vp.Height
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
+		if m.syncLayout() || m.vp.Width != oldViewportWidth || m.vp.Height != oldViewportHeight {
+			m.refreshViewport()
+		}
 		// Drop OSC / color-query junk if it landed as "typed" characters.
 		if v := m.ta.Value(); v != "" {
 			if looksLikeTerminalGarbage(v) {

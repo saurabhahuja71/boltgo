@@ -259,6 +259,69 @@ func TestRepeatedUpdatesKeepFixedUIInOneFinalFrame(t *testing.T) {
 	}
 }
 
+func fixedRegionCounts(view string) (header, status, input, footer int) {
+	for _, line := range strings.Split(view, "\n") {
+		switch {
+		case strings.Contains(line, "Bolt · test · /help"):
+			header++
+		case strings.Contains(line, "Bolt · ASK ·"):
+			status++
+		case strings.Contains(line, "› Message…"):
+			input++
+		case strings.Contains(line, "Ctrl+Q quit"):
+			footer++
+		}
+	}
+	return
+}
+
+func TestViewNoDuplicateFixedRegionsAfterExecution(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(model)
+	assertFixedRegions := func(state string) {
+		header, status, input, footer := fixedRegionCounts(m.View())
+		if header != 1 || status != 1 || input != 1 || footer != 1 {
+			t.Fatalf("%s fixed regions: header=%d status=%d input=%d footer=%d\n%s", state, header, status, input, footer, m.View())
+		}
+		l := m.layoutFor(m.width, m.height)
+		fixed := l.headerHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight
+		if m.commandsOpen {
+			fixed += 10
+		}
+		if m.pendingApproval != nil {
+			fixed += 7
+		}
+		if got := m.vp.Height + fixed; got != m.height {
+			t.Fatalf("%s layout height=%d want=%d", state, got, m.height)
+		}
+	}
+
+	assertFixedRegions("initial")
+	m.busy = true
+	m.status = "streaming…"
+	assertFixedRegions("running")
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: "reading"})
+	assertFixedRegions("streaming")
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToolStart, Tool: "read_file", Text: `{"path":"main.py"}`})
+	assertFixedRegions("tool-running")
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToolEnd, Tool: "read_file", ToolOut: "ok"})
+	assertFixedRegions("tool-complete")
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventDone})
+	assertFixedRegions("done")
+	updatedModel, _ := m.Update(streamClosedMsg{})
+	m = updatedModel.(model)
+	assertFixedRegions("ready")
+
+	for _, event := range []agent.Event{
+		{Kind: agent.EventError, Text: "failed"},
+		{Kind: agent.EventPermission, Permission: &permissions.Request{Tool: "read_file"}},
+	} {
+		m, _ = m.applyStreamEvent(event)
+		assertFixedRegions("error-or-permission")
+	}
+}
+
 func TestTodoPanelCollapsesWhenNarrow(t *testing.T) {
 	m := testModel(t)
 	m.todosOpen = true
