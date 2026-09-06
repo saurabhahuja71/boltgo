@@ -159,6 +159,11 @@ func TestThemeChangeRebuildsVisibleStylesWithoutResettingState(t *testing.T) {
 		t.Fatal("theme change reset todo or conversation state")
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = updated.(model)
+	if m.themeName != "light" || m.View() == after {
+		t.Fatalf("theme did not switch to light with new rendering: state=%q", m.themeName)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
 	if updated.(model).themeName != "dark" {
 		t.Fatal("theme did not cycle back to dark")
 	}

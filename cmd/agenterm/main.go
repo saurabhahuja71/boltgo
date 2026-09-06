@@ -22,7 +22,7 @@ import (
 var (
 	// Release builds override this with -X main.version. Keep local/source
 	// builds aligned with the current published Bolt baseline as well.
-	version       = "1.1.3"
+	version       = "1.1.5"
 	flagProvider  string
 	flagModel     string
 	flagBaseURL   string

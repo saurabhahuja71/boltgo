@@ -200,7 +200,7 @@ func (m *model) relayout() {
 	m.vp.Width = m.conversationWidth(m.width)
 	m.vp.Height = vpH
 	m.ta.SetWidth(max(20, m.width-4))
-	m.renderer = newGlamourRenderer(max(40, m.vp.Width-6))
+	m.renderer = newGlamourRenderer(max(40, m.vp.Width-6), m.themeName)
 }
 
 func New(deps Deps) model {
@@ -255,7 +255,7 @@ func New(deps Deps) model {
 
 	// Fixed dark style — WithAutoStyle() queries OSC 11 (bg color) and the
 	// reply often appears as garbage in the input line on first launch.
-	r := newGlamourRenderer(80)
+	r := newGlamourRenderer(80, "dark")
 
 	m := model{
 		deps:            deps,
@@ -299,13 +299,17 @@ func scrubInputCmd() tea.Cmd {
 	return func() tea.Msg { return scrubInputMsg{} }
 }
 
-func newGlamourRenderer(width int) *glamour.TermRenderer {
+func newGlamourRenderer(width int, theme string) *glamour.TermRenderer {
 	if width < 20 {
 		width = 80
 	}
-	// Prefer explicit dark theme over AutoStyle (no TTY color probes).
+	style := "dark"
+	if theme == "light" {
+		style = "light"
+	}
+	// Prefer explicit styles over AutoStyle (no TTY color probes).
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStandardStyle(style),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
@@ -452,13 +456,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.relayout()
 			return m, nil
 		case "ctrl+b":
-			if m.themeName == "dark" {
+			switch m.themeName {
+			case "dark":
 				m.themeName = "black"
-			} else {
+			case "black":
+				m.themeName = "light"
+			default:
 				m.themeName = "dark"
 			}
 			applyTheme(m.themeName)
 			applyTextareaTheme(&m.ta, m.themeName)
+			m.renderer = newGlamourRenderer(max(40, m.vp.Width-6), m.themeName)
+			for i := range m.lines {
+				m.lines[i].mdCache = ""
+				m.lines[i].mdSrc = ""
+			}
+			m.refreshViewport()
 			m.status = "theme: " + m.themeName
 			return m, nil
 		case "enter":
@@ -2022,6 +2035,17 @@ func applyTheme(name string) {
 		bgUser = lipgloss.AdaptiveColor{Light: "#dbeafe", Dark: "#111827"}
 		bgAsst = lipgloss.AdaptiveColor{Light: "#f8fafc", Dark: "#020617"}
 		fgBody = lipgloss.AdaptiveColor{Light: "#0f172a", Dark: "#f8fafc"}
+	} else if name == "light" {
+		colorMuted = lipgloss.Color("#475569")
+		colorAccent = lipgloss.Color("#0369a1")
+		colorUser = lipgloss.Color("#6d28d9")
+		colorAsst = lipgloss.Color("#15803d")
+		colorTool = lipgloss.Color("#a16207")
+		colorError = lipgloss.Color("#b91c1c")
+		colorBorder = lipgloss.Color("#cbd5e1")
+		bgUser = lipgloss.AdaptiveColor{Light: "#e0e7ff", Dark: "#e0e7ff"}
+		bgAsst = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#ffffff"}
+		fgBody = lipgloss.AdaptiveColor{Light: "#0f172a", Dark: "#0f172a"}
 	} else {
 		colorMuted = lipgloss.Color("#94a3b8")
 		colorAccent = lipgloss.Color("#38bdf8")
@@ -2056,6 +2080,8 @@ func applyTextareaTheme(ta *textarea.Model, name string) {
 	cursor := lipgloss.NewStyle().Foreground(colorAccent)
 	if name == "black" {
 		base = base.Background(lipgloss.Color("#020617"))
+	} else if name == "light" {
+		base = base.Background(lipgloss.Color("#ffffff"))
 	}
 	for _, style := range []*textarea.Style{&ta.FocusedStyle, &ta.BlurredStyle} {
 		style.Base = base
