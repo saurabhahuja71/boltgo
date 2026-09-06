@@ -1,6 +1,20 @@
 package agent
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/saurabhahuja71/agenterm/internal/config"
+	"github.com/saurabhahuja71/agenterm/internal/llm"
+	"github.com/saurabhahuja71/agenterm/internal/tools"
+)
 
 func TestIsActionRequest(t *testing.T) {
 	yes := []string{"can you do it", "do it", "apply the changes", "please implement it", "create a branch and commit"}
@@ -107,5 +121,92 @@ func TestRecoverShellishToGrep(t *testing.T) {
 	}
 	if rest != "" {
 		t.Fatalf("rest should be empty, got %q", rest)
+	}
+}
+
+type recordingTool struct {
+	mu   sync.Mutex
+	args []string
+}
+
+func (r *recordingTool) Name() string        { return "read_file" }
+func (r *recordingTool) Description() string { return "test reader" }
+func (r *recordingTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "required": []string{"path"}}
+}
+func (r *recordingTool) Run(_ context.Context, args string) (string, error) {
+	r.mu.Lock()
+	r.args = append(r.args, args)
+	r.mu.Unlock()
+	var in struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(args), &in); err != nil {
+		return "", err
+	}
+	if in.Path == "database.py" {
+		return "", fmt.Errorf("synthetic failure")
+	}
+	return "contents of " + in.Path, nil
+}
+
+func TestReviewCurrentProjectDispatchesIndependentToolCalls(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			frame := strings.ReplaceAll(`data: {"choices":[{"delta":{"tool_calls":[{"id":"A","index":0,"function":{"name":"read_file","arguments":"{\"path\":\"main.py\"}"}},{"id":"B","index":1,"function":{"name":"read_file","arguments":"{\"path\":\"database.py\"}"}},{"id":"C","index":2,"function":{"name":"read_file","arguments":"{\"path\":\"requirements.txt\"}"}}]}}]}\n\ndata: [DONE]\n\n`, `\n`, "\n")
+			_, _ = w.Write([]byte(frame))
+			return
+		}
+		frame := strings.ReplaceAll(`data: {"choices":[{"delta":{"content":"done"}}]}\n\ndata: [DONE]\n\n`, `\n`, "\n")
+		_, _ = w.Write([]byte(frame))
+	}))
+	defer server.Close()
+
+	workspace, err := os.MkdirTemp("", "agenterm-dispatch-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workspace)
+	recorder := &recordingTool{}
+	registry := tools.NewRegistry()
+	registry.Register(recorder)
+	cfg := config.Default()
+	cfg.BaseURL = server.URL
+	cfg.Model = "test"
+	cfg.Workspace = workspace
+	cfg.PermissionMode = "allow"
+	agent := New(cfg, nil, registry)
+	// New receives a client separately in production; use the test server client.
+	agent.Client = llm.New(server.URL, "")
+	var events []Event
+	if err := agent.RunUserMessage(context.Background(), "review current project", func(e Event) {
+		events = append(events, e)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder.mu.Lock()
+	got := append([]string(nil), recorder.args...)
+	recorder.mu.Unlock()
+	want := []string{`{"path":"main.py"}`, `{"path":"database.py"}`, `{"path":"requirements.txt"}`}
+	if len(got) != len(want) {
+		t.Fatalf("dispatch count=%d args=%v", len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("dispatch %d args=%q want %q", i, got[i], want[i])
+		}
+	}
+	toolEnds := 0
+	for _, e := range events {
+		if e.Kind == EventToolEnd {
+			toolEnds++
+		}
+	}
+	if toolEnds != 3 {
+		t.Fatalf("want one independent completion per call, got %d", toolEnds)
 	}
 }

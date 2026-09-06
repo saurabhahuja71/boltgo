@@ -73,7 +73,10 @@ type Usage struct {
 }
 
 type ToolCall struct {
-	ID       string       `json:"id"`
+	ID string `json:"id"`
+	// Index identifies a call when a provider omits its ID on continuation
+	// chunks. A pointer distinguishes an omitted index from index zero.
+	Index    *int         `json:"index,omitempty"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`
 }
@@ -85,6 +88,7 @@ type ToolCall struct {
 func (t *ToolCall) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		ID         string          `json:"id"`
+		Index      *int            `json:"index"`
 		Type       string          `json:"type"`
 		Function   json.RawMessage `json:"function"`
 		Name       string          `json:"name"`
@@ -97,7 +101,7 @@ func (t *ToolCall) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	t.ID, t.Type = raw.ID, raw.Type
+	t.ID, t.Index, t.Type = raw.ID, raw.Index, raw.Type
 	if len(raw.Function) > 0 && string(raw.Function) != "null" {
 		if err := json.Unmarshal(raw.Function, &t.Function); err != nil {
 			return err
@@ -316,8 +320,13 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 	}
 
 	msg := Message{Role: RoleAssistant}
-	// Accumulate tool call fragments by index
-	toolAcc := map[int]*ToolCall{}
+	// Accumulate each call independently. Providers commonly omit IDs on
+	// continuation chunks, so the index is retained in ToolCall and used as a
+	// second identity. The order slice is only a fallback for providers that
+	// omit both fields (which is unambiguous when there is one call, or when a
+	// response repeats the same positional list).
+	toolAcc := map[string]*ToolCall{}
+	toolOrder := []string{}
 	gotToken := false
 
 	sc := bufio.NewScanner(resp.Body)
@@ -372,32 +381,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 				}
 			}
 			for i, tc := range m.ToolCalls {
-				idx := i
-				var raw map[string]any
-				b, _ := json.Marshal(tc)
-				_ = json.Unmarshal(b, &raw)
-				if v, ok := raw["index"].(float64); ok {
-					idx = int(v)
-				}
-				acc, ok := toolAcc[idx]
-				if !ok {
-					acc = &ToolCall{Type: "function"}
-					toolAcc[idx] = acc
-				}
-				if tc.ID != "" {
-					acc.ID = tc.ID
-				}
-				if tc.Type != "" {
-					acc.Type = tc.Type
-				}
-				if tc.Function.Name != "" {
-					acc.Function.Name = tc.Function.Name
-				}
-				if tc.Function.Arguments != "" {
-					acc.Function.Arguments = mergeToolArgument(acc.Function.Arguments, tc.Function.Arguments)
-				}
+				acc := accumulateToolCall(toolAcc, &toolOrder, i, tc)
 				if h != nil {
-					h.OnToolCallDelta(idx, *acc)
+					h.OnToolCallDelta(toolCallIndex(acc, i), *acc)
 				}
 			}
 			continue
@@ -413,38 +399,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 			}
 		}
 		for i, tc := range delta.ToolCalls {
-			// OpenAI streams tool_calls with index field sometimes; use loop index if missing
-			idx := i
-			// try parse index from raw — many servers put "index" on tool call object
-			var raw map[string]any
-			b, _ := json.Marshal(tc)
-			_ = json.Unmarshal(b, &raw)
-			if v, ok := raw["index"].(float64); ok {
-				idx = int(v)
-			}
-			acc, ok := toolAcc[idx]
-			if !ok {
-				acc = &ToolCall{Type: "function"}
-				toolAcc[idx] = acc
-			}
-			if tc.ID != "" {
-				acc.ID = tc.ID
-			}
-			if tc.Type != "" {
-				acc.Type = tc.Type
-			}
-			if tc.Function.Name != "" {
-				// Names may arrive as fragments or as repeated full values.
-				acc.Function.Name = mergeToolArgument(acc.Function.Name, tc.Function.Name)
-			}
-			if tc.Function.Arguments != "" {
-				// Same as the full-message path: support both true deltas and
-				// proxies that re-send a cumulative arguments string each frame.
-				// Plain += duplicates cumulative JSON and drops a usable path.
-				acc.Function.Arguments = mergeToolArgument(acc.Function.Arguments, tc.Function.Arguments)
-			}
+			acc := accumulateToolCall(toolAcc, &toolOrder, i, tc)
 			if h != nil {
-				h.OnToolCallDelta(idx, *acc)
+				h.OnToolCallDelta(toolCallIndex(acc, i), *acc)
 			}
 		}
 	}
@@ -454,14 +411,8 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 
 	if len(toolAcc) > 0 {
 		// stable order by index
-		max := -1
-		for i := range toolAcc {
-			if i > max {
-				max = i
-			}
-		}
-		for i := 0; i <= max; i++ {
-			if tc, ok := toolAcc[i]; ok {
+		for i, key := range toolOrder {
+			if tc := toolAcc[key]; tc != nil {
 				if tc.ID == "" {
 					tc.ID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
 				}
@@ -473,6 +424,72 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		}
 	}
 	return msg, nil
+}
+
+func toolCallIndex(tc *ToolCall, fallback int) int {
+	if tc != nil && tc.Index != nil {
+		return *tc.Index
+	}
+	return fallback
+}
+
+// accumulateToolCall merges one provider delta into exactly one call state.
+// ID and index are both accepted because OpenAI-compatible providers often
+// send the ID only on the first chunk and the index on later chunks.
+func accumulateToolCall(calls map[string]*ToolCall, order *[]string, position int, delta ToolCall) *ToolCall {
+	key := ""
+	if delta.ID != "" {
+		key = "id:" + delta.ID
+		if calls[key] == nil && delta.Index != nil {
+			key = findToolCallByIndex(calls, *delta.Index)
+		}
+	}
+	if key == "" && delta.Index != nil {
+		key = findToolCallByIndex(calls, *delta.Index)
+		if key == "" {
+			key = fmt.Sprintf("index:%d", *delta.Index)
+		}
+	}
+	if key == "" && position < len(*order) {
+		key = (*order)[position]
+	}
+	if key == "" {
+		key = fmt.Sprintf("anonymous:%d", len(*order))
+		*order = append(*order, key)
+	}
+	acc := calls[key]
+	if acc == nil {
+		acc = &ToolCall{Type: "function", Index: delta.Index}
+		calls[key] = acc
+		if len(*order) == 0 || (*order)[len(*order)-1] != key {
+			*order = append(*order, key)
+		}
+	}
+	if delta.ID != "" {
+		acc.ID = delta.ID
+	}
+	if delta.Index != nil {
+		acc.Index = delta.Index
+	}
+	if delta.Type != "" {
+		acc.Type = delta.Type
+	}
+	if delta.Function.Name != "" {
+		acc.Function.Name = mergeToolArgument(acc.Function.Name, delta.Function.Name)
+	}
+	if delta.Function.Arguments != "" {
+		acc.Function.Arguments = mergeToolArgument(acc.Function.Arguments, delta.Function.Arguments)
+	}
+	return acc
+}
+
+func findToolCallByIndex(calls map[string]*ToolCall, index int) string {
+	for key, call := range calls {
+		if call.Index != nil && *call.Index == index {
+			return key
+		}
+	}
+	return ""
 }
 
 // mergeToolArgument handles both delta fragments and proxies that emit a

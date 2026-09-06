@@ -158,3 +158,57 @@ func TestChatStreamMergesCumulativeDeltaArgumentsWithoutDuplication(t *testing.T
 		t.Fatalf("cumulative delta args duplicated or lost: %q", message.ToolCalls[0].Function.Arguments)
 	}
 }
+
+func TestChatStreamKeepsMultipleToolCallsIndependentByID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		frames := []string{
+			`{"choices":[{"delta":{"tool_calls":[{"id":"A","index":0,"function":{"name":"read_file","arguments":"{\"pa"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"id":"B","index":1,"function":{"name":"read_file","arguments":"{\"path\":\"database.py\"}"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"id":"A","index":0,"function":{"arguments":"th\":\"main.py\"}"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"id":"C","index":2,"function":{"name":"read_file","arguments":"{\"path\":\"requirements.txt\"}"}}]}}]}`,
+		}
+		for _, frame := range frames {
+			_, _ = w.Write([]byte("data: " + frame + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	message, err := client.ChatStream(context.Background(), ChatRequest{Model: "test"}, testStreamHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 3 {
+		t.Fatalf("want three calls, got %+v", message.ToolCalls)
+	}
+	want := []string{`{"path":"main.py"}`, `{"path":"database.py"}`, `{"path":"requirements.txt"}`}
+	for i, call := range message.ToolCalls {
+		if call.Function.Name != "read_file" || call.Function.Arguments != want[i] {
+			t.Fatalf("call %d = %+v, want read_file(%s)", i, call, want[i])
+		}
+	}
+}
+
+func TestChatStreamUsesIndexesWhenIDsAreOmitted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		frames := []string{
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file","arguments":"{\"pa"}},{"index":1,"function":{"name":"read_file","arguments":"{\"pa"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a\"}"}},{"index":1,"function":{"arguments":"th\":\"b\"}"}}]}}]}`,
+		}
+		for _, frame := range frames {
+			_, _ = w.Write([]byte("data: " + frame + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	message, err := client.ChatStream(context.Background(), ChatRequest{Model: "test"}, testStreamHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 2 || message.ToolCalls[0].Function.Arguments != `{"path":"a"}` || message.ToolCalls[1].Function.Arguments != `{"path":"b"}` {
+		t.Fatalf("indexed calls were merged: %+v", message.ToolCalls)
+	}
+}

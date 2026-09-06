@@ -629,11 +629,6 @@ func sanitizeToolArgsJSON(name, args string) string {
 	if args == "" || args == "null" {
 		return "{}"
 	}
-	// Cumulative stream bugs can concatenate two JSON objects. Prefer the first
-	// complete object that still yields a usable path for file tools.
-	if repaired := repairConcatenatedJSONObjects(args); repaired != args {
-		args = repaired
-	}
 	// Already an object. Provider adapters sometimes wrap arguments one more
 	// time (arguments/parameters/args), or call the required read_file field
 	// file_path. Normalize those shapes before dispatch; do not invent a path
@@ -746,49 +741,6 @@ func normalizePathObjectArgs(args string) (string, bool) {
 		}
 	}
 	return args, false
-}
-
-// repairConcatenatedJSONObjects recovers from duplicated cumulative argument
-// frames (`{...}{...}`). Prefer the first valid object; if it lacks a path and
-// a later object has one, use the later object.
-func repairConcatenatedJSONObjects(args string) string {
-	if !strings.Contains(args, "}{") {
-		return args
-	}
-	parts := strings.Split(args, "}{")
-	if len(parts) < 2 {
-		return args
-	}
-	var candidates []string
-	for i, part := range parts {
-		switch {
-		case i == 0:
-			part = part + "}"
-		case i == len(parts)-1:
-			part = "{" + part
-		default:
-			part = "{" + part + "}"
-		}
-		if json.Valid([]byte(part)) {
-			candidates = append(candidates, part)
-		}
-	}
-	if len(candidates) == 0 {
-		return args
-	}
-	for _, c := range candidates {
-		var object map[string]json.RawMessage
-		if json.Unmarshal([]byte(c), &object) != nil {
-			continue
-		}
-		for _, key := range pathAliasKeys() {
-			var path string
-			if raw, ok := object[key]; ok && json.Unmarshal(raw, &path) == nil && strings.TrimSpace(path) != "" {
-				return c
-			}
-		}
-	}
-	return candidates[0]
 }
 
 // isTrivialChat is true for short greetings / small-talk that should not
