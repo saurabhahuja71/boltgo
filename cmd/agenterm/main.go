@@ -22,7 +22,7 @@ import (
 var (
 	// Release builds override this with -X main.version. Keep local/source
 	// builds aligned with the current published Bolt baseline as well.
-	version        = "1.1.20"
+	version        = "1.1.21"
 	upgradeTimeout = 10 * time.Minute
 	flagProvider   string
 	flagModel      string
@@ -303,7 +303,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		_ = os.Setenv("AGENTERM_CONFIG", flagConfig)
 	}
 
-	cfg, path, err := config.Load()
+	cfg, _, err := config.Load()
 	if err != nil {
 		return err
 	}
@@ -395,9 +395,6 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "  resumed session %s\n", sessionPath)
 		}
 	}
-
-	fmt.Fprintf(os.Stderr, "agenterm %s  config=%s\n", version, path)
-	fmt.Fprintf(os.Stderr, "  %s\n", eff.Summary())
 
 	return tui.Run(tui.Deps{
 		Title:       "Bolt",

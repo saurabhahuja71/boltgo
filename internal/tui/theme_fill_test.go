@@ -52,8 +52,8 @@ func TestContentMaxWidthCapsReadableConversation(t *testing.T) {
 	if m.messageWidth() > 130 {
 		t.Fatalf("messageWidth=%d exceeds readable cap", m.messageWidth())
 	}
-	if m.vp.Width >= 180 {
-		t.Fatalf("viewport should leave quiet margin, got width=%d", m.vp.Width)
+	if m.vp.Width != 180 {
+		t.Fatalf("viewport should use remaining conversation width, got width=%d", m.vp.Width)
 	}
 }
 
@@ -84,13 +84,13 @@ func TestViewHasNoInputBorderBox(t *testing.T) {
 	plain := ansiSeq.ReplaceAllString(view, "")
 	lines := strings.Split(plain, "\n")
 	for _, line := range lines {
-		if strings.Contains(line, "❯") || strings.Contains(strings.ToLower(line), "message") {
-			if strings.Contains(line, "╭") || strings.Contains(line, "╰") || strings.Contains(line, "│ ❯") {
+		if strings.Contains(line, "›") || strings.Contains(strings.ToLower(line), "message") {
+			if strings.Contains(line, "╭") || strings.Contains(line, "╰") || strings.Contains(line, "│ ›") {
 				t.Fatalf("input still appears boxed: %q", line)
 			}
 		}
 	}
-	if got := strings.Count(view, "❯"); got != 1 {
+	if got := strings.Count(view, "›"); got != 1 {
 		t.Fatalf("prompt markers=%d", got)
 	}
 }
@@ -191,7 +191,7 @@ func TestInputLightThemeUsesLightFaces(t *testing.T) {
 	if !strings.Contains(view, "48;2;255;255;255") {
 		t.Fatalf("textarea missing light background face: %q", view)
 	}
-	if got := strings.Count(view, "❯"); got != 1 {
+	if got := strings.Count(view, "›"); got != 1 {
 		t.Fatalf("prompt markers=%d", got)
 	}
 }

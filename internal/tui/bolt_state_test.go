@@ -127,7 +127,7 @@ func TestWindowSizeKeepsFixedRegionsUsable(t *testing.T) {
 	m := testModel(t)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 36})
 	m = updated.(model)
-	if m.vp.Width != 99 || m.vp.Height < 5 || m.ta.Width() < 20 {
+	if m.vp.Width != 100 || m.vp.Height < 5 || m.ta.Width() < 20 {
 		t.Fatalf("resize dimensions: viewport=%dx%d input=%d", m.vp.Width, m.vp.Height, m.ta.Width())
 	}
 	view := m.View()
@@ -143,11 +143,11 @@ func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
 	m.todosOpen = true
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
 	m = updated.(model)
-	if !m.todoOnSide(120) || m.vp.Width != 88 {
+	if !m.todoOnSide(120) || m.vp.Width != 90 {
 		t.Fatalf("todo side layout not applied: side=%v viewport=%d", m.todoOnSide(120), m.vp.Width)
 	}
 	view := m.View()
-	if strings.Index(view, "Todos") < 0 || strings.Index(view, "Todos") > strings.Index(view, "Bolt ·") {
+	if strings.Index(view, "Todos") < 0 || strings.Index(view, "Todos") > strings.LastIndex(view, "Bolt ·") {
 		t.Fatalf("todo panel was not rendered beside conversation before fixed footer")
 	}
 	if m.vp.Height < 20 {
@@ -156,6 +156,47 @@ func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
 	if got := lipgloss.Height(renderTodoPanel(todoSideWidth(120), m.vp.Height)); got != m.vp.Height {
 		t.Fatalf("side todo panel did not fill content height: got=%d want=%d", got, m.vp.Height)
 	}
+}
+
+func TestResponsiveLayoutAtSupportedTerminalSizes(t *testing.T) {
+	for _, tc := range []struct {
+		width, height, todo, conversation int
+	}{
+		{80, 24, 0, 80},
+		{100, 30, 24, 76},
+		{120, 40, 30, 90},
+		{160, 40, 30, 130},
+		{200, 50, 30, 170},
+	} {
+		m := testModel(t)
+		m.todosOpen = true
+		l := m.layoutFor(tc.width, tc.height)
+		if l.todoWidth != tc.todo || l.conversationWidth != tc.conversation {
+			t.Fatalf("%dx%d columns: got conversation=%d todo=%d, want conversation=%d todo=%d", tc.width, tc.height, l.conversationWidth, l.todoWidth, tc.conversation, tc.todo)
+		}
+		if l.conversationHeight < 1 || l.inputHeight < 1 {
+			t.Fatalf("%dx%d produced invalid heights: conversation=%d input=%d", tc.width, tc.height, l.conversationHeight, l.inputHeight)
+		}
+		if got := l.headerHeight + l.conversationHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight; got != tc.height {
+			t.Fatalf("%dx%d rows do not fill terminal: got=%d want=%d", tc.width, tc.height, got, tc.height)
+		}
+	}
+}
+
+func TestEmptyTodoPanelRetainsRightDockColumn(t *testing.T) {
+	m := testModel(t)
+	m.todosOpen = true
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m = updated.(model)
+	for _, line := range strings.Split(m.View(), "\n") {
+		if strings.Contains(line, "┌──") {
+			if got := lipgloss.Width(line[:strings.Index(line, "┌")]); got != m.vp.Width {
+				t.Fatalf("empty todo panel starts at column %d, want conversation width %d", got, m.vp.Width)
+			}
+			return
+		}
+	}
+	t.Fatal("empty todo panel border was not rendered")
 }
 
 func TestTodoPanelIsPresentInFinalViewAtWideWidth(t *testing.T) {
@@ -170,7 +211,7 @@ func TestTodoPanelIsPresentInFinalViewAtWideWidth(t *testing.T) {
 	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final TUI view omitted the empty todo panel: %q", view)
 	}
-	if strings.Index(view, "Todos") >= strings.Index(view, "Bolt ·") {
+	if strings.Index(view, "Todos") >= strings.LastIndex(view, "Bolt ·") {
 		t.Fatal("todo panel was not composed above the fixed footer")
 	}
 }
@@ -207,27 +248,28 @@ func TestRepeatedUpdatesKeepFixedUIInOneFinalFrame(t *testing.T) {
 	} {
 		action()
 		view := m.View()
-		for _, marker := range []string{"Bolt ·", "📁 ", "Ctrl+Q", "Message…", "Todos"} {
+		for _, marker := range []string{"📁 ", "Ctrl+Q", "Message…", "Todos"} {
 			if got := strings.Count(view, marker); got != 1 {
 				t.Fatalf("final frame contains %d copies of %q: %q", got, marker, view)
 			}
 		}
+		if got := strings.Count(view, "Bolt ·"); got != 2 {
+			t.Fatalf("final frame contains %d Bolt rows, want header and status: %q", got, view)
+		}
 	}
 }
 
-func TestTodoPanelFallsBackAboveFooterWhenNarrow(t *testing.T) {
+func TestTodoPanelCollapsesWhenNarrow(t *testing.T) {
 	m := testModel(t)
 	m.todosOpen = true
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 36})
 	m = updated.(model)
-	if m.todoOnSide(80) || m.vp.Width != 79 {
-		t.Fatalf("narrow todo layout did not use vertical fallback: side=%v viewport=%d", m.todoOnSide(80), m.vp.Width)
+	if m.todoOnSide(80) || m.vp.Width != 80 {
+		t.Fatalf("narrow todo layout did not collapse: side=%v viewport=%d", m.todoOnSide(80), m.vp.Width)
 	}
 	view := m.View()
-	todoAt := strings.Index(view, "Todos")
-	statusAt := strings.Index(view, "Bolt ·")
-	if todoAt < 0 || statusAt < 0 || todoAt > statusAt {
-		t.Fatalf("narrow todo panel is not fixed above status/footer: todo=%d status=%d view=%q", todoAt, statusAt, view)
+	if strings.Contains(view, "No todos") {
+		t.Fatalf("narrow todo panel was not collapsed: %q", view)
 	}
 }
 
@@ -259,7 +301,7 @@ func TestTodoToggleAppearsInFinalView(t *testing.T) {
 	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final view omitted empty todo panel: %q", view)
 	}
-	if strings.Index(view, "Todos") > strings.Index(view, "Bolt ·") {
+	if strings.Index(view, "Todos") > strings.LastIndex(view, "Bolt ·") {
 		t.Fatal("todo panel was composed below the fixed footer")
 	}
 	if m.vp.Width <= 0 || m.conversationWidth(160) <= 0 {
@@ -434,23 +476,23 @@ func TestInputUsesOnePromptMarker(t *testing.T) {
 	m.height = 30
 	m.relayout()
 	empty := m.ta.View()
-	if got := strings.Count(empty, "❯"); got != 1 {
+	if got := strings.Count(empty, "›"); got != 1 {
 		t.Fatalf("empty input rendered %d prompt markers, want 1: %q", got, empty)
 	}
 	m.ta.SetValue("single line")
-	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+	if got := strings.Count(m.ta.View(), "›"); got != 1 {
 		t.Fatalf("single-line input rendered %d prompt markers, want 1", got)
 	}
 	m.ta.SetValue("first\nsecond")
-	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+	if got := strings.Count(m.ta.View(), "›"); got != 1 {
 		t.Fatalf("multiline input rendered %d prompt markers, want 1", got)
 	}
 	m.ta.SetValue(strings.Repeat("wrapped input ", 30))
-	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+	if got := strings.Count(m.ta.View(), "›"); got != 1 {
 		t.Fatalf("wrapped input rendered %d prompt markers, want 1", got)
 	}
 	m.ta.Reset()
-	if got := strings.Count(m.ta.View(), "❯"); got != 1 {
+	if got := strings.Count(m.ta.View(), "›"); got != 1 {
 		t.Fatalf("reset input rendered %d prompt markers, want 1", got)
 	}
 }

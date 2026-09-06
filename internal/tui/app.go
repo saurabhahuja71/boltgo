@@ -71,6 +71,18 @@ var (
 
 const todoSideThreshold = 90
 
+type tuiLayout struct {
+	width, height      int
+	headerHeight       int
+	conversationHeight int
+	statusHeight       int
+	inputHeight        int
+	workspaceHeight    int
+	footerHeight       int
+	todoWidth          int
+	conversationWidth  int
+}
+
 // contentMaxWidth caps readable conversation/prose width so wide terminals
 // keep quiet margins instead of stretching every message edge-to-edge.
 func contentMaxWidth(avail int) int {
@@ -94,7 +106,7 @@ func todoSideWidth(width int) int {
 		return 0
 	}
 	if width < 120 {
-		return 26
+		return 24
 	}
 	return 30
 }
@@ -104,12 +116,10 @@ func todoPanelHeight() int {
 }
 
 func (m model) conversationWidth(width int) int {
-	gutter := 1
-	avail := max(10, width-gutter)
 	if side := todoSideWidth(width); m.todosOpen && side > 0 {
-		return max(20, avail-side-1)
+		return max(20, width-side-1)
 	}
-	return max(20, avail)
+	return max(20, width)
 }
 
 func (m model) messageWidth() int {
@@ -118,6 +128,50 @@ func (m model) messageWidth() int {
 
 func (m model) todoOnSide(width int) bool {
 	return m.todosOpen && todoSideWidth(width) > 0
+}
+
+func inputHeightFor(ta textarea.Model, width int) int {
+	// Keep a one-line prompt compact, while allowing intentional multiline input
+	// to grow without stealing the whole terminal from the conversation.
+	lines := strings.Count(ta.Value(), "\n") + 1
+	if width > 0 {
+		promptWidth := lipgloss.Width(ta.Prompt)
+		for _, line := range strings.Split(ta.Value(), "\n") {
+			lines += max(0, (lipgloss.Width(line)+max(1, width-promptWidth)-1)/max(1, width-promptWidth)-1)
+		}
+	}
+	if lines < 1 {
+		lines = 1
+	}
+	return min(4, lines)
+}
+
+func (m model) layoutFor(width, height int) tuiLayout {
+	if width < 1 {
+		width = 80
+	}
+	if height < 1 {
+		height = 24
+	}
+	l := tuiLayout{
+		width: width, height: height,
+		headerHeight: 1, statusHeight: 1, workspaceHeight: 1, footerHeight: 1,
+		todoWidth: 0,
+	}
+	l.inputHeight = inputHeightFor(m.ta, max(1, width-2))
+	if m.todosOpen && todoSideWidth(width) > 0 {
+		l.todoWidth = todoSideWidth(width)
+	}
+	l.conversationWidth = max(1, width-l.todoWidth)
+	fixed := l.headerHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight
+	if m.commandsOpen {
+		fixed += 10
+	}
+	if m.pendingApproval != nil {
+		fixed += 7
+	}
+	l.conversationHeight = max(1, height-fixed)
+	return l
 }
 
 // Deps wired from main.
@@ -210,40 +264,25 @@ func (m *model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	helpH, cwdH, busyH := 1, 1, 0
-	// Borderless prompt: textarea height only (no box frame rows).
-	inputH := m.ta.Height()
-	fixedExtra := 1 // status
-	if m.todosOpen && !m.todoOnSide(m.width) {
-		fixedExtra += todoPanelHeight()
-	}
-	if m.commandsOpen {
-		fixedExtra += 10
-	}
-	if m.pendingApproval != nil {
-		fixedExtra += 7
-	}
-	vpH := m.height - helpH - cwdH - busyH - inputH - fixedExtra
-	if vpH < 5 {
-		vpH = 5
-	}
-	m.vp.Width = m.conversationWidth(m.width)
-	m.vp.Height = vpH
-	m.ta.SetWidth(max(20, contentMaxWidth(m.width-2)))
+	l := m.layoutFor(m.width, m.height)
+	m.vp.Width = l.conversationWidth
+	m.vp.Height = l.conversationHeight
+	m.ta.SetWidth(max(20, m.width-2))
+	m.ta.SetHeight(l.inputHeight)
 	m.renderer = newGlamourRenderer(max(40, m.messageWidth()), m.themeName)
 }
 
 func New(deps Deps) model {
 	ta := textarea.New()
-	ta.Placeholder = "Message…  /help  /model  /quiet  /verbose"
+	ta.Placeholder = "Message…"
 	ta.Focus()
-	ta.Prompt = "❯ "
+	ta.Prompt = "› "
 	// Bubbles renders a prompt for every physical and wrapped row by default.
 	// Keep the Bolt gutter on the first row only; continuation rows retain the
 	// prompt width without repeating the marker.
 	ta.SetPromptFunc(2, func(line int) string {
 		if line == 0 {
-			return "❯ "
+			return "› "
 		}
 		return "  "
 	})
@@ -312,10 +351,7 @@ func New(deps Deps) model {
 		visionSupported: false,
 		themeName:       "dark",
 		scrubLeft:       5, // a few startup passes to catch late OSC replies
-		lines: []chatLine{
-			// One short banner — path lives above the prompt; tools stay in the status bar.
-			{role: "system", text: deps.Summary + " · /help"},
-		},
+		lines:           nil,
 	}
 	// Re-apply after the model value is constructed so textarea's internal style
 	// pointer addresses this instance's FocusedStyle (see applyTextareaTheme).
@@ -2401,22 +2437,38 @@ func joinHorizontalThemed(bg lipgloss.TerminalColor, parts ...string) string {
 	return b.String()
 }
 
+func padBlock(s string, width, height int) string {
+	if width < 1 {
+		width = 1
+	}
+	lines := strings.Split(s, "\n")
+	if height > 0 {
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+	}
+	for i, line := range lines {
+		if gap := width - lipgloss.Width(line); gap > 0 {
+			lines[i] = line + strings.Repeat(" ", gap)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m model) View() string {
-	w := m.width
-	if w == 0 {
-		w = 80
-	}
-	// Conversation is content on the terminal background. Trim viewport's
-	// unstyled width pads, but do not paint a full-bleed rectangle behind every
-	// message row — quiet unused space is intentional.
+	l := m.layoutFor(m.width, m.height)
+	w := l.width
+	// The viewport and Todo panel are the only children of the scrolling-region
+	// row. Both receive dimensions from the same layout calculation, so the
+	// panel cannot drift into the fixed status/input/footer rows.
 	body := trimANSIHorizontalPadding(m.vp.View())
-	// Keep viewport height so the Todo side aligns; blank lines stay unfilled.
-	for lipgloss.Height(body) < m.vp.Height {
-		body += "\n"
-	}
-	if h := lipgloss.Height(body); h > m.vp.Height && m.vp.Height > 0 {
-		lines := strings.Split(body, "\n")
-		body = strings.Join(lines[:m.vp.Height], "\n")
+	body = padBlock(body, l.conversationWidth, l.conversationHeight)
+	if l.todoWidth > 0 {
+		todo := renderTodoPanel(l.todoWidth, l.conversationHeight)
+		body = joinHorizontalThemed(lipgloss.NoColor{}, body, todo)
 	}
 	status := m.status
 	if m.busy && (status == "ready" || status == "") {
@@ -2452,7 +2504,7 @@ func (m model) View() string {
 		tokens,
 		status,
 	)
-	statusLine := styleStatus.Render(statusText)
+	statusLine := styleStatus.Render(truncate(statusText, w))
 	helpText := "Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline"
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
 		helpText = "PLAN MODE · Ctrl+Q quit · Ctrl+R permission · Enter send · Shift+Enter newline"
@@ -2460,25 +2512,17 @@ func (m model) View() string {
 	if m.modelPick != nil {
 		helpText = "Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick"
 	}
-	help := styleHelp.Render(helpText)
+	help := styleHelp.Render(truncate(helpText, w))
 	workspace := m.deps.Workspace
 	if workspace == "" {
 		workspace = mustCwd()
 	}
-	cwdLine := styleHelp.Render("📁 " + displayCwdAt(workspace, max(20, contentMaxWidth(w)-4)))
+	cwdLine := styleHelp.Render(truncate("📁 "+displayCwdAt(workspace, max(20, w-4)), w))
 	// Prompt-like input: no rounded/boxed frame.
 	input := trimANSIHorizontalPadding(m.ta.View())
-	if m.todoOnSide(w) {
-		todo := renderTodoPanel(todoSideWidth(w), m.vp.Height)
-		divider := lipgloss.NewStyle().Foreground(colorBorder).Render("│")
-		body = lipgloss.JoinHorizontal(lipgloss.Top, body, divider, todo)
-	}
-	parts := []string{body}
-	if m.todosOpen && !m.todoOnSide(w) {
-		parts = append(parts, styleTodo.Width(max(10, contentMaxWidth(w))).Render(todoText()))
-	}
+	parts := []string{styleHeader.Render(truncate(m.deps.Title+" · "+m.deps.Summary+" · /help", w)), body}
 	parts = append(parts, statusLine)
-	dialogW := max(10, contentMaxWidth(w))
+	dialogW := max(10, w)
 	if m.pendingApproval != nil {
 		parts = append(parts, styleBox.Width(dialogW).Render(approvalText(m.pendingApproval)))
 	}
@@ -2524,6 +2568,13 @@ func spinnerFrame() string {
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
