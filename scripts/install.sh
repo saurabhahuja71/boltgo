@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install agenterm for end users (native binary; no container required).
+# Install Bolt for end users (native binary; no container required).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
@@ -37,7 +37,7 @@ esac
 ext=""
 [[ "$os" == windows ]] && ext=".exe"
 asset="agenterm-${os}-${arch}${ext}"
-dest="${INSTALL_DIR}/agenterm${ext}"
+dest="${INSTALL_DIR}/bolt${ext}"
 
 mkdir -p "$INSTALL_DIR"
 
@@ -104,6 +104,15 @@ if [[ "$installed" != "1" ]]; then
   exit 1
 fi
 
+# Keep the historical executable name while making Bolt the primary command.
+# Symlinks also preserve argv[0], so the launcher presets select bolt-s1/s2/s3.
+if [[ "$os" != "windows" ]]; then
+  for launcher in agenterm bolt-s1 bolt-s2 bolt-s3; do
+    ln -sfn "$(basename "$dest")" "${INSTALL_DIR}/${launcher}"
+  done
+  echo "Installed launchers: bolt, bolt-s1, bolt-s2, bolt-s3 (agenterm compatibility alias)"
+fi
+
 # PATH hint
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
@@ -129,7 +138,7 @@ if [[ "$SKIP_INIT" != "1" && "$SKIP_INIT" != "true" ]]; then
   else
     echo ""
     echo "Config already present: ${HOME}/.agenterm/config.toml"
-    echo "  Refresh defaults (tools/prompt fix):  agenterm init --force"
+    echo "  Refresh defaults (tools/prompt fix):  bolt init --force"
   fi
 fi
 
@@ -138,14 +147,14 @@ echo "Next steps:"
 echo "  1. Ensure a backend is reachable (local or SSH tunnel):"
 echo "       Ollama:  curl -s http://127.0.0.1:11434/v1/models | head"
 echo "       SGLang:  curl -s http://127.0.0.1:30000/v1/models | head"
-echo "  2. Ping agenterm:"
-echo "       agenterm --ping"
-echo "       agenterm --provider sglang --ping"
+echo "  2. Ping Bolt:"
+echo "       bolt --ping"
+echo "       bolt --provider sglang --ping"
 echo "  3. Chat:"
-echo "       agenterm"
-echo "       agenterm -m qwen2.5-coder:32b"
-echo "       agenterm --provider sglang"
-echo "       agenterm --no-tools          # pure chat, fastest replies"
+echo "       bolt"
+echo "       bolt -m qwen2.5-coder:32b"
+echo "       bolt --provider sglang"
+echo "       bolt --no-tools          # pure chat, fastest replies"
 echo "  4. In TUI (during chat, like Grok):"
 echo "       /help"
 echo "       /model                       # list models on the server"

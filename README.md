@@ -43,7 +43,7 @@ bolt  ──►  Ollama / SGLang / xAI / OpenAI  (POST /v1/chat/completions)
 curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
 ```
 
-Binary goes to `~/.local/bin/agenterm`. If the shell cannot find it:
+The primary binary goes to `~/.local/bin/bolt`; `agenterm` remains a compatibility alias, and `bolt-s1`, `bolt-s2`, and `bolt-s3` are installed alongside it. If the shell cannot find it:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -122,7 +122,7 @@ Not affiliated with xAI. “Grok-style” only means a snappy terminal agent UX.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
-agenterm --version   # compatibility installer name; source builds produce bolt
+bolt --version
 ```
 
 | Variable | Meaning |

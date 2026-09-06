@@ -75,8 +75,8 @@ jobs:
 
             ```bash
             curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
-            agenterm --version
-            agenterm
+            bolt --version
+            bolt
             ```
 
             Or download a specific asset from this release, e.g. `agenterm-linux-amd64`.
