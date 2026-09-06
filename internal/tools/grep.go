@@ -14,7 +14,7 @@ import (
 )
 
 // grepTool searches file contents (rg if available, else walk+regexp).
-type grepTool struct{}
+type grepTool struct{ Workspace string }
 
 func (grepTool) Name() string { return "grep" }
 func (grepTool) Description() string {
@@ -43,7 +43,7 @@ func (grepTool) Schema() map[string]any {
 	}
 }
 
-func (grepTool) Run(ctx context.Context, argsJSON string) (string, error) {
+func (g grepTool) Run(ctx context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Pattern         string `json:"pattern"`
 		Path            string `json:"path"`
@@ -57,6 +57,7 @@ func (grepTool) Run(ctx context.Context, argsJSON string) (string, error) {
 	if in.Path == "" {
 		in.Path = "."
 	}
+	in.Path = resolveWorkspacePath(g.Workspace, in.Path)
 	if in.MaxResults <= 0 {
 		in.MaxResults = 40
 	}

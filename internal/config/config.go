@@ -11,6 +11,11 @@ import (
 
 // Config is the user-facing agenterm settings file.
 type Config struct {
+	PermissionMode string `toml:"permission_mode"`
+	VisionEnabled  bool   `toml:"vision_enabled"`
+	// Workspace is the user project root used by all filesystem and process tools.
+	// It is intentionally independent from the directory containing the Bolt binary.
+	Workspace string `toml:"workspace"`
 	// Provider selects a named block under [providers.*], or "custom".
 	Provider string `toml:"provider"`
 
@@ -63,8 +68,8 @@ type Provider struct {
 
 // MCPServer describes how to attach an MCP tool server.
 type MCPServer struct {
-	Name    string   `toml:"name"`
-	Enabled bool     `toml:"enabled"`
+	Name    string `toml:"name"`
+	Enabled bool   `toml:"enabled"`
 	// URL for streamable HTTP, e.g. http://127.0.0.1:8080/mcp
 	URL string `toml:"url"`
 	// Command+Args for stdio transport (local process).
@@ -75,7 +80,10 @@ type MCPServer struct {
 // Default returns sensible local-Ollama defaults.
 func Default() Config {
 	return Config{
-		Provider:    "ollama-local",
+		PermissionMode: "ask",
+		VisionEnabled:  false,
+		Workspace:      "",
+		Provider:       "ollama-local",
 		// Best local default for Go + docs + tools (see docs/grok-parity-roadmap.md).
 		Model:       "qwen2.5-coder:32b",
 		BaseURL:     "http://127.0.0.1:11434/v1",
@@ -286,6 +294,9 @@ func applyProvider(c Config, p Provider) Config {
 }
 
 func applyEnv(c Config) Config {
+	if v := os.Getenv("BOLT_WORKSPACE"); v != "" {
+		c.Workspace = v
+	}
 	if v := os.Getenv("AGENTERM_PROVIDER"); v != "" {
 		c.Provider = v
 	}
@@ -330,7 +341,23 @@ func firstEnv(keys ...string) string {
 
 // Effective returns resolved runtime settings.
 func (c Config) Effective() Config {
-	return applyEnv(c).Resolve()
+	out := applyEnv(c).Resolve()
+	if out.PermissionMode == "" {
+		out.PermissionMode = "allow"
+	}
+	if v := os.Getenv("BOLT_PERMISSION_MODE"); v != "" {
+		out.PermissionMode = strings.ToLower(v)
+	}
+	if v := os.Getenv("BOLT_VISION"); v != "" {
+		out.VisionEnabled = strings.EqualFold(v, "1") || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
+	}
+	if strings.TrimSpace(out.Workspace) == "" {
+		out.Workspace, _ = os.Getwd()
+	}
+	if abs, err := filepath.Abs(out.Workspace); err == nil {
+		out.Workspace = abs
+	}
+	return out
 }
 
 // Summary is a one-line status for the TUI header.

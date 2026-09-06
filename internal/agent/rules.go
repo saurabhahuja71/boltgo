@@ -6,8 +6,9 @@ import (
 	"strings"
 )
 
-// loadProjectRules reads AGENTS.md, .agenterm/rules, CLAUDE.md (first found, capped).
-func loadProjectRules() string {
+// loadProjectRules reads workspace-local AGENTS.md, .agenterm/rules,
+// CLAUDE.md (first found, capped). It must not inspect the Bolt source/cwd.
+func loadProjectRules(workspace string) string {
 	candidates := []string{
 		"AGENTS.md",
 		".agenterm/rules",
@@ -16,8 +17,8 @@ func loadProjectRules() string {
 		".cursorrules",
 	}
 	// walk up from cwd a few levels for monorepos
-	cwd, err := os.Getwd()
-	if err != nil {
+	cwd, err := filepath.Abs(workspace)
+	if err != nil || cwd == "" {
 		return ""
 	}
 	dir := cwd
@@ -53,6 +54,10 @@ func findRepoRoot() string {
 	if err != nil {
 		return ""
 	}
+	return findRepoRootAt(cwd)
+}
+
+func findRepoRootAt(cwd string) string {
 	dir := cwd
 	for i := 0; i < 12; i++ {
 		if st, err := os.Stat(filepath.Join(dir, ".git")); err == nil && st.IsDir() {

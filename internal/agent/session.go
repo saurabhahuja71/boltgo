@@ -42,6 +42,83 @@ func (a *Agent) SaveSession(id string) (string, error) {
 		id = time.Now().Format("20060102-150405")
 	}
 	path := filepath.Join(dir, id+".json")
+	return a.saveSessionPath(path, id)
+}
+
+// SaveSessionPath persists to an explicit workspace-owned path.
+func (a *Agent) SaveSessionPath(path string) (string, error) {
+	return a.saveSessionPath(path, filepath.Base(path))
+}
+
+// WorkspaceSessionPath returns a session path confined to workspace/.bolt/sessions.
+// It rejects traversal, absolute IDs, and symlinked session directories that
+// resolve outside the selected workspace.
+func WorkspaceSessionPath(workspace, id string) (string, error) {
+	if strings.TrimSpace(workspace) == "" {
+		return "", fmt.Errorf("workspace required")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = "latest"
+	}
+	if filepath.Base(id) != id {
+		return "", fmt.Errorf("invalid session id")
+	}
+	id = strings.TrimSuffix(id, ".json")
+	if id == "" || id == "." || id == ".." {
+		return "", fmt.Errorf("invalid session id")
+	}
+	path := filepath.Join(workspace, ".bolt", "sessions", id+".json")
+	if err := ValidateWorkspaceSessionPath(workspace, path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// ValidateWorkspaceSessionPath detects an existing symlinked ancestor or
+// resolved target outside the selected workspace.
+func ValidateWorkspaceSessionPath(workspace, path string) error {
+	root, err := filepath.Abs(workspace)
+	if err != nil {
+		return err
+	}
+	target, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if rel, err := filepath.Rel(root, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("session path escapes workspace")
+	}
+	resolvedRoot := root
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		resolvedRoot = real
+	}
+	existing := target
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		existing = parent
+	}
+	resolvedExisting, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedExisting)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("session path resolves outside workspace")
+	}
+	return nil
+}
+
+func (a *Agent) saveSessionPath(path, id string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
 	type wire struct {
 		Meta     SessionMeta   `json:"meta"`
 		Messages []llm.Message `json:"messages"`
@@ -97,6 +174,25 @@ func (a *Agent) LoadSession(id string) error {
 			path = path + ".json"
 		}
 	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var w struct {
+		Messages []llm.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	if len(w.Messages) == 0 {
+		return fmt.Errorf("empty session")
+	}
+	a.History = w.Messages
+	return nil
+}
+
+// LoadSessionPath loads an explicit session file without consulting ~/.agenterm.
+func (a *Agent) LoadSessionPath(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err

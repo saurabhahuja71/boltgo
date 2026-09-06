@@ -69,7 +69,7 @@ func (r *Registry) Names() []string {
 
 // --- built-in tools ---
 
-type listDir struct{}
+type listDir struct{ Workspace string }
 
 func (listDir) Name() string { return "list_dir" }
 func (listDir) Description() string {
@@ -83,7 +83,7 @@ func (listDir) Schema() map[string]any {
 		},
 	}
 }
-func (listDir) Run(_ context.Context, argsJSON string) (string, error) {
+func (l listDir) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Path string `json:"path"`
 	}
@@ -91,7 +91,7 @@ func (listDir) Run(_ context.Context, argsJSON string) (string, error) {
 	if in.Path == "" {
 		in.Path = "."
 	}
-	entries, err := os.ReadDir(in.Path)
+	entries, err := os.ReadDir(resolveWorkspacePath(l.Workspace, in.Path))
 	if err != nil {
 		return "", err
 	}
@@ -106,7 +106,7 @@ func (listDir) Run(_ context.Context, argsJSON string) (string, error) {
 	return b.String(), nil
 }
 
-type readFile struct{}
+type readFile struct{ Workspace string }
 
 func (readFile) Name() string { return "read_file" }
 func (readFile) Description() string {
@@ -125,14 +125,14 @@ func (readFile) Schema() map[string]any {
 		},
 	}
 }
-func (readFile) Run(_ context.Context, argsJSON string) (string, error) {
+func (r readFile) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || in.Path == "" {
 		return "", fmt.Errorf("path required")
 	}
-	path, err := resolveExistingFile(in.Path)
+	path, err := resolveExistingFileIn(in.Path, r.Workspace)
 	if err != nil {
 		return "", err
 	}
@@ -151,7 +151,7 @@ func (readFile) Run(_ context.Context, argsJSON string) (string, error) {
 	return string(data), nil
 }
 
-type writeFile struct{}
+type writeFile struct{ Workspace string }
 
 func (writeFile) Name() string { return "write_file" }
 func (writeFile) Description() string {
@@ -167,7 +167,7 @@ func (writeFile) Schema() map[string]any {
 		},
 	}
 }
-func (writeFile) Run(_ context.Context, argsJSON string) (string, error) {
+func (w writeFile) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -179,23 +179,24 @@ func (writeFile) Run(_ context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("path required")
 	}
 	// Snapshot for /undo
-	prev, err := os.ReadFile(in.Path)
+	path := resolveWorkspacePath(w.Workspace, in.Path)
+	prev, err := os.ReadFile(path)
 	created := err != nil
 	if created {
 		prev = nil
 	}
-	if err := os.MkdirAll(filepath.Dir(in.Path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(in.Path, []byte(in.Content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(in.Content), 0o644); err != nil {
 		return "", err
 	}
-	PushUndo(in.Path, prev, created, "write_file")
-	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
+	PushUndo(path, prev, created, "write_file")
+	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), path), nil
 }
 
 // strReplace edits a file by replacing an exact old_string with new_string (once or all).
-type strReplace struct{}
+type strReplace struct{ Workspace string }
 
 func (strReplace) Name() string { return "str_replace" }
 func (strReplace) Description() string {
@@ -213,7 +214,7 @@ func (strReplace) Schema() map[string]any {
 		},
 	}
 }
-func (strReplace) Run(_ context.Context, argsJSON string) (string, error) {
+func (s strReplace) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Path       string `json:"path"`
 		OldString  string `json:"old_string"`
@@ -226,7 +227,7 @@ func (strReplace) Run(_ context.Context, argsJSON string) (string, error) {
 	if in.Path == "" || in.OldString == "" {
 		return "", fmt.Errorf("path and old_string required")
 	}
-	path, err := resolveExistingFile(in.Path)
+	path, err := resolveExistingFileIn(in.Path, s.Workspace)
 	if err != nil {
 		// allow creating? no — str_replace needs existing
 		return "", err
@@ -261,7 +262,7 @@ func (strReplace) Run(_ context.Context, argsJSON string) (string, error) {
 }
 
 // gitCmd runs a small allowlisted set of git commands (no full shell).
-type gitCmd struct{}
+type gitCmd struct{ Workspace string }
 
 func (gitCmd) Name() string { return "git" }
 func (gitCmd) Description() string {
@@ -286,7 +287,7 @@ func (gitCmd) Schema() map[string]any {
 		},
 	}
 }
-func (gitCmd) Run(ctx context.Context, argsJSON string) (string, error) {
+func (g gitCmd) Run(ctx context.Context, argsJSON string) (string, error) {
 	args, err := parseGitArgsJSON(argsJSON)
 	if err != nil {
 		return "", err
@@ -297,6 +298,7 @@ func (gitCmd) Run(ctx context.Context, argsJSON string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = g.Workspace
 	out, err := cmd.CombinedOutput()
 	s := string(out)
 	if len(s) > 40_000 {
@@ -458,7 +460,7 @@ func validateGitArgs(args []string) error {
 	return nil
 }
 
-type runShell struct{}
+type runShell struct{ Workspace string }
 
 func (runShell) Name() string { return "run_shell" }
 func (runShell) Description() string {
@@ -479,7 +481,7 @@ func (runShell) Schema() map[string]any {
 		},
 	}
 }
-func (runShell) Run(ctx context.Context, argsJSON string) (string, error) {
+func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Command string `json:"command"`
 	}
@@ -495,6 +497,7 @@ func (runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, shellTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
+	cmd.Dir = sh.Workspace
 	cmd.Env = os.Environ()
 	// Unix: set process group so timeout kills children (xargs/curl). Windows: plain kill.
 	cmd.SysProcAttr = shellSysProcAttr()
@@ -641,7 +644,7 @@ func (fetchURL) Run(ctx context.Context, argsJSON string) (string, error) {
 	return fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, s), nil
 }
 
-type findFiles struct{}
+type findFiles struct{ Workspace string }
 
 func (findFiles) Name() string { return "find_files" }
 func (findFiles) Description() string {
@@ -667,7 +670,7 @@ func (findFiles) Schema() map[string]any {
 		},
 	}
 }
-func (findFiles) Run(_ context.Context, argsJSON string) (string, error) {
+func (f findFiles) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Name       string `json:"name"`
 		Root       string `json:"root"`
@@ -676,7 +679,7 @@ func (findFiles) Run(_ context.Context, argsJSON string) (string, error) {
 	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || strings.TrimSpace(in.Name) == "" {
 		return "", fmt.Errorf("name required")
 	}
-	root := in.Root
+	root := resolveWorkspacePath(f.Workspace, in.Root)
 	if root == "" {
 		root = "."
 	}
@@ -721,23 +724,26 @@ func (findFiles) Run(_ context.Context, argsJSON string) (string, error) {
 }
 
 // resolveExistingFile tries the path and common corrections models invent.
-func resolveExistingFile(p string) (string, error) {
+func resolveExistingFile(p string) (string, error) { return resolveExistingFileIn(p, "") }
+
+func resolveExistingFileIn(p, workspace string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return "", fmt.Errorf("path required")
 	}
-	candidates := []string{p}
+	base := resolveWorkspacePath(workspace, p)
+	candidates := []string{base}
 	// Models invent "repo/..." prefixes
 	for _, prefix := range []string{"repo/", "repos/", "./repo/"} {
 		if strings.HasPrefix(p, prefix) {
-			candidates = append(candidates, strings.TrimPrefix(p, prefix))
+			candidates = append(candidates, resolveWorkspacePath(workspace, strings.TrimPrefix(p, prefix)))
 		}
 	}
 	// Common typo: dbope vs dboper
 	if strings.Contains(p, "dbope") {
-		candidates = append(candidates, strings.ReplaceAll(p, "dbope", "dboper"))
+		candidates = append(candidates, resolveWorkspacePath(workspace, strings.ReplaceAll(p, "dbope", "dboper")))
 		if strings.HasPrefix(p, "repo/") {
-			candidates = append(candidates, strings.ReplaceAll(strings.TrimPrefix(p, "repo/"), "dbope", "dboper"))
+			candidates = append(candidates, resolveWorkspacePath(workspace, strings.ReplaceAll(strings.TrimPrefix(p, "repo/"), "dbope", "dboper")))
 		}
 	}
 	// If looking for README under a project name, try sibling patterns
@@ -755,10 +761,10 @@ func resolveExistingFile(p string) (string, error) {
 	}
 
 	// Last resort: search for basename under cwd (shallow-ish via WalkDir capped)
-	base := filepath.Base(p)
-	if base != "" && base != "." && base != string(filepath.Separator) {
+	baseName := filepath.Base(p)
+	if baseName != "" && baseName != "." && baseName != string(filepath.Separator) {
 		var found string
-		_ = filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		_ = filepath.WalkDir(resolveWorkspacePath(workspace, "."), func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				if d != nil && d.IsDir() {
 					switch d.Name() {
@@ -768,7 +774,7 @@ func resolveExistingFile(p string) (string, error) {
 				}
 				return nil
 			}
-			if strings.EqualFold(d.Name(), base) {
+			if strings.EqualFold(d.Name(), baseName) {
 				// Prefer paths that also contain parent dir name if present
 				parent := filepath.Base(filepath.Dir(p))
 				if parent != "" && parent != "." && !strings.Contains(path, parent) {
@@ -793,10 +799,18 @@ func resolveExistingFile(p string) (string, error) {
 	return "", fmt.Errorf("file not found: %s (cwd-relative; try find_files or list_dir)", p)
 }
 
+func resolveWorkspacePath(workspace, path string) string {
+	if filepath.IsAbs(path) || strings.TrimSpace(workspace) == "" {
+		return filepath.Clean(path)
+	}
+	return filepath.Join(workspace, path)
+}
+
 // BuiltinOpts configures optional tools.
 type BuiltinOpts struct {
 	EnableShell bool
 	TestCommand string
+	Workspace   string
 }
 
 // DefaultBuiltins registers safe tools; shell optional.
@@ -808,20 +822,24 @@ func DefaultBuiltins(enableShell bool) *Registry {
 // DefaultBuiltinsOpts registers tools with options.
 func DefaultBuiltinsOpts(opts BuiltinOpts) *Registry {
 	r := NewRegistry()
-	r.Register(listDir{})
-	r.Register(readFile{})
-	r.Register(writeFile{})
-	r.Register(strReplace{})
-	r.Register(findFiles{})
-	r.Register(grepTool{})
-	r.Register(gitCmd{})
-	r.Register(runTests{DefaultCmd: opts.TestCommand})
-	r.Register(fetchURL{}) // always on — curl/wget substitute for HTTP GET
-	r.Register(repoMap{})  // compact project tree (Grok/Cursor-style overview)
+	r.Register(listDir{Workspace: opts.Workspace})
+	r.Register(readFile{Workspace: opts.Workspace})
+	r.Register(writeFile{Workspace: opts.Workspace})
+	r.Register(strReplace{Workspace: opts.Workspace})
+	r.Register(findFiles{Workspace: opts.Workspace})
+	r.Register(grepTool{Workspace: opts.Workspace})
+	r.Register(gitCmd{Workspace: opts.Workspace})
+	r.Register(runTests{DefaultCmd: opts.TestCommand, Workspace: opts.Workspace})
+	r.Register(fetchURL{})                         // always on — curl/wget substitute for HTTP GET
+	r.Register(repoMap{Workspace: opts.Workspace}) // compact project tree (Grok/Cursor-style overview)
+	r.Register(todoAdd{})
+	r.Register(todoComplete{})
+	r.Register(todoUpdate{})
+	r.Register(todoList{})
 	r.Register(sshExecute{})
 	// Shell: default on (curl, wget, bash scripts). Disable with EnableShell=false / --no-shell.
 	if opts.EnableShell {
-		r.Register(runShell{})
+		r.Register(runShell{Workspace: opts.Workspace})
 	}
 	return r
 }

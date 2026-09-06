@@ -1,5 +1,5 @@
 VERSION ?= 1.0.0
-BINARY  := agenterm
+BINARY  := bolt
 MODULE  := ./cmd/agenterm
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
@@ -8,7 +8,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 help:
 	@echo "Native:"
-	@echo "  make build          Build ./agenterm for this OS"
+	@echo "  make build          Build ./bolt for this OS"
 	@echo "  make install        go install to \$$GOPATH/bin"
 	@echo "  make dist           Cross-compile release binaries into dist/"
 	@echo "  make release-local  dist + print checksums (tag/push separately)"
@@ -23,6 +23,9 @@ help:
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o $(BINARY) $(MODULE)
+	ln -sf $(BINARY) bolt-s1
+	ln -sf $(BINARY) bolt-s2
+	ln -sf $(BINARY) bolt-s3
 
 install:
 	CGO_ENABLED=0 go install -trimpath -ldflags="$(LDFLAGS)" $(MODULE)

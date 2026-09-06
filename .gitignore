@@ -1,4 +1,8 @@
 /agenterm
+/bolt
+/bolt-s1
+/bolt-s2
+/bolt-s3
 /bin/
 *.exe
 *.test

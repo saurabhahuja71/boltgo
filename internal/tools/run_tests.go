@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -13,6 +14,7 @@ import (
 // runTests runs a project check command (default: go test ./... when go.mod exists).
 type runTests struct {
 	DefaultCmd string
+	Workspace  string
 }
 
 func (runTests) Name() string { return "run_tests" }
@@ -45,7 +47,7 @@ func (r runTests) Run(ctx context.Context, argsJSON string) (string, error) {
 		cmdStr = strings.TrimSpace(r.DefaultCmd)
 	}
 	if cmdStr == "" {
-		cmdStr = autoTestCommand()
+		cmdStr = autoTestCommand(r.Workspace)
 	}
 	if cmdStr == "" {
 		return "", fmt.Errorf("no test command configured (set test_command in config or pass command)")
@@ -53,6 +55,7 @@ func (r runTests) Run(ctx context.Context, argsJSON string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
+	cmd.Dir = r.Workspace
 	out, err := cmd.CombinedOutput()
 	s := string(out)
 	if len(s) > 40_000 {
@@ -64,14 +67,14 @@ func (r runTests) Run(ctx context.Context, argsJSON string) (string, error) {
 	return fmt.Sprintf("$ %s\n%s\nok", cmdStr, s), nil
 }
 
-func autoTestCommand() string {
-	if _, err := os.Stat("go.mod"); err == nil {
+func autoTestCommand(workspace string) string {
+	if _, err := os.Stat(filepath.Join(workspace, "go.mod")); err == nil {
 		return "go test ./..."
 	}
-	if _, err := os.Stat("Makefile"); err == nil {
+	if _, err := os.Stat(filepath.Join(workspace, "Makefile")); err == nil {
 		return "make test"
 	}
-	if _, err := os.Stat("package.json"); err == nil {
+	if _, err := os.Stat(filepath.Join(workspace, "package.json")); err == nil {
 		return "npm test --if-present"
 	}
 	return ""

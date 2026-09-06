@@ -17,6 +17,9 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/saurabhahuja71/agenterm/internal/agent"
+	"github.com/saurabhahuja71/agenterm/internal/llm"
+	"github.com/saurabhahuja71/agenterm/internal/permissions"
+	"github.com/saurabhahuja71/agenterm/internal/todos"
 	"github.com/saurabhahuja71/agenterm/internal/tools"
 )
 
@@ -64,9 +67,15 @@ var (
 
 // Deps wired from main.
 type Deps struct {
-	Title   string
-	Summary string
-	Agent   *agent.Agent
+	Title       string
+	Summary     string
+	Agent       *agent.Agent
+	Workspace   string
+	SessionPath string
+	// SaveSession enables automatic checkpointing after a completed turn. A
+	// failed explicit resume disables this so fresh history cannot overwrite a
+	// missing or corrupt requested session.
+	SaveSession bool
 }
 
 type chatLine struct {
@@ -106,8 +115,18 @@ type model struct {
 	// modelPick: interactive /model list (Tab cycle, Enter select, Esc cancel).
 	modelPick *modelPicker
 	// paintThrottle: avoid full viewport rebuilds on every token (large answers hang).
-	lastPaint    time.Time
-	paintPending bool
+	lastPaint        time.Time
+	paintPending     bool
+	permissionMode   permissions.Mode
+	mouseMode        string
+	visionEnabled    bool
+	visionSupported  bool
+	todosOpen        bool
+	commandsOpen     bool
+	themeName        string
+	pendingApproval  *permissions.Request
+	approvalDecision chan permissions.Decision
+	tokenUsage       *llm.Usage
 }
 
 // paintInterval is the minimum time between streaming viewport rebuilds.
@@ -140,8 +159,9 @@ func New(deps Deps) model {
 	ta.ShowLineNumbers = false
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
-	// Enter sends. Alt+Enter inserts a newline (Grok/ChatGPT-style multi-line).
+	// Enter sends. Shift+Enter and Alt+Enter insert a newline.
 	ta.KeyMap.InsertNewline.SetEnabled(true)
+	ta.KeyMap.InsertNewline.SetKeys("shift+enter", "alt+enter")
 
 	vp := viewport.New(80, 20)
 	// Pager keys that don't fight the focused textarea (no j/k/f/b/space).
@@ -150,11 +170,11 @@ func New(deps Deps) model {
 	vp.MouseWheelDelta = 3
 	vp.KeyMap = viewport.KeyMap{
 		PageDown: key.NewBinding(
-			key.WithKeys("pgdown", "ctrl+f"),
+			key.WithKeys("pgdown"),
 			key.WithHelp("pgdn", "page down"),
 		),
 		PageUp: key.NewBinding(
-			key.WithKeys("pgup", "ctrl+b"),
+			key.WithKeys("pgup"),
 			key.WithHelp("pgup", "page up"),
 		),
 		HalfPageUp: key.NewBinding(
@@ -182,15 +202,20 @@ func New(deps Deps) model {
 	r := newGlamourRenderer(80)
 
 	m := model{
-		deps:          deps,
-		vp:            vp,
-		ta:            ta,
-		status:        "ready",
-		stream:        &strings.Builder{},
-		turnAssistant: -1,
-		renderer:      r,
-		verbose:       false, // compact tools by default
-		scrubLeft:     5,     // a few startup passes to catch late OSC replies
+		deps:            deps,
+		vp:              vp,
+		ta:              ta,
+		status:          "ready",
+		stream:          &strings.Builder{},
+		turnAssistant:   -1,
+		renderer:        r,
+		verbose:         false, // compact tools by default
+		permissionMode:  deps.Agent.Permissions.Mode,
+		mouseMode:       "SELECT",
+		visionEnabled:   deps.Agent.Cfg.VisionEnabled,
+		visionSupported: false,
+		themeName:       "dark",
+		scrubLeft:       5, // a few startup passes to catch late OSC replies
 		lines: []chatLine{
 			// One short banner — path lives above the prompt; tools stay in the status bar.
 			{role: "system", text: deps.Summary + " · /help"},
@@ -209,7 +234,7 @@ func (m *model) ensureStream() *strings.Builder {
 
 func (m model) Init() tea.Cmd {
 	// Scrub any OSC color-query junk already sitting in the input buffer.
-	return tea.Batch(textarea.Blink, scrubInputCmd())
+	return tea.Batch(textarea.Blink, scrubInputCmd(), tea.DisableMouse)
 }
 
 type scrubInputMsg struct{}
@@ -301,7 +326,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		headerH, helpH, cwdH, busyH := 1, 1, 1, 0
 		inputH := m.ta.Height() + 2
-		vpH := msg.Height - headerH - helpH - cwdH - busyH - inputH - 2
+		fixedExtra := 1
+		if m.todosOpen {
+			fixedExtra += len(todos.Global.Items()) + 3
+		}
+		if m.commandsOpen {
+			fixedExtra += 10
+		}
+		if m.pendingApproval != nil {
+			fixedExtra += 7
+		}
+		vpH := msg.Height - headerH - helpH - cwdH - busyH - inputH - fixedExtra
 		if vpH < 5 {
 			vpH = 5
 		}
@@ -323,6 +358,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modelPick != nil {
 			return m.handleModelPickKeys(msg)
 		}
+		if m.pendingApproval != nil {
+			return m.handleApprovalKey(msg)
+		}
 		// Chat scroll keys — handle before the textarea so large answers are reachable.
 		if m.handleChatScrollKey(msg) {
 			return m, nil
@@ -336,6 +374,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshViewport()
 				return m, nil
 			}
+		case "ctrl+q":
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, tea.Quit
 		case "ctrl+c":
 			if m.busy && m.cancel != nil {
 				// First Ctrl+C cancels generation; second (when idle) quits.
@@ -348,12 +391,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancel()
 			}
 			return m, tea.Quit
+		case "ctrl+r":
+			return m, m.cyclePermissionMode()
 		case "ctrl+l":
-			if !m.busy {
-				m.deps.Agent.Reset()
-				m.lines = []chatLine{{role: "system", text: "history cleared"}}
-				m.refreshViewport()
+			return m, m.toggleMouseMode()
+		case "ctrl+y":
+			m.visionEnabled = !m.visionEnabled
+			if m.visionEnabled && !m.visionSupported {
+				m.status = "vision requested (provider has no image capability)"
+			} else if m.visionEnabled {
+				m.status = "vision on"
+			} else {
+				m.status = "ready"
 			}
+			return m, nil
+		case "ctrl+t":
+			m.todosOpen = !m.todosOpen
+			return m, nil
+		case "ctrl+o":
+			m.commandsOpen = !m.commandsOpen
+			return m, nil
+		case "ctrl+b":
+			if m.themeName == "dark" {
+				m.themeName = "black"
+			} else {
+				m.themeName = "dark"
+			}
+			applyTheme(m.themeName)
+			m.status = "theme: " + m.themeName
+			return m, nil
 		case "enter":
 			if m.busy {
 				return m, nil
@@ -444,8 +510,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.events = nil
 		m.cancel = nil
 		// Auto-save rolling session after each turn (best-effort).
-		if _, err := m.deps.Agent.SaveSession("last"); err == nil {
-			// quiet — path only in /sessions
+		if m.deps.SaveSession && m.deps.SessionPath != "" {
+			_, _ = m.deps.Agent.SaveSessionPath(m.deps.SessionPath)
 		}
 		m.refreshViewport()
 	}
@@ -590,6 +656,12 @@ func (m *model) schedulePaint(force bool) tea.Cmd {
 
 func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 	switch ev.Kind {
+	case agent.EventPermission:
+		m.pendingApproval = ev.Permission
+		m.approvalDecision = ev.Decision
+		m.status = "waiting for approval"
+		m.upsertThinkingPlaceholder()
+		return m, m.schedulePaint(true)
 	case agent.EventToken:
 		m.gotToken = true
 		m.ensureStream().WriteString(ev.Text)
@@ -626,6 +698,8 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		return m, m.schedulePaint(true)
 
 	case agent.EventToolEnd:
+		m.pendingApproval = nil
+		m.approvalDecision = nil
 		line := formatToolEnd(ev.Tool, ev.ToolOut, m.verbose)
 		if m.verbose {
 			m.lines = append(m.lines, chatLine{role: "tool", text: line})
@@ -650,6 +724,10 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		}
 		return m, nil
 
+	case agent.EventUsage:
+		m.tokenUsage = ev.Usage
+		return m, nil
+
 	case agent.EventError:
 		m.clearThinkingPlaceholder()
 		m.flushStreamAsLine()
@@ -658,21 +736,18 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		return m, m.schedulePaint(true)
 
 	case agent.EventDone:
+		m.pendingApproval = nil
+		m.approvalDecision = nil
 		m.clearThinkingPlaceholder()
 		if m.verbose {
 			m.flushStreamAsLine()
 		} else {
 			m.flushStreamAsLineQuiet()
 		}
-		m.busy = false
-		m.gotToken = false
-		m.waitSecs = 0
-		m.paintPending = false
-		m.status = "ready"
-		m.cancel = nil
-		if _, err := m.deps.Agent.SaveSession("last"); err == nil {
-			// rolling checkpoint
-		}
+		// Keep input disabled until streamClosedMsg. EventDone is emitted before
+		// the worker closes its channel; reopening input here lets a fast second
+		// prompt race the old worker's final close event.
+		m.status = "finalizing…"
 		return m, m.schedulePaint(true)
 	}
 	return m, nil
@@ -691,8 +766,12 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.lines = []chatLine{{role: "system", text: "history cleared"}}
 	case "/status":
 		st := m.deps.Summary + "\nstatus: " + m.status
-		st += "\nworkspace: " + mustCwd()
-		if b, err := runGitStatusShort(); err == nil && b != "" {
+		workspace := m.deps.Workspace
+		if workspace == "" {
+			workspace = mustCwd()
+		}
+		st += "\nworkspace: " + workspace
+		if b, err := runGitStatusShort(workspace); err == nil && b != "" {
 			st += "\ngit:\n" + b
 		}
 		m.lines = append(m.lines, chatLine{role: "system", text: st})
@@ -756,25 +835,33 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		if len(parts) >= 2 {
 			id = parts[1]
 		}
-		path, err := m.deps.Agent.SaveSession(id)
+		path := m.sessionPath(id)
+		var err error
+		if path == "" {
+			err = fmt.Errorf("invalid session id")
+		} else {
+			_, err = m.deps.Agent.SaveSessionPath(path)
+		}
 		if err != nil {
 			m.lines = append(m.lines, chatLine{role: "error", text: "save: " + err.Error()})
 		} else {
 			m.lines = append(m.lines, chatLine{role: "system", text: "saved session → " + path})
 		}
 	case "/sessions", "/history":
-		list, err := agent.ListSessions(15)
+		list, err := listWorkspaceSessions(m.sessionDir(), 15)
 		if err != nil {
 			m.lines = append(m.lines, chatLine{role: "error", text: err.Error()})
 		} else if len(list) == 0 {
-			m.lines = append(m.lines, chatLine{role: "system", text: "no sessions in ~/.agenterm/sessions\n/save to create one"})
+			m.lines = append(m.lines, chatLine{role: "system", text: "no sessions in " + m.sessionDir() + "\n/save to create one"})
 		} else {
 			m.lines = append(m.lines, chatLine{role: "system", text: "sessions:\n  " + strings.Join(list, "\n  ") + "\n\nLoad: /load <id>"})
 		}
 	case "/load":
 		if len(parts) < 2 {
 			m.lines = append(m.lines, chatLine{role: "system", text: "usage: /load <session-id>"})
-		} else if err := m.deps.Agent.LoadSession(parts[1]); err != nil {
+		} else if path := m.sessionPath(parts[1]); path == "" {
+			m.lines = append(m.lines, chatLine{role: "error", text: "invalid session id"})
+		} else if err := m.deps.Agent.LoadSessionPath(path); err != nil {
 			m.lines = append(m.lines, chatLine{role: "error", text: err.Error()})
 		} else {
 			m.lines = []chatLine{
@@ -947,7 +1034,10 @@ func mustCwd() string {
 // displayCwd returns the process working directory for the TUI (tools use this).
 // Home is shortened to ~; maxW>0 truncates the middle for narrow terminals.
 func displayCwd(maxW int) string {
-	c := mustCwd()
+	return displayCwdAt(mustCwd(), maxW)
+}
+
+func displayCwdAt(c string, maxW int) string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		if c == home {
 			c = "~"
@@ -966,10 +1056,11 @@ func displayCwd(maxW int) string {
 	return c
 }
 
-func runGitStatusShort() (string, error) {
+func runGitStatusShort(workspace string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "status", "-sb")
+	cmd.Dir = workspace
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", err
@@ -979,6 +1070,52 @@ func runGitStatusShort() (string, error) {
 		s = s[:800] + "…"
 	}
 	return s, nil
+}
+
+func (m model) sessionDir() string {
+	if m.deps.SessionPath != "" {
+		return filepath.Dir(m.deps.SessionPath)
+	}
+	workspace := m.deps.Workspace
+	if workspace == "" {
+		workspace = mustCwd()
+	}
+	return filepath.Join(workspace, ".bolt", "sessions")
+}
+
+func (m model) sessionPath(id string) string {
+	if id == "" {
+		return m.deps.SessionPath
+	}
+	workspace := m.deps.Workspace
+	if workspace == "" {
+		workspace = mustCwd()
+	}
+	path, err := agent.WorkspaceSessionPath(workspace, id)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+func listWorkspaceSessions(dir string, limit int) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 15
+	}
+	var out []string
+	for i := len(entries) - 1; i >= 0 && len(out) < limit; i-- {
+		if !entries[i].IsDir() && filepath.Ext(entries[i].Name()) == ".json" {
+			out = append(out, entries[i].Name())
+		}
+	}
+	return out, nil
 }
 
 // handleModelCmd implements Grok-style mid-chat model switch and listing.
@@ -1719,42 +1856,162 @@ func (m *model) handleChatScrollKey(msg tea.KeyMsg) bool {
 	return false
 }
 
+func (m *model) cyclePermissionMode() tea.Cmd {
+	mode := permissions.ModeAsk
+	switch m.permissionMode {
+	case permissions.ModeAsk:
+		mode = permissions.ModeAllow
+	case permissions.ModeAllow:
+		mode = permissions.ModePlan
+	default:
+		mode = permissions.ModeAsk
+	}
+	m.permissionMode = mode
+	if m.deps.Agent.Permissions != nil {
+		m.deps.Agent.Permissions.SetMode(mode)
+	}
+	m.status = "permission mode: " + strings.ToUpper(string(mode))
+	return nil
+}
+
+func (m *model) toggleMouseMode() tea.Cmd {
+	if m.mouseMode == "SELECT" {
+		m.mouseMode = "INTERACTIVE"
+		m.status = "mouse mode: INTERACTIVE"
+		return tea.EnableMouseCellMotion
+	}
+	m.mouseMode = "SELECT"
+	m.status = "mouse mode: SELECT"
+	return tea.DisableMouse
+}
+
+func (m *model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.approvalDecision == nil {
+		return m, nil
+	}
+	decision := permissions.Decision("")
+	switch msg.String() {
+	case "1", "y", "enter":
+		decision = permissions.AllowOnce
+	case "2":
+		decision = permissions.AllowSession
+	case "3":
+		decision = permissions.AllowPermanent
+	case "4", "n", "esc":
+		decision = permissions.Deny
+	default:
+		return m, nil
+	}
+	m.approvalDecision <- decision
+	m.pendingApproval = nil
+	m.approvalDecision = nil
+	m.status = "approved"
+	return m, nil
+}
+
+func approvalText(r *permissions.Request) string {
+	if r == nil {
+		return "Approval required"
+	}
+	return fmt.Sprintf("Approval required\nTool: %s\nAction: %s\nLevel: %s\n\n1 Allow once  2 Allow session  3 Allow permanently  4 Deny", r.Tool, r.Arguments, strings.ToUpper(string(r.Level)))
+}
+
+func todoText() string {
+	items := todos.Global.Items()
+	if len(items) == 0 {
+		return "Todos\n(no todos)"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Todos (%d open)\n", countOpenTodos(items)))
+	for _, item := range items {
+		mark := "[ ]"
+		if item.Completed {
+			mark = "[x]"
+		}
+		b.WriteString(fmt.Sprintf("%s %s %s\n", mark, item.ID, item.Description))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func countOpenTodos(items []todos.Item) int {
+	n := 0
+	for _, item := range items {
+		if !item.Completed {
+			n++
+		}
+	}
+	return n
+}
+
+func commandsText() string {
+	return "Ctrl+Q  Quit\nCtrl+R  Permission\nCtrl+L  Mouse\nCtrl+Y  Vision\nCtrl+T  Todos\nCtrl+O  Commands\nCtrl+B  Theme\n\nEnter       Send\nShift+Enter Newline"
+}
+
+func applyTheme(name string) {
+	if name == "black" {
+		styleHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("#67e8f9")).Bold(true).Padding(0, 1)
+		styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#334155")).Padding(0, 1)
+		return
+	}
+	styleHeader = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Padding(0, 1)
+	styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
+}
+
 func (m model) View() string {
 	w := m.width
 	if w == 0 {
 		w = 80
 	}
-	header := styleHeader.Render(" agenterm ") + styleStatus.Render(m.deps.Summary)
-	if m.busy {
-		header += styleAsst.Render("  ·  " + truncate(m.status, 60) + "  " + spinnerFrame())
-	} else {
-		header += styleStatus.Render("  ·  " + m.status)
+	body := styleBox.Width(max(10, w-2)).Render(m.vp.View())
+	status := m.status
+	if m.busy && status == "ready" {
+		status = "thinking"
 	}
-	// Hint when chat history is taller than the viewport.
-	if !m.vp.AtTop() || !m.vp.AtBottom() {
-		pct := int(m.vp.ScrollPercent() * 100)
-		header += styleStatus.Render(fmt.Sprintf("  ·  scroll %d%% (pgup/pgdn · wheel)", pct))
+	if status != "" {
+		status = strings.ToUpper(status[:1]) + status[1:]
 	}
-	mode := "quiet"
-	if m.verbose {
-		mode = "verbose"
+	modelName := m.deps.Agent.Cfg.Provider + "/" + m.deps.Agent.Cfg.Model
+	tokens := "—"
+	if m.tokenUsage != nil {
+		total := m.tokenUsage.TotalTokens
+		if total == 0 {
+			total = m.tokenUsage.PromptTokens + m.tokenUsage.CompletionTokens
+		}
+		if total > 0 {
+			tokens = fmt.Sprintf("%d", total)
+		}
 	}
-	help := styleHelp.Render("enter send · alt+enter newline · pgup/pgdn scroll · wheel · esc cancel · /" + mode + " · /help · /model · /plan · ctrl+l")
+	footer := fmt.Sprintf("Bolt | Permission Mode: %s | Mouse Mode: %s | Vision: %s | Model: %s | Tokens: %s | %s", strings.ToUpper(string(m.permissionMode)), m.mouseMode, map[bool]string{true: "ON", false: "OFF"}[m.visionEnabled], modelName, tokens, status)
+	statusLine := styleStatus.Render(wrap(footer, max(20, w-4)))
+	help := styleHelp.Render("Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline")
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
-		help = styleHelp.Render("PLAN MODE · enter send · /plan off to use tools · /help")
+		help = styleHelp.Render("PLAN MODE · Ctrl+Q quit · Ctrl+R permission · Enter send · Shift+Enter newline")
 	}
 	if m.modelPick != nil {
 		help = styleHelp.Render("Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick")
 	}
-	body := styleBox.Width(max(10, w-2)).Render(m.vp.View())
 	// Always show workspace path above the prompt so you know where tools write.
-	cwdLine := styleHelp.Render("cwd  " + displayCwd(max(20, w-8)))
-	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
-	if m.modelPick != nil {
-		pick := m.modelPickerView(w)
-		return lipgloss.JoinVertical(lipgloss.Left, header, body, pick, cwdLine, help)
+	workspace := m.deps.Workspace
+	if workspace == "" {
+		workspace = mustCwd()
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, cwdLine, input, help)
+	cwdLine := styleHelp.Render("📁 " + displayCwdAt(workspace, max(20, w-8)))
+	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
+	parts := []string{body, statusLine}
+	if m.pendingApproval != nil {
+		parts = append(parts, styleBox.Width(max(10, w-2)).Render(approvalText(m.pendingApproval)))
+	}
+	if m.todosOpen {
+		parts = append(parts, styleBox.Width(max(10, w-2)).Render(todoText()))
+	}
+	if m.commandsOpen {
+		parts = append(parts, styleBox.Width(max(10, w-2)).Render(commandsText()))
+	}
+	if m.modelPick != nil {
+		parts = append(parts, m.modelPickerView(w))
+	}
+	parts = append(parts, cwdLine, input, help)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func wrap(s string, width int) string {
@@ -1804,7 +2061,6 @@ func Run(deps Deps) error {
 	p := tea.NewProgram(
 		New(deps),
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(), // mouse wheel scrolls the chat viewport
 	)
 	_, err := p.Run()
 	return err

@@ -61,6 +61,15 @@ type Message struct {
 	Name       string     `json:"name,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	Usage      *Usage     `json:"-"`
+}
+
+// Usage is provider-reported token accounting. Providers that do not expose
+// usage leave it nil, allowing the TUI to show an honest fallback.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
 }
 
 type ToolCall struct {
@@ -116,15 +125,20 @@ type ToolFunctionSchema struct {
 }
 
 type ChatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Tools       []Tool    `json:"tools,omitempty"`
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Tools    []Tool    `json:"tools,omitempty"`
 	// ToolChoice: "auto" | "none" | or {"type":"function","function":{"name":"..."}}
 	// Omit when empty. Helps Ollama/OpenAI skip tools for pure chat.
-	ToolChoice  any       `json:"tool_choice,omitempty"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Stream      bool      `json:"stream"`
+	ToolChoice    any            `json:"tool_choice,omitempty"`
+	Temperature   float64        `json:"temperature,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+}
+
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type ChatResponse struct {
@@ -132,6 +146,7 @@ type ChatResponse struct {
 		Message      Message `json:"message"`
 		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *Usage `json:"usage,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -149,6 +164,7 @@ type streamChunk struct {
 		Message      *Message `json:"message,omitempty"`
 		FinishReason *string  `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *Usage `json:"usage,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -179,6 +195,9 @@ func emitStatus(h StreamHandler, text string) {
 // ChatStream streams a completion; returns the assembled assistant message.
 func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandler) (Message, error) {
 	req.Stream = true
+	if req.StreamOptions == nil {
+		req.StreamOptions = &StreamOptions{IncludeUsage: true}
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return Message{}, err
@@ -219,6 +238,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 			return Message{}, fmt.Errorf("empty choices")
 		}
 		msg := full.Choices[0].Message
+		msg.Usage = full.Usage
 		if h != nil && msg.Content != "" {
 			h.OnToken(msg.Content)
 		}
@@ -258,7 +278,13 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 			return Message{}, fmt.Errorf("API error: %s", chunk.Error.Message)
 		}
 		if len(chunk.Choices) == 0 {
+			if chunk.Usage != nil {
+				msg.Usage = chunk.Usage
+			}
 			continue
+		}
+		if chunk.Usage != nil {
+			msg.Usage = chunk.Usage
 		}
 		ch0 := chunk.Choices[0]
 		delta := ch0.Delta
@@ -412,7 +438,9 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (Message, error) {
 	if len(full.Choices) == 0 {
 		return Message{}, fmt.Errorf("empty choices")
 	}
-	return full.Choices[0].Message, nil
+	msg := full.Choices[0].Message
+	msg.Usage = full.Usage
+	return msg, nil
 }
 
 // modelsListResponse is OpenAI-compatible GET /v1/models body.

@@ -1,8 +1,8 @@
 # Continuity
 
-- Summary: SSH execution now probes the local hostname, `whoami`, and current kubectl context; matching targets execute locally. The TUI keeps one active assistant bubble per turn and removes the duplicate standalone busy Agent panel.
-- Files modified: `internal/tools/ssh.go`, `internal/tools/ssh_test.go`, `internal/config/config.go`, `internal/tui/app.go`, `internal/tui/transcript_test.go`.
-- Decisions: `run_shell` remains the local execution path for kubectl/watch/logs; `ssh_execute` is reserved for clearly different hosts and still supports SSH config aliases. Thinking, streaming, and final assistant text update one indexed transcript line; tools/errors remain cards.
-- Checks: `gofmt` passed; focused and full `go test` passed; `make build` passed with `GOCACHE=/tmp/agenterm-go-build` because the default Go cache is read-only in this environment.
-- TODOs/blockers: none known.
-- Suggested next task: exercise `ssh_execute` against a real same-host alias and a deliberately unauthenticated host to verify the user-facing tool transcript.
+- Summary: Phase 4 hardened session/context isolation, workspace-local rules, failed-resume preservation, permission synchronization, stream completion ordering, legacy slash-command workspace behavior, and symlink-safe session storage. It validated the live S1 workflow and controlled provider/tool failures.
+- Files modified: `internal/agent/rules.go`, `internal/agent/agent.go`, `internal/agent/rules_test.go`, `internal/agent/context_test.go`, `internal/agent/session_test.go`, `internal/permissions/permissions.go`, `internal/tui/app.go`, `internal/tui/bolt_state_test.go`, `cmd/agenterm/main.go`, `docs/bolt-migration.md`, and this file.
+- Decisions: A failed explicit resume never overwrites the requested session. Workspace rules and `/save`/`/load`/`/sessions`/`/status` behavior are scoped to the selected workspace. Session storage rejects traversal and symlinked stores outside the workspace. `streamClosedMsg`, not `EventDone`, re-enables input and checkpoints history. Mouse/resize model behavior is covered deterministically when physical terminal events are unavailable.
+- Checks: S1 real workflow created and validated an isolated Python project; unavailable-provider and `false` tool failures were reported accurately. Full Go tests, vet, build, make build, race tests, and diff checks are required after the final documentation edit. Use `GOCACHE=/tmp/agenterm-go-build`.
+- TODOs/blockers: Vision remains state-only; S2/S3 endpoints 30000/30004 were unavailable; physical wheel/resize testing remains terminal-environment dependent. S2/S3 tunnel lifecycle remains external.
+- Freeze state: no further migration or behavior changes are planned. Future physical terminal validation or multimodal design must be separately authorized.

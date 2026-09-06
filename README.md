@@ -1,4 +1,9 @@
-# agenterm — Terminal AI Agent Tutorial (Ollama, SGLang, OpenAI, xAI + MCP Client)
+# Bolt — Go Terminal Coding Agent (Ollama, SGLang, OpenAI, xAI + MCP Client)
+
+Bolt is the primary Go implementation in this repository. It reuses the
+historical Agenterm package/module foundation; `agenterm` references below are
+kept where they describe that compatibility foundation, module path, or
+existing tooling.
 
 **Terminal AI agent** and **coding assistant in the terminal** for [Ollama](https://ollama.com), [SGLang](https://github.com/sgl-project/sglang), [xAI](https://x.ai), [OpenAI](https://openai.com), and any **OpenAI-compatible** API. Full-screen **TUI**, optional **file/shell tools**, and **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** client support—one static **Go** binary.
 
@@ -23,7 +28,7 @@
 You (TUI)
    │
    ▼
-agenterm  ──►  Ollama / SGLang / xAI / OpenAI  (POST /v1/chat/completions)
+bolt  ──►  Ollama / SGLang / xAI / OpenAI  (POST /v1/chat/completions)
    │
    └── tools ──► built-in (files, optional shell) + MCP servers
 ```
@@ -56,16 +61,21 @@ ollama serve   # http://127.0.0.1:11434
 #   --host 127.0.0.1 --port 30000 --served-model-name qwen2.5-coder-32b-q4_k_m.gguf
 ```
 
-**3. Chat:**
+**3. Chat with Bolt:**
 
 ```bash
-agenterm init          # first time: writes ~/.agenterm/config.toml
-agenterm --ping        # check the API
-agenterm               # open the TUI (Ollama default)
+bolt init              # first time: writes ~/.agenterm/config.toml
+bolt --ping            # check the API
+bolt                   # open the Bolt TUI (Ollama default)
+
+# Shared launcher presets:
+bolt-s1                # configured Ollama/S1 runtime
+bolt-s2                # configured SGLang/S2 runtime
+bolt-s3                # configured SGLang/S3 runtime
 
 # SGLang instead:
-agenterm --provider sglang --ping
-agenterm --provider sglang
+bolt --provider sglang --ping
+bolt --provider sglang
 ```
 
 In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tools off` for pure chat.
@@ -90,9 +100,9 @@ In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tool
 
 ---
 
-## Why agenterm?
+## Why Bolt?
 
-| You want… | agenterm does… |
+| You want… | Bolt does… |
 |-----------|----------------|
 | Chat with **local LLMs** | Defaults to Ollama at `http://127.0.0.1:11434/v1` |
 | Faster **SGLang** serving | `--provider sglang` → `http://127.0.0.1:30000/v1` |
@@ -112,7 +122,7 @@ Not affiliated with xAI. “Grok-style” only means a snappy terminal agent UX.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
-agenterm --version
+agenterm --version   # compatibility installer name; source builds produce bolt
 ```
 
 | Variable | Meaning |
@@ -137,7 +147,8 @@ Also published: `linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64.ex
 ```bash
 git clone https://github.com/saurabhahuja71/agenterm.git
 cd agenterm
-make build          # → ./agenterm
+make build          # → ./bolt and bolt-s1/bolt-s2/bolt-s3 aliases
+./bolt              # primary Go Bolt executable
 make install        # → $(go env GOPATH)/bin (or $GOBIN)
 # or:
 go install github.com/saurabhahuja71/agenterm/cmd/agenterm@latest
@@ -151,18 +162,18 @@ go install github.com/saurabhahuja71/agenterm/cmd/agenterm@latest
 
 ```bash
 ollama pull qwen2.5-coder:32b
-agenterm --ping
-agenterm -m qwen2.5-coder:32b
+bolt --ping
+bolt -m qwen2.5-coder:32b
 # pure chat (no function tools):
-agenterm --no-tools -m qwen2.5-coder:32b
+bolt --no-tools -m qwen2.5-coder:32b
 ```
 
 ### Ollama on another host (SSH tunnel)
 
 ```bash
 ssh -N -L 11434:127.0.0.1:11434 user@gpu-host
-# agenterm still uses http://127.0.0.1:11434/v1
-agenterm
+# Bolt still uses http://127.0.0.1:11434/v1
+bolt
 ```
 
 ### SGLang (local or tunneled)
@@ -171,9 +182,9 @@ SGLang exposes the same OpenAI-compatible `/v1/chat/completions` surface. Defaul
 
 ```bash
 # Server already on this machine (or tunnel already open):
-agenterm --provider sglang --ping
-agenterm --provider sglang
-agenterm --provider sglang --no-tools   # pure chat
+bolt --provider sglang --ping
+bolt --provider sglang
+bolt --provider sglang --no-tools   # pure chat
 ```
 
 SSH tunnel from a laptop to a GPU host:
@@ -182,7 +193,7 @@ SSH tunnel from a laptop to a GPU host:
 ssh -N -L 30000:127.0.0.1:30000 user@gpu-host
 # or with a jump host:
 # ssh -N -J bastion -L 30000:127.0.0.1:30000 opc@gpu-host
-agenterm --provider sglang
+bolt --provider sglang
 ```
 
 Model id must match SGLang’s **`--served-model-name`** (often the GGUF basename). List with:
@@ -190,7 +201,7 @@ Model id must match SGLang’s **`--served-model-name`** (often the GGUF basenam
 ```bash
 curl -s http://127.0.0.1:30000/v1/models
 # then:
-agenterm --provider sglang -m qwen2.5-coder-32b-q4_k_m.gguf
+bolt --provider sglang -m qwen2.5-coder-32b-q4_k_m.gguf
 ```
 
 ### In the TUI
@@ -204,7 +215,7 @@ agenterm --provider sglang -m qwen2.5-coder-32b-q4_k_m.gguf
 | Clear history | `/clear` or **Ctrl+L** |
 | Quit | **Ctrl+C** |
 
-Run agenterm from the project directory you care about (`cd myrepo && agenterm`) so file tools use that workspace.
+Run Bolt with an explicit workspace (`bolt --workspace /path/to/myrepo`) so file tools use that workspace.
 
 ---
 
@@ -233,14 +244,14 @@ model = "qwen2.5"
 ### One-shot CLI
 
 ```bash
-agenterm --base-url http://127.0.0.1:11434/v1 -m qwen2.5-coder:32b
-agenterm --base-url http://gpu-box:11434/v1 -m qwen2.5
+bolt --base-url http://127.0.0.1:11434/v1 -m qwen2.5-coder:32b
+bolt --base-url http://gpu-box:11434/v1 -m qwen2.5
 
 export XAI_API_KEY=xai-...
-agenterm --provider xai -m grok-3
+bolt --provider xai -m grok-3
 
 export OPENAI_API_KEY=sk-...
-agenterm --provider openai -m gpt-4o-mini
+bolt --provider openai -m gpt-4o-mini
 ```
 
 Always include **`/v1`** on Ollama base URLs (`/v1/chat/completions`, `/v1/models`).
@@ -276,8 +287,8 @@ model = "qwen2.5-coder-32b-q4_k_m.gguf"
 Or keep Ollama as default and only switch on the CLI:
 
 ```bash
-agenterm --provider sglang
-agenterm --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf --api-key sglang
+bolt --provider sglang
+bolt --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf --api-key sglang
 ```
 
 Env equivalent:
@@ -287,7 +298,7 @@ export AGENTERM_PROVIDER=sglang
 export AGENTERM_BASE_URL=http://127.0.0.1:30000/v1
 export AGENTERM_MODEL=qwen2.5-coder-32b-q4_k_m.gguf
 export AGENTERM_API_KEY=sglang
-agenterm --ping && agenterm
+bolt --ping && bolt
 ```
 
 ### Start SGLang (sketch)
@@ -319,8 +330,8 @@ ssh -N -L 30000:127.0.0.1:30000 user@gpu-host
 # ssh -N -J bastion -L 30000:127.0.0.1:30000 opc@gpu-host
 
 curl -s http://127.0.0.1:30000/v1/models
-agenterm --provider sglang --ping
-agenterm --provider sglang
+bolt --provider sglang --ping
+bolt --provider sglang
 ```
 
 If you use a corporate HTTP proxy, exclude localhost so the tunnel is not proxied:
@@ -337,7 +348,7 @@ Do **not** load a heavy Ollama model and a heavy SGLang model on the same GPUs a
 | Goal | Suggested path |
 |------|----------------|
 | Everyday chat / tags from `ollama list` | Ollama · `agenterm` (default) |
-| Lower-latency GGUF serve, multi-GPU TP | SGLang · `agenterm --provider sglang` |
+| Lower-latency GGUF serve, multi-GPU TP | SGLang · `bolt --provider sglang` |
 
 Always include **`/v1`** on the base URL (`/v1/chat/completions`, `/v1/models`).
 
@@ -381,17 +392,17 @@ podman compose run --rm agenterm
 ### Flags
 
 ```bash
-agenterm                  # open TUI
-agenterm init             # default config (--force to overwrite)
-agenterm --ping           # connectivity check
-agenterm -m qwen2.5       # start with a model
-agenterm --provider ollama-remote
-agenterm --provider sglang
-agenterm --base-url http://host:11434/v1
-agenterm --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf
-agenterm --no-tools       # pure chat (faster)
-agenterm --shell          # allow run_shell
-agenterm --no-mcp
+bolt                      # open TUI
+bolt init                 # default config (--force to overwrite)
+bolt --ping               # connectivity check
+bolt -m qwen2.5           # start with a model
+bolt --provider ollama-remote
+bolt --provider sglang
+bolt --base-url http://host:11434/v1
+bolt --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf
+bolt --no-tools           # pure chat (faster)
+bolt --shell              # allow run_shell
+bolt --no-mcp
 ```
 
 ### In-chat
@@ -440,11 +451,11 @@ Default file: `~/.agenterm/config.toml`.
 | `git` | Allowlisted git (`status`, `checkout`, `add`, `commit`, …) |
 | `run_shell` | Off by default; `--shell` or `enable_shell = true` |
 
-When you ask to **apply / implement / do it**, agenterm uses tools—not only printed shell recipes.
+When you ask to **apply / implement / do it**, Bolt uses tools—not only printed shell recipes.
 
 ### MCP
 
-agenterm is an **MCP client**. Example:
+Bolt is an **MCP client**. Example:
 
 ```toml
 [[mcp_servers]]
@@ -453,13 +464,13 @@ enabled = true
 url = "http://127.0.0.1:8080/mcp"
 ```
 
-Disable for a session: `agenterm --no-mcp`. Demo server: [mcp-demo](https://github.com/saurabhahuja71/mcp-demo).
+Disable for a session: `bolt --no-mcp`. Demo server: [mcp-demo](https://github.com/saurabhahuja71/mcp-demo).
 
 ---
 
 ## FAQ
 
-### What is agenterm?
+### What is Bolt?
 
 An open-source **terminal AI agent** in Go: a full-screen TUI that streams chat from Ollama, SGLang, or any OpenAI-compatible API, with optional tools (files, shell, MCP).
 
@@ -489,7 +500,8 @@ Some models called tools (e.g. `list_dir`) on greetings. Trivial chat now skips 
 
 ### Is Python required?
 
-No for release binaries. agenterm is a **static Go binary**.
+No for release binaries. Bolt is a **static Go binary**. The historical
+`agenterm` installer/module naming remains for compatibility.
 
 ### Where is the config?
 

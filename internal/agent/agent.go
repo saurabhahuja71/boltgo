@@ -9,6 +9,7 @@ import (
 
 	"github.com/saurabhahuja71/agenterm/internal/config"
 	"github.com/saurabhahuja71/agenterm/internal/llm"
+	"github.com/saurabhahuja71/agenterm/internal/permissions"
 	"github.com/saurabhahuja71/agenterm/internal/tools"
 )
 
@@ -22,13 +23,18 @@ const (
 	EventError
 	EventDone
 	EventStatus
+	EventPermission
+	EventUsage
 )
 
 type Event struct {
-	Kind    EventKind
-	Text    string
-	Tool    string
-	ToolOut string
+	Kind       EventKind
+	Text       string
+	Tool       string
+	ToolOut    string
+	Permission *permissions.Request
+	Decision   chan permissions.Decision
+	Usage      *llm.Usage
 }
 
 // Agent runs the multi-turn tool loop against an OpenAI-compatible model.
@@ -41,15 +47,16 @@ type Agent struct {
 	// MaxToolRounds prevents infinite tool loops.
 	MaxToolRounds int
 	// PlanMode: Grok-like plan first — no tools; model only outlines steps.
-	PlanMode bool
+	PlanMode    bool
+	Permissions *permissions.Manager
 }
 
 func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 	e := cfg.Effective()
 	hist := []llm.Message{}
 	sys := strings.TrimSpace(e.SystemPrompt)
-	extra := workspaceHint()
-	if rules := loadProjectRules(); rules != "" {
+	extra := workspaceHint(e.Workspace)
+	if rules := loadProjectRules(e.Workspace); rules != "" {
 		extra = extra + "\n\n" + rules
 	}
 	if sys != "" {
@@ -64,16 +71,20 @@ func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 		Tools:         reg,
 		History:       hist,
 		MaxToolRounds: 8,
+		Permissions:   permissions.New(permissions.Mode(e.PermissionMode), permissions.DefaultStorePath()),
 	}
 }
 
 // workspaceHint tells the model where tools resolve paths (critical for repo reads).
-func workspaceHint() string {
+func workspaceHint(workspace string) string {
 	cwd, err := os.Getwd()
 	if err != nil || cwd == "" {
 		cwd = "."
 	}
-	root := findRepoRoot()
+	if workspace != "" {
+		cwd = workspace
+	}
+	root := findRepoRootAt(cwd)
 	return strings.TrimSpace(fmt.Sprintf(`
 Workspace (tool paths resolve here):
 - Current working directory: %s
@@ -150,6 +161,9 @@ func (a *Agent) CompactHistory() {
 
 // RunUserMessage appends a user message and runs the agent loop, emitting events.
 func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event)) error {
+	if a.Permissions == nil {
+		a.Permissions = permissions.New(permissions.ModeAllow, permissions.DefaultStorePath())
+	}
 	a.CompactHistory()
 
 	// @path mentions → attach file/dir context
@@ -289,6 +303,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 			emit(Event{Kind: EventDone})
 			return err
 		}
+		if msg.Usage != nil {
+			usage := *msg.Usage
+			emit(Event{Kind: EventUsage, Usage: &usage})
+		}
 
 		// Ollama/Qwen often print tools as plain JSON content — recover and run them.
 		if len(msg.ToolCalls) == 0 && len(roundTools) > 0 && a.Tools != nil {
@@ -372,9 +390,28 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			name := tc.Function.Name
 			args := tc.Function.Arguments
+			level, capability := permissions.LevelForTool(name, args)
+			request := permissions.Request{Tool: name, Capability: capability, Level: level, Arguments: args}
+			decision, prompt := a.Permissions.Check(request)
+			if prompt {
+				response := make(chan permissions.Decision, 1)
+				emit(Event{Kind: EventPermission, Tool: name, Text: args, Permission: &request, Decision: response})
+				select {
+				case decision = <-response:
+				case <-ctx.Done():
+					decision = permissions.Deny
+				}
+				decision = a.Permissions.Commit(request, decision)
+			}
 			emit(Event{Kind: EventToolStart, Tool: name, Text: args})
 			emit(Event{Kind: EventStatus, Text: fmt.Sprintf("running %s…", name)})
-			out, err := a.Tools.Run(ctx, name, args)
+			var out string
+			var err error
+			if decision == permissions.Deny {
+				out = "error: permission denied"
+			} else {
+				out, err = a.Tools.Run(ctx, name, args)
+			}
 			if err != nil {
 				out = fmt.Sprintf("error: %v\n%s", err, out)
 			}
@@ -538,8 +575,8 @@ func recoverShellishContent(content string, known map[string]struct{}) ([]llm.To
 	if _, ok := known["run_shell"]; ok {
 		b, _ := json.Marshal(map[string]string{"command": cmd})
 		tc := llm.ToolCall{
-			ID:   "recover_shell",
-			Type: "function",
+			ID:       "recover_shell",
+			Type:     "function",
 			Function: llm.FunctionCall{Name: "run_shell", Arguments: string(b)},
 		}
 		return []llm.ToolCall{tc}, "", "recovered shell dump → run_shell"

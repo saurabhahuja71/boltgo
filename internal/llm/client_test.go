@@ -62,3 +62,13 @@ func TestStreamChunkAcceptsFullMessage(t *testing.T) {
 		t.Fatalf("args %q", tc[0].Function.Arguments)
 	}
 }
+
+func TestStreamChunkReadsUsage(t *testing.T) {
+	var chunk streamChunk
+	if err := json.Unmarshal([]byte(`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`), &chunk); err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Usage == nil || chunk.Usage.TotalTokens != 19 {
+		t.Fatalf("usage = %#v", chunk.Usage)
+	}
+}

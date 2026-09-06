@@ -3,6 +3,13 @@
 # Named preset: ollama-local | ollama-remote | sglang | xai | openai | custom
 provider = "ollama-local"
 
+# User workspace; defaults to the directory where bolt is launched.
+# workspace = "/scratch/projects/my-repo"
+
+# Interactive permission policy: ask | allow | plan
+permission_mode = "ask"
+vision_enabled = false
+
 # Chat model (Ollama tag, SGLang served-model-name, or cloud model id)
 # Default for Go + documentation agent work: qwen2.5-coder:32b
 # (see docs/grok-parity-roadmap.md). Alternate Ollama: qwen3-coder:30b

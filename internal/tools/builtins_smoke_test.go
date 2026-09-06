@@ -53,6 +53,22 @@ func TestBuiltinsBasic(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOptionControlsShellAndFiles(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "note.txt"), []byte("workspace"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := DefaultBuiltinsOpts(BuiltinOpts{EnableShell: true, Workspace: workspace})
+	out, err := r.Run(context.Background(), "read_file", `{"path":"note.txt"}`)
+	if err != nil || !strings.HasSuffix(out, "\nworkspace") {
+		t.Fatalf("read_file = %q, %v", out, err)
+	}
+	out, err = r.Run(context.Background(), "run_shell", `{"command":"pwd"}`)
+	if err != nil || strings.TrimSpace(out) != workspace {
+		t.Fatalf("run_shell pwd = %q, %v", out, err)
+	}
+}
+
 func findModuleRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()

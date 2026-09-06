@@ -11,7 +11,7 @@ import (
 )
 
 // repoMap builds a compact project tree (Grok/Cursor-style repo overview).
-type repoMap struct{}
+type repoMap struct{ Workspace string }
 
 func (repoMap) Name() string { return "repo_map" }
 func (repoMap) Description() string {
@@ -39,7 +39,7 @@ func (repoMap) Schema() map[string]any {
 	}
 }
 
-func (repoMap) Run(_ context.Context, argsJSON string) (string, error) {
+func (r repoMap) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Path       string `json:"path"`
 		MaxDepth   int    `json:"max_depth"`
@@ -63,7 +63,7 @@ func (repoMap) Run(_ context.Context, argsJSON string) (string, error) {
 		in.MaxEntries = 500
 	}
 
-	root = filepath.Clean(root)
+	root = filepath.Clean(resolveWorkspacePath(r.Workspace, root))
 	st, err := os.Stat(root)
 	if err != nil {
 		return "", err
