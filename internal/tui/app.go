@@ -165,10 +165,13 @@ func (m model) layoutFor(width, height int) tuiLayout {
 	l.conversationWidth = max(1, width-l.todoWidth)
 	fixed := l.headerHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight
 	if m.commandsOpen {
-		fixed += 10
+		fixed += lipgloss.Height(styleBox.Width(max(10, width)).Render(commandsText()))
 	}
 	if m.pendingApproval != nil {
-		fixed += 7
+		fixed += lipgloss.Height(styleBox.Width(max(10, width)).Render(approvalText(m.pendingApproval)))
+	}
+	if m.modelPick != nil {
+		fixed += lipgloss.Height(m.modelPickerView(width + 2))
 	}
 	l.conversationHeight = max(1, height-fixed)
 	return l

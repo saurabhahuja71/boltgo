@@ -280,17 +280,24 @@ func TestViewNoDuplicateFixedRegionsAfterExecution(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = updated.(model)
 	assertFixedRegions := func(state string) {
-		header, status, input, footer := fixedRegionCounts(m.View())
+		view := m.View()
+		header, status, input, footer := fixedRegionCounts(view)
 		if header != 1 || status != 1 || input != 1 || footer != 1 {
-			t.Fatalf("%s fixed regions: header=%d status=%d input=%d footer=%d\n%s", state, header, status, input, footer, m.View())
+			t.Fatalf("%s fixed regions: header=%d status=%d input=%d footer=%d\n%s", state, header, status, input, footer, view)
+		}
+		if got := lipgloss.Height(view); got != m.height {
+			t.Fatalf("%s rendered height=%d want=%d\n%s", state, got, m.height, view)
 		}
 		l := m.layoutFor(m.width, m.height)
 		fixed := l.headerHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight
 		if m.commandsOpen {
-			fixed += 10
+			fixed += lipgloss.Height(styleBox.Width(max(10, m.width)).Render(commandsText()))
 		}
 		if m.pendingApproval != nil {
-			fixed += 7
+			fixed += lipgloss.Height(styleBox.Width(max(10, m.width)).Render(approvalText(m.pendingApproval)))
+		}
+		if m.modelPick != nil {
+			fixed += lipgloss.Height(m.modelPickerView(m.width + 2))
 		}
 		if got := m.vp.Height + fixed; got != m.height {
 			t.Fatalf("%s layout height=%d want=%d", state, got, m.height)
