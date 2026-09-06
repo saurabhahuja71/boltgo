@@ -22,20 +22,21 @@ import (
 var (
 	// Release builds override this with -X main.version. Keep local/source
 	// builds aligned with the current published Bolt baseline as well.
-	version       = "1.1.10"
-	flagProvider  string
-	flagModel     string
-	flagBaseURL   string
-	flagAPIKey    string
-	flagConfig    string
-	flagNoMCP     bool
-	flagNoTools   bool
-	flagShell     bool
-	flagNoShell   bool
-	flagPing      bool
-	flagResume    bool
-	flagNoResume  bool
-	flagWorkspace string
+	version        = "1.1.11"
+	upgradeTimeout = 10 * time.Minute
+	flagProvider   string
+	flagModel      string
+	flagBaseURL    string
+	flagAPIKey     string
+	flagConfig     string
+	flagNoMCP      bool
+	flagNoTools    bool
+	flagShell      bool
+	flagNoShell    bool
+	flagPing       bool
+	flagResume     bool
+	flagNoResume   bool
+	flagWorkspace  string
 )
 
 func main() {
@@ -131,7 +132,7 @@ func runUpgrade() error {
 		Repository: repository,
 		APIBaseURL: os.Getenv("BOLT_UPGRADE_API_URL"),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), upgradeTimeout)
 	defer cancel()
 	result, err := client.Upgrade(ctx, executable, version, os.Stderr)
 	if err != nil {
