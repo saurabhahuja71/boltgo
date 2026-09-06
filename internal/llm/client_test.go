@@ -43,6 +43,16 @@ func TestFunctionCallArgumentsAcceptProviderAliases(t *testing.T) {
 	}
 }
 
+func TestToolCallArgumentsAcceptTopLevelProviderShape(t *testing.T) {
+	var call ToolCall
+	if err := json.Unmarshal([]byte(`{"name":"read_file","parameters":{"path":"main.py"}}`), &call); err != nil {
+		t.Fatal(err)
+	}
+	if call.Function.Name != "read_file" || call.Function.Arguments != `{"path":"main.py"}` {
+		t.Fatalf("decoded top-level tool call: %+v", call)
+	}
+}
+
 func TestStreamChunkAcceptsFullMessage(t *testing.T) {
 	// Shape the old sglang-toolcall-proxy emitted for stream:true clients.
 	raw := `{

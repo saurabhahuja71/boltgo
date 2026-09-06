@@ -52,12 +52,12 @@ var (
 	fgBody = lipgloss.AdaptiveColor{Light: "#1e293b", Dark: "#e2e8f0"}
 
 	styleHeader       = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Padding(0, 1)
-	styleStatus       = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
-	styleHelp         = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
+	styleStatus       = lipgloss.NewStyle().Foreground(colorMuted).Background(colorBackground).Padding(0, 1)
+	styleHelp         = lipgloss.NewStyle().Foreground(colorMuted).Background(colorBackground).Padding(0, 1)
 	styleUser         = lipgloss.NewStyle().Foreground(colorUser).Bold(true)
 	styleAsst         = lipgloss.NewStyle().Foreground(colorAsst).Bold(true)
-	styleTool         = lipgloss.NewStyle().Foreground(colorTool)
-	styleErr          = lipgloss.NewStyle().Foreground(colorError)
+	styleTool         = lipgloss.NewStyle().Foreground(colorTool).Background(colorBackground)
+	styleErr          = lipgloss.NewStyle().Foreground(colorError).Background(colorBackground)
 	styleBox          = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Background(colorBackground).Padding(0, 1)
 	styleConversation = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
 
@@ -65,8 +65,8 @@ var (
 	// compact headers (below), code blocks, and semantic panels. Applying a
 	// background to a width-constrained multiline style paints a band behind
 	// every physical line in the conversation.
-	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
-	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
+	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground).Padding(0, 1)
+	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground).Padding(0, 1)
 	styleRoot       = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)
 )
 
@@ -322,9 +322,11 @@ func newGlamourRenderer(width int, theme string) *glamour.TermRenderer {
 	}
 	style := glamourstyles.DarkStyleConfig
 	codeTheme := "monokai"
+	background := "233"
 	if theme == "light" {
 		style = glamourstyles.LightStyleConfig
 		codeTheme = "github"
+		background = "255"
 	}
 	// Glamour registers its custom Chroma theme globally under one fixed name.
 	// The first renderer (normally dark) therefore wins forever, even after a
@@ -332,6 +334,9 @@ func newGlamourRenderer(width int, theme string) *glamour.TermRenderer {
 	// keeps syntax highlighting while making the code palette switchable.
 	style.CodeBlock.Chroma = nil
 	style.CodeBlock.Theme = codeTheme
+	style.Document.StylePrimitive.BackgroundColor = &background
+	style.Paragraph.StylePrimitive.BackgroundColor = &background
+	style.CodeBlock.StylePrimitive.BackgroundColor = &background
 	// Glamour's standard styles reserve a two-cell document margin and another
 	// margin around code blocks. Those are Markdown document-layout choices,
 	// not source content, and make fenced code look padded or indented. Keep
@@ -1277,10 +1282,6 @@ func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 		m.modelPick = &modelPicker{ids: ids, idx: idx}
 		m.ta.Blur()
 		m.status = "pick model · Tab next · Enter select · Esc cancel"
-		m.lines = append(m.lines, chatLine{
-			role: "system",
-			text: fmt.Sprintf("Select a model (%d available)\n  Tab / ↓  next ·  Shift+Tab / ↑  prev ·  Enter  select ·  Esc  cancel\n  Or type: /model <name>", len(ids)),
-		})
 		m.refreshViewport()
 		return m, nil
 	}
@@ -2129,6 +2130,12 @@ func todoText() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func renderTodoPanel(width, height int) string {
+	// Lip Gloss Height excludes the panel border; reserve its two border rows
+	// so the rendered outer panel is exactly the top-content height.
+	return styleBox.Width(max(10, width)).Height(max(1, height-2)).Render(todoText())
+}
+
 func countOpenTodos(items []todos.Item) int {
 	n := 0
 	for _, item := range items {
@@ -2185,16 +2192,16 @@ func applyTheme(name string) {
 		fgBody = lipgloss.AdaptiveColor{Light: "#1e293b", Dark: "#e2e8f0"}
 	}
 	styleHeader = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Padding(0, 1)
-	styleStatus = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
-	styleHelp = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
+	styleStatus = lipgloss.NewStyle().Foreground(colorMuted).Background(colorBackground).Padding(0, 1)
+	styleHelp = lipgloss.NewStyle().Foreground(colorMuted).Background(colorBackground).Padding(0, 1)
 	styleUser = lipgloss.NewStyle().Foreground(colorUser).Bold(true)
 	styleAsst = lipgloss.NewStyle().Foreground(colorAsst).Bold(true)
-	styleTool = lipgloss.NewStyle().Foreground(colorTool)
-	styleErr = lipgloss.NewStyle().Foreground(colorError)
+	styleTool = lipgloss.NewStyle().Foreground(colorTool).Background(colorBackground)
+	styleErr = lipgloss.NewStyle().Foreground(colorError).Background(colorBackground)
 	styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Background(colorBackground).Padding(0, 1)
 	styleConversation = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
-	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
-	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
+	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground).Padding(0, 1)
+	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground).Padding(0, 1)
 	styleRoot = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)
 }
 
@@ -2271,7 +2278,9 @@ func (m model) View() string {
 	cwdLine := styleHelp.Render("📁 " + displayCwdAt(workspace, max(20, w-8)))
 	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
 	if m.todoOnSide(w) {
-		todo := styleBox.Width(todoSideWidth(w)).Render(todoText())
+		// A side Todo pane is part of the top content row, so its height must
+		// follow the conversation viewport rather than its two-line contents.
+		todo := renderTodoPanel(todoSideWidth(w), m.vp.Height)
 		divider := lipgloss.NewStyle().Foreground(colorBorder).Render("│")
 		body = lipgloss.JoinHorizontal(lipgloss.Top, body, divider, todo)
 	}

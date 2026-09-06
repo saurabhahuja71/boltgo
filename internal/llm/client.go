@@ -78,6 +78,63 @@ type ToolCall struct {
 	Function FunctionCall `json:"function"`
 }
 
+// UnmarshalJSON accepts both the OpenAI function wrapper and provider variants
+// that put the function name/arguments directly on the tool call. Keeping this
+// normalization here ensures streamed and non-streamed calls reach the same
+// dispatcher arguments instead of silently becoming {}.
+func (t *ToolCall) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID         string          `json:"id"`
+		Type       string          `json:"type"`
+		Function   json.RawMessage `json:"function"`
+		Name       string          `json:"name"`
+		Tool       string          `json:"tool"`
+		Arguments  json.RawMessage `json:"arguments"`
+		Parameters json.RawMessage `json:"parameters"`
+		Args       json.RawMessage `json:"args"`
+		Path       string          `json:"path"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	t.ID, t.Type = raw.ID, raw.Type
+	if len(raw.Function) > 0 && string(raw.Function) != "null" {
+		if err := json.Unmarshal(raw.Function, &t.Function); err != nil {
+			return err
+		}
+	}
+	if t.Function.Name == "" {
+		t.Function.Name = raw.Name
+		if t.Function.Name == "" {
+			t.Function.Name = raw.Tool
+		}
+	}
+	if t.Function.Arguments == "" {
+		arguments := raw.Arguments
+		if len(arguments) == 0 || string(arguments) == "null" {
+			arguments = raw.Parameters
+		}
+		if len(arguments) == 0 || string(arguments) == "null" {
+			arguments = raw.Args
+		}
+		if (len(arguments) == 0 || string(arguments) == "null") && raw.Path != "" {
+			arguments, _ = json.Marshal(map[string]string{"path": raw.Path})
+		}
+		if len(arguments) > 0 && string(arguments) != "null" {
+			if arguments[0] == '"' {
+				var s string
+				if err := json.Unmarshal(arguments, &s); err != nil {
+					return err
+				}
+				t.Function.Arguments = s
+			} else {
+				t.Function.Arguments = string(arguments)
+			}
+		}
+	}
+	return nil
+}
+
 type FunctionCall struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`

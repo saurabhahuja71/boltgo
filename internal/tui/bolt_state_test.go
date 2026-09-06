@@ -153,6 +153,9 @@ func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
 	if m.vp.Height < 20 {
 		t.Fatalf("side todo panel incorrectly reduced conversation height: %d", m.vp.Height)
 	}
+	if got := lipgloss.Height(renderTodoPanel(todoSideWidth(120), m.vp.Height)); got != m.vp.Height {
+		t.Fatalf("side todo panel did not fill content height: got=%d want=%d", got, m.vp.Height)
+	}
 }
 
 func TestTodoPanelIsPresentInFinalViewAtWideWidth(t *testing.T) {
@@ -359,9 +362,9 @@ func TestConversationBackgroundsStayOnHeaders(t *testing.T) {
 	}
 	m.refreshViewport()
 	content := m.vp.View()
-	backgrounds := strings.Count(content, "48;2;")
-	if backgrounds != 3 {
-		t.Fatalf("conversation painted %d background regions, want one per header: %q", backgrounds, content)
+	backgrounds := strings.Count(content, "48;2;15;23;42")
+	if backgrounds < 3 {
+		t.Fatalf("conversation did not retain the active surface background: %q", content)
 	}
 }
 
@@ -400,8 +403,8 @@ func TestLightThemeCodeBlockUsesLightBackground(t *testing.T) {
 	if strings.Contains(body, "48;2;55;55;55") || strings.Contains(body, "48;5;236") || strings.Contains(body, "48;2;39;40;34") {
 		t.Fatalf("light code block retained dark Glamour background: %q", body)
 	}
-	if strings.Contains(body, "48;") {
-		t.Fatalf("light code block introduced an opaque terminal background: %q", body)
+	if !strings.Contains(body, "48;5;255") {
+		t.Fatalf("light code block has no deliberate light background: %q", body)
 	}
 }
 
