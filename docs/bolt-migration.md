@@ -12,13 +12,14 @@ identifiers.
 | Streaming | LLM SSE -> `agent.Event` -> Bubble Tea messages | Reused; token batching and throttled paints are in place. |
 | Filesystem/shell/git tools | `internal/tools` registry | Reused and now receives an explicit workspace for core file, git and shell tools. |
 | MCP | `internal/mcp.Manager` | Reused; connected tools register in the same registry. |
-| Conversation viewport | `internal/tui` Bubbles viewport | Reused; only the viewport scrolls, with follow-at-bottom behavior and mouse-cell input. |
+| Conversation viewport | `internal/tui` Bubbles viewport | Reused; only the viewport scrolls, with follow-at-bottom behavior, keyboard/mouse input, and a fixed responsive todo panel. |
 | Session persistence | `Agent.SaveSessionPath` / `LoadSessionPath` | Added for workspace-local `.bolt/sessions/latest.json`; fresh startup is the default and resume is explicit. |
 | Permission mode | `internal/permissions` + `agent.EventPermission` | Migrated; ASK/ALLOW/PLAN, safe/confirm/dangerous levels, once/session/permanent grants, deny path, and fixed approval UI. |
 | Todos | `internal/todos` + todo tools + fixed TUI panel | Migrated; shared store is independent of conversation scrolling and updates through the existing tool loop. |
 | Vision | config/runtime TUI state | Toggle and status are migrated; current Agenterm text client has no image-content transport, so ON is reported as requested-but-unsupported and no image call is fabricated. |
 | Bolt footer/shortcut semantics | `internal/tui` model state and Lip Gloss view | Migrated; Ctrl+Q/R/L/Y/T/O/B, Enter, Shift+Enter, dynamic permission/mouse/vision/model/status/token fallback, fixed panels. |
 | `bolt`, `bolt-s1`, `bolt-s2`, `bolt-s3` launchers | one executable selected by `argv[0]` | Migrated as thin shared-runtime aliases. S1 defaults to Ollama `127.0.0.1:11435/v1` + `qwen3-coder:latest`; S2 defaults to `SGLANG_HOST` or `127.0.0.1:30002` + `SGLANG_DEFAULT_MODEL`/`Darwin-9B-Opus`; S3 defaults to `SGLANG3_BASE_URL` or `127.0.0.1:30004` + `SGLANG3_MODEL`/`/sglang-data/models/gpt-oss-120b`. |
+| Upgrade | historical `bolt upgrade` installer command | Restored as `bolt upgrade`; it checks the latest `boltgo` GitHub release, verifies published SHA-256 assets, and atomically replaces only the executable. Configuration, permissions, sessions, and workspace files are untouched. Existing `agenterm-*` release asset names remain supported for compatibility. |
 
 ## Current execution contract
 
@@ -95,7 +96,10 @@ The PTY smoke verified live streaming, token/status updates, approval/deny,
 Ctrl+Q/R/L/Y/T/O/B, fixed input/footer/workspace, and clean teardown. Full
 mouse-wheel traversal and terminal-resize behavior still need a terminal
 environment that can generate wheel/resize events; the canonical Bubbles
-viewport remains in place and the automated state tests pass.
+viewport remains in place and the automated state tests pass. The conversation
+viewport now routes plain Up/Down when the input is empty, preserves scroll
+intent during streaming, and keeps todos in a fixed right-side panel at normal
+widths with a narrow vertical fallback.
 
 ## Permission behavior
 

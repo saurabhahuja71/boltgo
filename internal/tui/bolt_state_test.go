@@ -2,6 +2,8 @@ package tui
 
 import (
 	"github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/saurabhahuja71/agenterm/internal/agent"
 	"github.com/saurabhahuja71/agenterm/internal/config"
 	"github.com/saurabhahuja71/agenterm/internal/llm"
@@ -87,6 +89,126 @@ func TestWindowSizeKeepsFixedRegionsUsable(t *testing.T) {
 		if !containsText(view, want) {
 			t.Fatalf("resized view missing %q", want)
 		}
+	}
+}
+
+func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
+	m := testModel(t)
+	m.todosOpen = true
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m = updated.(model)
+	if !m.todoOnSide(120) || m.vp.Width != 85 {
+		t.Fatalf("todo side layout not applied: side=%v viewport=%d", m.todoOnSide(120), m.vp.Width)
+	}
+	view := m.View()
+	if strings.Index(view, "Todos") < 0 || strings.Index(view, "Todos") > strings.Index(view, "Bolt |") {
+		t.Fatalf("todo panel was not rendered beside conversation before fixed footer")
+	}
+	if m.vp.Height < 20 {
+		t.Fatalf("side todo panel incorrectly reduced conversation height: %d", m.vp.Height)
+	}
+}
+
+func TestTodoPanelFallsBackAboveFooterWhenNarrow(t *testing.T) {
+	m := testModel(t)
+	m.todosOpen = true
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 36})
+	m = updated.(model)
+	if m.todoOnSide(80) || m.vp.Width != 78 {
+		t.Fatalf("narrow todo layout did not use vertical fallback: side=%v viewport=%d", m.todoOnSide(80), m.vp.Width)
+	}
+	view := m.View()
+	todoAt := strings.Index(view, "Todos")
+	statusAt := strings.Index(view, "Bolt |")
+	if todoAt < 0 || statusAt < 0 || todoAt > statusAt {
+		t.Fatalf("narrow todo panel is not fixed above status/footer: todo=%d status=%d view=%q", todoAt, statusAt, view)
+	}
+}
+
+func TestTodoToggleRelayoutsConversationWithoutChangingFixedFooter(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m = updated.(model)
+	before := m.vp.Width
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	m = updated.(model)
+	if !m.todosOpen || m.vp.Width >= before {
+		t.Fatalf("todo toggle did not reserve right panel: before=%d after=%d", before, m.vp.Width)
+	}
+	if !containsText(m.View(), "Bolt |") || !containsText(m.View(), "Message…") {
+		t.Fatal("todo toggle displaced fixed footer/input")
+	}
+}
+
+func TestThemeChangeRebuildsVisibleStylesWithoutResettingState(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	m := testModel(t)
+	m.todosOpen = true
+	m.lines = append(m.lines, chatLine{role: "user", text: "keep conversation"})
+	m.refreshViewport()
+	before := m.View()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = updated.(model)
+	after := m.View()
+	if m.themeName != "black" || before == after {
+		t.Fatalf("theme action did not change rendered output: state=%q", m.themeName)
+	}
+	if !m.todosOpen || !containsText(after, "keep conversation") {
+		t.Fatal("theme change reset todo or conversation state")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	if updated.(model).themeName != "dark" {
+		t.Fatal("theme did not cycle back to dark")
+	}
+}
+
+func TestPlainArrowKeysScrollWhenInputIsEmpty(t *testing.T) {
+	m := testModel(t)
+	m.vp.Width = 80
+	m.vp.Height = 5
+	m.vp.SetContent(strings.Repeat("conversation line\n", 40))
+	m.vp.GotoBottom()
+	before := m.vp.YOffset
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if updated.(model).vp.YOffset >= before {
+		t.Fatalf("plain up did not scroll: before=%d after=%d", before, updated.(model).vp.YOffset)
+	}
+	before = updated.(model).vp.YOffset
+	updated, _ = updated.(model).Update(tea.KeyMsg{Type: tea.KeyDown})
+	if updated.(model).vp.YOffset <= before {
+		t.Fatalf("plain down did not scroll: before=%d after=%d", before, updated.(model).vp.YOffset)
+	}
+}
+
+func TestHelpDocumentsBoltShortcuts(t *testing.T) {
+	text := helpText()
+	for _, want := range []string{"Ctrl+L          Toggle mouse mode", "Ctrl+Y          Toggle vision state", "Ctrl+T          Toggle todos", "Ctrl+O          Show commands", "Ctrl+B          Toggle theme", "Shift+Enter"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("help missing %q", want)
+		}
+	}
+}
+
+func TestStreamingPreservesScrollIntent(t *testing.T) {
+	m := testModel(t)
+	m.vp.Width = 60
+	m.vp.Height = 5
+	m.lines = append(m.lines, chatLine{role: "assistant", text: strings.Repeat("long response ", 80)})
+	m.refreshViewport()
+	m.vp.GotoBottom()
+	m.lines = append(m.lines, chatLine{role: "assistant", text: "newest"})
+	m.refreshViewport()
+	if !m.vp.AtBottom() {
+		t.Fatal("bottom-following stream did not stay at bottom")
+	}
+	m.vp.ScrollUp(4)
+	before := m.vp.YOffset
+	m.lines = append(m.lines, chatLine{role: "assistant-stream", text: strings.Repeat("more ", 40)})
+	m.refreshViewport()
+	if m.vp.YOffset != before {
+		t.Fatalf("streaming yanked scrolled-up user to bottom: before=%d after=%d", before, m.vp.YOffset)
 	}
 }
 

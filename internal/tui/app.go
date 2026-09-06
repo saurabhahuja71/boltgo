@@ -65,6 +65,34 @@ var (
 			Padding(0, 1)
 )
 
+const todoSideThreshold = 90
+
+func todoSideWidth(width int) int {
+	if width < todoSideThreshold {
+		return 0
+	}
+	if width < 120 {
+		return 28
+	}
+	return 32
+}
+
+func todoPanelHeight() int {
+	return strings.Count(todoText(), "\n") + 3
+}
+
+func (m model) conversationWidth(width int) int {
+	boxWidth := max(10, width-2)
+	if side := todoSideWidth(width); m.todosOpen && side > 0 {
+		return max(20, boxWidth-side-1)
+	}
+	return max(20, boxWidth)
+}
+
+func (m model) todoOnSide(width int) bool {
+	return m.todosOpen && todoSideWidth(width) > 0
+}
+
 // Deps wired from main.
 type Deps struct {
 	Title       string
@@ -149,6 +177,32 @@ type streamClosedMsg struct{}
 type busyTickMsg time.Time
 type paintDueMsg struct{}
 
+func (m *model) relayout() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	headerH, helpH, cwdH, busyH := 1, 1, 1, 0
+	inputH := m.ta.Height() + 2
+	fixedExtra := 1
+	if m.todosOpen && !m.todoOnSide(m.width) {
+		fixedExtra += todoPanelHeight()
+	}
+	if m.commandsOpen {
+		fixedExtra += 10
+	}
+	if m.pendingApproval != nil {
+		fixedExtra += 7
+	}
+	vpH := m.height - headerH - helpH - cwdH - busyH - inputH - fixedExtra
+	if vpH < 5 {
+		vpH = 5
+	}
+	m.vp.Width = m.conversationWidth(m.width)
+	m.vp.Height = vpH
+	m.ta.SetWidth(max(20, m.width-4))
+	m.renderer = newGlamourRenderer(max(40, m.vp.Width-6))
+}
+
 func New(deps Deps) model {
 	ta := textarea.New()
 	ta.Placeholder = "Message…  /help  /model  /quiet  /verbose"
@@ -159,6 +213,8 @@ func New(deps Deps) model {
 	ta.ShowLineNumbers = false
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	applyTheme("dark")
+	applyTextareaTheme(&ta, "dark")
 	// Enter sends. Shift+Enter and Alt+Enter insert a newline.
 	ta.KeyMap.InsertNewline.SetEnabled(true)
 	ta.KeyMap.InsertNewline.SetKeys("shift+enter", "alt+enter")
@@ -324,26 +380,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		headerH, helpH, cwdH, busyH := 1, 1, 1, 0
-		inputH := m.ta.Height() + 2
-		fixedExtra := 1
-		if m.todosOpen {
-			fixedExtra += len(todos.Global.Items()) + 3
-		}
-		if m.commandsOpen {
-			fixedExtra += 10
-		}
-		if m.pendingApproval != nil {
-			fixedExtra += 7
-		}
-		vpH := msg.Height - headerH - helpH - cwdH - busyH - inputH - fixedExtra
-		if vpH < 5 {
-			vpH = 5
-		}
-		m.vp.Width = max(20, msg.Width-2)
-		m.vp.Height = vpH
-		m.ta.SetWidth(max(20, msg.Width-4))
-		m.renderer = newGlamourRenderer(max(40, msg.Width-8))
+		m.relayout()
 		m.refreshViewport()
 		// Resize often coincides with first paint; scrub leaked OSC once more.
 		if v := m.ta.Value(); v != "" {
@@ -407,9 +444,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+t":
 			m.todosOpen = !m.todosOpen
+			m.relayout()
+			m.refreshViewport()
 			return m, nil
 		case "ctrl+o":
 			m.commandsOpen = !m.commandsOpen
+			m.relayout()
 			return m, nil
 		case "ctrl+b":
 			if m.themeName == "dark" {
@@ -418,6 +458,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.themeName = "dark"
 			}
 			applyTheme(m.themeName)
+			applyTextareaTheme(&m.ta, m.themeName)
 			m.status = "theme: " + m.themeName
 			return m, nil
 		case "enter":
@@ -441,6 +482,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.vp.ScrollDown(1)
 				return m, nil
 			}
+		}
+
+	case tea.MouseMsg:
+		// Only interactive mouse mode consumes terminal mouse events. In SELECT
+		// mode the terminal retains native selection behavior.
+		if m.mouseMode == "INTERACTIVE" {
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, cmd
 		}
 
 	case busyTickMsg:
@@ -660,6 +710,7 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		m.pendingApproval = ev.Permission
 		m.approvalDecision = ev.Decision
 		m.status = "waiting for approval"
+		m.relayout()
 		m.upsertThinkingPlaceholder()
 		return m, m.schedulePaint(true)
 	case agent.EventToken:
@@ -700,6 +751,7 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 	case agent.EventToolEnd:
 		m.pendingApproval = nil
 		m.approvalDecision = nil
+		m.relayout()
 		line := formatToolEnd(ev.Tool, ev.ToolOut, m.verbose)
 		if m.verbose {
 			m.lines = append(m.lines, chatLine{role: "tool", text: line})
@@ -1012,10 +1064,14 @@ Tools: repo_map, grep, fetch, git, str_replace, write_file, run_shell, …
 
 Keys:
   Enter           Send
-  Alt+Enter       Newline in prompt
+  Shift+Enter     Newline in prompt
   Esc / /stop     Cancel in-flight reply
   Ctrl+C          Cancel if busy; quit when idle
-  Ctrl+L          Clear history
+  Ctrl+L          Toggle mouse mode
+  Ctrl+Y          Toggle vision state
+  Ctrl+T          Toggle todos
+  Ctrl+O          Show commands
+  Ctrl+B          Toggle theme
   PgUp / PgDn     Scroll chat (also Ctrl+U / Ctrl+D half-page)
   Ctrl+↑ / Ctrl+↓ Line scroll · Home / End jump
   Mouse wheel     Scroll chat
@@ -1846,6 +1902,12 @@ func (m *model) handleChatScrollKey(msg tea.KeyMsg) bool {
 	case key.Matches(msg, km.Down):
 		m.vp.ScrollDown(1)
 		return true
+	case msg.String() == "up" && strings.TrimSpace(m.ta.Value()) == "":
+		m.vp.ScrollUp(1)
+		return true
+	case msg.String() == "down" && strings.TrimSpace(m.ta.Value()) == "":
+		m.vp.ScrollDown(1)
+		return true
 	case msg.String() == "home", msg.String() == "ctrl+home":
 		m.vp.GotoTop()
 		return true
@@ -1905,6 +1967,7 @@ func (m *model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.approvalDecision <- decision
 	m.pendingApproval = nil
 	m.approvalDecision = nil
+	m.relayout()
 	m.status = "approved"
 	return m, nil
 }
@@ -1949,12 +2012,62 @@ func commandsText() string {
 
 func applyTheme(name string) {
 	if name == "black" {
-		styleHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("#67e8f9")).Bold(true).Padding(0, 1)
-		styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#334155")).Padding(0, 1)
-		return
+		colorMuted = lipgloss.Color("#cbd5e1")
+		colorAccent = lipgloss.Color("#67e8f9")
+		colorUser = lipgloss.Color("#c4b5fd")
+		colorAsst = lipgloss.Color("#86efac")
+		colorTool = lipgloss.Color("#fde68a")
+		colorError = lipgloss.Color("#fca5a5")
+		colorBorder = lipgloss.Color("#334155")
+		bgUser = lipgloss.AdaptiveColor{Light: "#dbeafe", Dark: "#111827"}
+		bgAsst = lipgloss.AdaptiveColor{Light: "#f8fafc", Dark: "#020617"}
+		fgBody = lipgloss.AdaptiveColor{Light: "#0f172a", Dark: "#f8fafc"}
+	} else {
+		colorMuted = lipgloss.Color("#94a3b8")
+		colorAccent = lipgloss.Color("#38bdf8")
+		colorUser = lipgloss.Color("#a78bfa")
+		colorAsst = lipgloss.Color("#4ade80")
+		colorTool = lipgloss.Color("#fbbf24")
+		colorError = lipgloss.Color("#f87171")
+		colorBorder = lipgloss.Color("#1e293b")
+		bgUser = lipgloss.AdaptiveColor{Light: "#e5e7eb", Dark: "#1e293b"}
+		bgAsst = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#0f172a"}
+		fgBody = lipgloss.AdaptiveColor{Light: "#1e293b", Dark: "#e2e8f0"}
 	}
 	styleHeader = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Padding(0, 1)
+	styleStatus = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
+	styleHelp = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
+	styleUser = lipgloss.NewStyle().Foreground(colorUser).Bold(true)
+	styleAsst = lipgloss.NewStyle().Foreground(colorAsst).Bold(true)
+	styleTool = lipgloss.NewStyle().Foreground(colorTool)
+	styleErr = lipgloss.NewStyle().Foreground(colorError)
 	styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
+	styleUserBubble = lipgloss.NewStyle().Background(bgUser).Foreground(fgBody).Padding(0, 1)
+	styleAsstBubble = lipgloss.NewStyle().Background(bgAsst).Foreground(fgBody).Padding(0, 1)
+}
+
+func applyTextareaTheme(ta *textarea.Model, name string) {
+	if ta == nil {
+		return
+	}
+	base := lipgloss.NewStyle().Foreground(fgBody)
+	muted := lipgloss.NewStyle().Foreground(colorMuted)
+	prompt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	cursor := lipgloss.NewStyle().Foreground(colorAccent)
+	if name == "black" {
+		base = base.Background(lipgloss.Color("#020617"))
+	}
+	for _, style := range []*textarea.Style{&ta.FocusedStyle, &ta.BlurredStyle} {
+		style.Base = base
+		style.CursorLine = lipgloss.NewStyle()
+		style.CursorLineNumber = lipgloss.NewStyle()
+		style.EndOfBuffer = muted
+		style.LineNumber = muted
+		style.Placeholder = muted
+		style.Prompt = prompt
+		style.Text = base
+	}
+	ta.Cursor.Style = cursor
 }
 
 func (m model) View() string {
@@ -1962,7 +2075,7 @@ func (m model) View() string {
 	if w == 0 {
 		w = 80
 	}
-	body := styleBox.Width(max(10, w-2)).Render(m.vp.View())
+	body := styleBox.Width(m.vp.Width).Render(m.vp.View())
 	status := m.status
 	if m.busy && status == "ready" {
 		status = "thinking"
@@ -1997,12 +2110,17 @@ func (m model) View() string {
 	}
 	cwdLine := styleHelp.Render("📁 " + displayCwdAt(workspace, max(20, w-8)))
 	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
-	parts := []string{body, statusLine}
+	if m.todoOnSide(w) {
+		todo := styleBox.Width(todoSideWidth(w)).Render(todoText())
+		body = lipgloss.JoinHorizontal(lipgloss.Top, body, " ", todo)
+	}
+	parts := []string{body}
+	if m.todosOpen && !m.todoOnSide(w) {
+		parts = append(parts, styleBox.Width(max(10, w-2)).Render(todoText()))
+	}
+	parts = append(parts, statusLine)
 	if m.pendingApproval != nil {
 		parts = append(parts, styleBox.Width(max(10, w-2)).Render(approvalText(m.pendingApproval)))
-	}
-	if m.todosOpen {
-		parts = append(parts, styleBox.Width(max(10, w-2)).Render(todoText()))
 	}
 	if m.commandsOpen {
 		parts = append(parts, styleBox.Width(max(10, w-2)).Render(commandsText()))

@@ -15,6 +15,7 @@ import (
 	"github.com/saurabhahuja71/agenterm/internal/permissions"
 	"github.com/saurabhahuja71/agenterm/internal/tools"
 	"github.com/saurabhahuja71/agenterm/internal/tui"
+	"github.com/saurabhahuja71/agenterm/internal/upgrade"
 	"github.com/spf13/cobra"
 )
 
@@ -93,6 +94,16 @@ func main() {
 	initCmd.Flags().BoolVar(&initForce, "force", false, "overwrite existing config with defaults")
 	root.AddCommand(initCmd)
 
+	upgradeCmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Upgrade Bolt to the latest GitHub release",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUpgrade()
+		},
+	}
+	root.AddCommand(upgradeCmd)
+
 	execCmd := &cobra.Command{
 		Use:   "exec <prompt>",
 		Short: "Run one prompt headlessly with tools enabled",
@@ -106,6 +117,28 @@ func main() {
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func runUpgrade() error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find Bolt executable: %w", err)
+	}
+	repository := envOr("BOLT_UPGRADE_REPOSITORY", upgrade.DefaultRepository)
+	client := upgrade.Client{
+		Repository: repository,
+		APIBaseURL: os.Getenv("BOLT_UPGRADE_API_URL"),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	result, err := client.Upgrade(ctx, executable, version, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("bolt upgrade failed: %w", err)
+	}
+	if !result.Updated {
+		fmt.Fprintf(os.Stdout, "Bolt %s is already up to date (latest: %s)\n", version, result.LatestVersion)
+	}
+	return nil
 }
 
 func launcherName() string {

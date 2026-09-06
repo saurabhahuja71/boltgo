@@ -403,6 +403,7 @@ bolt --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf
 bolt --no-tools           # pure chat (faster)
 bolt --shell              # allow run_shell
 bolt --no-mcp
+bolt upgrade              # download and atomically install the latest Go release
 ```
 
 ### In-chat
