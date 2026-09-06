@@ -44,6 +44,23 @@ func TestNormalizeToolNameRepairsConcatenatedProviderNames(t *testing.T) {
 	}
 }
 
+func TestSanitizeReadFileArgumentsNormalizesProviderWrappers(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args string
+		want string
+	}{
+		{name: "file path alias", args: `{"file_path":"main.py"}`, want: `{"path":"main.py"}`},
+		{name: "nested object", args: `{"parameters":{"path":"main.py"}}`, want: `{"path":"main.py"}`},
+		{name: "nested string", args: `{"arguments":"{\"path\":\"main.py\"}"}`, want: `{"path":"main.py"}`},
+		{name: "missing remains missing", args: `{}`, want: `{}`},
+	} {
+		if got := sanitizeToolArgsJSON("read_file", test.args); got != test.want {
+			t.Fatalf("%s: got %s want %s", test.name, got, test.want)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
 		(len(s) > 0 && (func() bool {

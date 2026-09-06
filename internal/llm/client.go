@@ -394,7 +394,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 					acc.Function.Name = tc.Function.Name
 				}
 				if tc.Function.Arguments != "" {
-					acc.Function.Arguments = tc.Function.Arguments
+					acc.Function.Arguments = mergeToolArgument(acc.Function.Arguments, tc.Function.Arguments)
 				}
 				if h != nil {
 					h.OnToolCallDelta(idx, *acc)
@@ -469,6 +469,22 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		}
 	}
 	return msg, nil
+}
+
+// mergeToolArgument handles both delta fragments and proxies that emit a
+// cumulative full-message argument on successive SSE frames. It never lets a
+// later empty/short fragment erase an already accumulated path.
+func mergeToolArgument(existing, incoming string) string {
+	if existing == "" {
+		return incoming
+	}
+	if incoming == "" || strings.HasPrefix(incoming, existing) {
+		return incoming
+	}
+	if strings.HasPrefix(existing, incoming) {
+		return existing
+	}
+	return existing + incoming
 }
 
 // Chat non-streaming convenience.

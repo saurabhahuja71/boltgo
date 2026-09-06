@@ -629,8 +629,45 @@ func sanitizeToolArgsJSON(name, args string) string {
 	if args == "" || args == "null" {
 		return "{}"
 	}
-	// Already an object
+	// Already an object. Provider adapters sometimes wrap arguments one more
+	// time (arguments/parameters/args), or call the required read_file field
+	// file_path. Normalize those shapes before dispatch; do not invent a path
+	// when none is present.
 	if strings.HasPrefix(args, "{") && json.Valid([]byte(args)) {
+		if name == "read_file" {
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(args), &object); err == nil {
+				for _, key := range []string{"path", "file_path", "filepath", "filename"} {
+					var path string
+					if raw, ok := object[key]; ok && json.Unmarshal(raw, &path) == nil && strings.TrimSpace(path) != "" {
+						if key == "path" {
+							return args
+						}
+						object["path"], _ = json.Marshal(path)
+						delete(object, key)
+						out, _ := json.Marshal(object)
+						return string(out)
+					}
+				}
+				for _, key := range []string{"arguments", "parameters", "args"} {
+					raw, ok := object[key]
+					if !ok {
+						continue
+					}
+					var nested string
+					if len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &nested) == nil {
+						raw = json.RawMessage(nested)
+					}
+					normalized := sanitizeToolArgsJSON(name, string(raw))
+					var nestedObject map[string]json.RawMessage
+					if json.Unmarshal([]byte(normalized), &nestedObject) == nil {
+						if _, ok := nestedObject["path"]; ok {
+							return string(normalized)
+						}
+					}
+				}
+			}
+		}
 		return args
 	}
 	// Bare JSON array (git models love this) → wrap

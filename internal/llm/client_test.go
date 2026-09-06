@@ -1,7 +1,10 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -96,5 +99,40 @@ func TestStreamChunkReadsUsage(t *testing.T) {
 	}
 	if chunk.Usage == nil || chunk.Usage.TotalTokens != 19 {
 		t.Fatalf("usage = %#v", chunk.Usage)
+	}
+}
+
+func TestChatStreamAccumulatesSplitToolArgumentsBeforeReturning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"read_file\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"pa\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"th\\\":\\\"main.py\\\"}\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	message, err := client.ChatStream(context.Background(), ChatRequest{Model: "test"}, testStreamHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 1 || message.ToolCalls[0].Function.Name != "read_file" ||
+		message.ToolCalls[0].Function.Arguments != `{"path":"main.py"}` {
+		t.Fatalf("assembled tool call: %+v", message.ToolCalls)
+	}
+}
+
+type testStreamHandler struct{}
+
+func (testStreamHandler) OnToken(string)                {}
+func (testStreamHandler) OnToolCallDelta(int, ToolCall) {}
+func (testStreamHandler) OnStatus(string)               {}
+
+func TestMergeToolArgumentDoesNotEraseAccumulatedFragments(t *testing.T) {
+	if got := mergeToolArgument(`{"path":"main`, `{"path":"main.py"}`); got != `{"path":"main.py"}` {
+		t.Fatalf("cumulative merge=%q", got)
+	}
+	if got := mergeToolArgument(`{"path":"main`, `.py"}`); got != `{"path":"main.py"}` {
+		t.Fatalf("fragment merge=%q", got)
 	}
 }
