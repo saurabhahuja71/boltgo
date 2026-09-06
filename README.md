@@ -1,15 +1,11 @@
-# Bolt — Go Terminal Coding Agent (Ollama, SGLang, OpenAI, xAI + MCP Client)
+# Bolt — Terminal AI Coding Assistant
 
-Bolt is the primary Go implementation in this repository. It reuses the
-historical Agenterm package/module foundation; `agenterm` references below are
-kept where they describe that compatibility foundation, module path, or
-existing tooling.
-
-**Terminal AI agent** and **coding assistant in the terminal** for [Ollama](https://ollama.com), [SGLang](https://github.com/sgl-project/sglang), [xAI](https://x.ai), [OpenAI](https://openai.com), and any **OpenAI-compatible** API. Full-screen **TUI**, optional **file/shell tools**, and **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** client support—one static **Go** binary.
-
-> **Lab 1** in the [AI · Agents · MCP learning path](https://github.com/saurabhahuja71/learning-path#7-ai--agents--mcp) · Audience: intermediate · Time: ~1 hour to first chat · Level: intermediate
-
-**SEO keywords:** *terminal AI agent*, *Ollama TUI*, *SGLang OpenAI-compatible*, *OpenAI compatible CLI agent*, *MCP client Go*, *local LLM coding agent*, *agenterm tutorial*, *AI pair programmer terminal*.
+Bolt is a focused terminal AI assistant for developers. It connects to
+[Ollama](https://ollama.com), [SGLang](https://github.com/sgl-project/sglang),
+[OpenAI](https://openai.com), [xAI](https://x.ai), or any OpenAI-compatible API.
+It provides a full-screen terminal interface, streaming responses, optional
+workspace tools, and [MCP](https://modelcontextprotocol.io) support in one
+portable Go binary.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
@@ -20,9 +16,9 @@ existing tooling.
 
 | | |
 |---|---|
-| **Best for** | Developers who want Ollama, SGLang, or any `/v1` chat API in the terminal with optional coding tools |
-| **Runs on** | Linux, macOS, Windows · Docker / Podman |
-| **Not** | A web UI or desktop app — pure terminal |
+| **Best for** | Terminal-based chat and coding tasks with local or hosted models |
+| **Runs on** | Linux, macOS, Windows, Docker, and Podman |
+| **Requires** | A reachable Ollama, SGLang, OpenAI, xAI, or compatible API |
 
 ```
 You (TUI)
@@ -35,21 +31,35 @@ bolt  ──►  Ollama / SGLang / xAI / OpenAI  (POST /v1/chat/completions)
 
 ---
 
-## Get started in 60 seconds
+## Get started
 
-**1. Install** (Linux / macOS):
+### Prerequisites
+
+You need:
+
+- A terminal with an interactive TTY.
+- A running model API. Bolt does not download or host models.
+- A model available from that API.
+
+Ollama is the simplest local option. Install it from [ollama.com](https://ollama.com),
+then run `ollama serve` and download a model with `ollama pull`.
+
+### Install and start
+
+Install the latest release on Linux or macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
 ```
 
-The primary binary goes to `~/.local/bin/bolt`; `agenterm` remains a compatibility alias, and `bolt-s1`, `bolt-s2`, and `bolt-s3` are installed alongside it. If the shell cannot find it:
+The installer places `bolt` in `~/.local/bin` and creates compatibility
+launchers. If the shell cannot find it:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-**2. Start a backend** (pick one):
+Start Ollama and download a model:
 
 ```bash
 # Ollama (default)
@@ -61,14 +71,14 @@ ollama serve   # http://127.0.0.1:11434
 #   --host 127.0.0.1 --port 30000 --served-model-name qwen2.5-coder-32b-q4_k_m.gguf
 ```
 
-**3. Chat with Bolt:**
+Open Bolt:
 
 ```bash
 bolt init              # first time: writes ~/.agenterm/config.toml
 bolt --ping            # check the API
 bolt                   # open the Bolt TUI (Ollama default)
 
-# Shared launcher presets:
+# Optional launcher presets:
 bolt-s1                # configured Ollama/S1 runtime
 bolt-s2                # configured SGLang/S2 runtime
 bolt-s3                # configured SGLang/S3 runtime
@@ -80,11 +90,16 @@ bolt --provider sglang
 
 In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tools off` for pure chat.
 
+Press **Shift+Enter** for a new line. You can compose and submit additional
+messages while a response is running; Bolt keeps them in FIFO order and starts
+each one after the previous turn completes.
+
 ---
 
 ## Table of contents
 
-- [Why agenterm?](#why-agenterm)
+- [Why Bolt?](#why-bolt)
+- [Prerequisites](#prerequisites)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Local vs remote Ollama](#local-vs-remote-ollama)
@@ -95,7 +110,7 @@ In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tool
 - [Tools and MCP](#tools-and-mcp)
 - [FAQ](#faq)
 - [Architecture](#architecture)
-- [Releases](#releases)
+- [Releases and upgrades](#releases-and-upgrades)
 - [License](#license)
 
 ---
@@ -112,7 +127,8 @@ In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tool
 | Fast small talk | Greetings skip tools; use `--no-tools` for pure chat |
 | No Python/Node runtime | One **static Go binary** |
 
-Not affiliated with xAI. “Grok-style” only means a snappy terminal agent UX.
+Bolt is independent and is not affiliated with xAI. Models are supplied by the
+configured provider; none are bundled with Bolt.
 
 ---
 
@@ -209,10 +225,15 @@ bolt --provider sglang -m qwen2.5-coder-32b-q4_k_m.gguf
 | Action | How |
 |--------|-----|
 | Send message | **Enter** |
+| Queue next message while busy | Type normally, then **Enter** |
+| Insert a new line | **Shift+Enter** |
 | Help | `/help` |
 | List / switch model | `/model` · `/model qwen2.5-coder:32b` |
 | Disable tools this session | `/tools off` |
-| Clear history | `/clear` or **Ctrl+L** |
+| Clear history | `/clear` |
+| Toggle mouse mode | **Ctrl+L** |
+| Toggle theme | **Ctrl+B** |
+| Toggle todo panel | **Ctrl+T** |
 | Quit | **Ctrl+C** |
 
 Run Bolt with an explicit workspace (`bolt --workspace /path/to/myrepo`) so file tools use that workspace.
@@ -544,9 +565,24 @@ Roadmap (Grok-class UX): [`docs/grok-parity-roadmap.md`](docs/grok-parity-roadma
 
 ---
 
-## Releases
+## Releases and upgrades
 
-On version tags, GitHub Actions publishes multi-platform binaries and a GHCR image:
+The latest release is available from the
+[GitHub Releases page](https://github.com/saurabhahuja71/boltgo/releases).
+To upgrade an installed Bolt binary, run:
+
+```bash
+bolt upgrade
+bolt --version
+```
+
+The upgrade downloads the matching platform binary, verifies its SHA-256
+checksum, and replaces only the executable. Configuration, sessions,
+permissions, and workspace files are preserved. Slow connections are allowed
+up to ten minutes for the complete download and installation.
+
+On version tags, GitHub Actions publishes multi-platform binaries and a GHCR
+image:
 
 | Asset | Platforms |
 |-------|-----------|
@@ -558,8 +594,8 @@ On version tags, GitHub Actions publishes multi-platform binaries and a GHCR ima
 | `ghcr.io/saurabhahuja71/agenterm:vX.Y.Z` | Container |
 
 ```bash
-git tag v0.2.1 && git push origin v0.2.1
-make dist VERSION=0.2.1   # local cross-build
+git tag v1.1.11 && git push origin v1.1.11
+make dist VERSION=1.1.11   # local cross-build
 ```
 
 ---

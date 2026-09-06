@@ -155,6 +155,23 @@ func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
 	}
 }
 
+func TestTodoPanelIsPresentInFinalViewAtWideWidth(t *testing.T) {
+	m := testModel(t)
+	m.todosOpen = true
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m = updated.(model)
+	view := m.View()
+	if !m.todoOnSide(120) || m.conversationWidth(120) <= 0 || todoSideWidth(120) <= 0 {
+		t.Fatalf("invalid side layout: conversation=%d todo=%d", m.conversationWidth(120), todoSideWidth(120))
+	}
+	if !strings.Contains(view, "Todos") || !strings.Contains(view, "(no todos)") {
+		t.Fatalf("final TUI view omitted the empty todo panel: %q", view)
+	}
+	if strings.Index(view, "Todos") >= strings.Index(view, "Bolt |") {
+		t.Fatal("todo panel was not composed above the fixed footer")
+	}
+}
+
 func TestTodoPanelFallsBackAboveFooterWhenNarrow(t *testing.T) {
 	m := testModel(t)
 	m.todosOpen = true

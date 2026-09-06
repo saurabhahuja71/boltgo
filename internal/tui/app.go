@@ -58,7 +58,7 @@ var (
 	styleAsst   = lipgloss.NewStyle().Foreground(colorAsst).Bold(true)
 	styleTool   = lipgloss.NewStyle().Foreground(colorTool)
 	styleErr    = lipgloss.NewStyle().Foreground(colorError)
-	styleBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
+	styleBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Background(colorBackground).Padding(0, 1)
 
 	// Message content deliberately has no background. Backgrounds belong to
 	// compact headers (below), code blocks, and semantic panels. Applying a
@@ -2182,7 +2182,7 @@ func applyTheme(name string) {
 	styleAsst = lipgloss.NewStyle().Foreground(colorAsst).Bold(true)
 	styleTool = lipgloss.NewStyle().Foreground(colorTool)
 	styleErr = lipgloss.NewStyle().Foreground(colorError)
-	styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
+	styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Background(colorBackground).Padding(0, 1)
 	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
 	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Padding(0, 1)
 	styleRoot = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)

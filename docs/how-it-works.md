@@ -1,10 +1,10 @@
-# How agenterm works
+# How Bolt works
 
 Short overview for new users and contributors. For install and day-to-day use, start with the [README](../README.md).
 
 ## Big picture
 
-agenterm is a **terminal client** (not a model host):
+Bolt is a **terminal client**, not a model host:
 
 1. You type in a **TUI** (Bubble Tea).
 2. The **agent loop** sends history to an OpenAI-compatible chat API.
@@ -79,7 +79,7 @@ Models are **not** bundled in the binary. You need Ollama, SGLang, or another AP
 
 - Greetings and trivial chat skip tools (fewer round-trips).
 - Full tool dumps stay off unless you enable verbose mode (`/verbose` when available).
-- Pure chat: `agenterm --no-tools` or `/tools off`.
+- Pure chat: `bolt --no-tools` or `/tools off`.
 
 ## Related
 

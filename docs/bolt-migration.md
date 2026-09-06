@@ -40,7 +40,8 @@ multimodal work is optional and separately scoped.
 - Workspace-local project rules and workspace-local session persistence.
 - Protection against overwriting a missing or corrupt explicitly requested session.
 - Shared permission state is mutex-protected during concurrent UI/agent activity.
-- Stream completion keeps input blocked until the worker channel closes.
+- Stream completion closes the active turn before starting the next queued
+  request; the input editor remains available while the turn runs.
 - Slash session commands (`/save`, `/load`, `/sessions`) and `/status` use the
   selected Bolt workspace rather than legacy global Agenterm state.
 - Ollama/S1 streaming, token accounting, workspace file creation, validation,
