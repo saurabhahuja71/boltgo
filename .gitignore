@@ -17,6 +17,9 @@ vendor/
 !.env.example
 dist/
 
+# Generated benchmark outputs (retain locally, do not ship in source).
+/test-results/
+
 # VT Code local runtime (keep instructions under version control)
 .vtcode/**
 !.vtcode/instructions/

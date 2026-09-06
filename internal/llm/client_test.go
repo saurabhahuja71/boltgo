@@ -212,3 +212,19 @@ func TestChatStreamUsesIndexesWhenIDsAreOmitted(t *testing.T) {
 		t.Fatalf("indexed calls were merged: %+v", message.ToolCalls)
 	}
 }
+
+func TestChatPreservesNonStreamingMultipleToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"A","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"main.py\"}"}},{"id":"B","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"database.py\"}"}}]}}]}`))
+	}))
+	defer server.Close()
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	message, err := client.Chat(context.Background(), ChatRequest{Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 2 || message.ToolCalls[0].Function.Arguments != `{"path":"main.py"}` || message.ToolCalls[1].Function.Arguments != `{"path":"database.py"}` {
+		t.Fatalf("non-streaming calls were not preserved: %+v", message.ToolCalls)
+	}
+}
