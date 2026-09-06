@@ -16,7 +16,7 @@ existing tooling.
 [![Ollama](https://img.shields.io/badge/Ollama-compatible-black)](https://ollama.com)
 [![SGLang](https://img.shields.io/badge/SGLang-compatible-orange)](https://github.com/sgl-project/sglang)
 [![MCP](https://img.shields.io/badge/MCP-client-purple)](https://modelcontextprotocol.io)
-[![Release](https://img.shields.io/github/v/release/saurabhahuja71/agenterm?include_prereleases)](https://github.com/saurabhahuja71/agenterm/releases)
+[![Release](https://img.shields.io/github/v/release/saurabhahuja71/boltgo?include_prereleases)](https://github.com/saurabhahuja71/boltgo/releases)
 
 | | |
 |---|---|
@@ -40,7 +40,7 @@ bolt  ──►  Ollama / SGLang / xAI / OpenAI  (POST /v1/chat/completions)
 **1. Install** (Linux / macOS):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
 ```
 
 Binary goes to `~/.local/bin/agenterm`. If the shell cannot find it:
@@ -121,7 +121,7 @@ Not affiliated with xAI. “Grok-style” only means a snappy terminal agent UX.
 ### One-line (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
 agenterm --version   # compatibility installer name; source builds produce bolt
 ```
 
@@ -136,7 +136,7 @@ agenterm --version   # compatibility installer name; source builds produce bolt
 
 ```bash
 curl -fsSL -o agenterm \
-  https://github.com/saurabhahuja71/agenterm/releases/latest/download/agenterm-linux-amd64
+  https://github.com/saurabhahuja71/boltgo/releases/latest/download/agenterm-linux-amd64
 chmod +x agenterm && ./agenterm
 ```
 
@@ -145,8 +145,8 @@ Also published: `linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64.ex
 ### From source
 
 ```bash
-git clone https://github.com/saurabhahuja71/agenterm.git
-cd agenterm
+git clone https://github.com/saurabhahuja71/boltgo.git
+cd boltgo
 make build          # → ./bolt and bolt-s1/bolt-s2/bolt-s3 aliases
 ./bolt              # primary Go Bolt executable
 make install        # → $(go env GOPATH)/bin (or $GOBIN)

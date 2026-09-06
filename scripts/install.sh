@@ -2,20 +2,20 @@
 # Install agenterm for end users (native binary; no container required).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
 #   INSTALL_DIR=~/bin ./scripts/install.sh
 #   AGENTERM_VERSION=v0.1.0 ./scripts/install.sh
 #   AGENTERM_FROM_SOURCE=1 ./scripts/install.sh   # build with local Go toolchain
 #
 # Env:
-#   AGENTERM_REPO        default saurabhahuja71/agenterm
+#   AGENTERM_REPO        release repository (default saurabhahuja71/boltgo)
 #   AGENTERM_VERSION     default latest (GitHub release tag or "latest")
 #   INSTALL_DIR          default ~/.local/bin
 #   AGENTERM_FROM_SOURCE if 1/true, skip release download and build from source
 #   AGENTERM_SKIP_INIT   if 1/true, do not create ~/.agenterm/config.toml
 set -euo pipefail
 
-REPO="${AGENTERM_REPO:-saurabhahuja71/agenterm}"
+REPO="${AGENTERM_REPO:-saurabhahuja71/boltgo}"
 VERSION="${AGENTERM_VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 FROM_SOURCE="${AGENTERM_FROM_SOURCE:-0}"

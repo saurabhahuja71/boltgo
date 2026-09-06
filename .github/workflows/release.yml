@@ -74,7 +74,7 @@ jobs:
             ### Native (recommended — no container limits)
 
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/boltgo/main/scripts/install.sh | bash
             agenterm --version
             agenterm
             ```
