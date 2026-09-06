@@ -133,3 +133,54 @@ func TestUpgradeLeavesBinaryUnchangedOnChecksumFailure(t *testing.T) {
 		t.Fatalf("binary changed after checksum failure: %q", got)
 	}
 }
+
+func TestUpgradePrefersLowercaseProxyEnvironment(t *testing.T) {
+	old := []byte("old")
+	next := []byte("new through proxy")
+	digest := sha256.Sum256(next)
+	binaryName := fmt.Sprintf("bolt-%s-%s", runtime.GOOS, runtime.GOARCH)
+	var proxyHits int
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+		switch r.URL.Path {
+		case "/repos/test/boltgo/releases/latest":
+			fmt.Fprintf(w, `{"tag_name":"v1.1.0","assets":[{"name":"%s","browser_download_url":"http://release.test/binary"},{"name":"%s.sha256","browser_download_url":"http://release.test/checksum"}]}`, binaryName, binaryName)
+		case "/binary":
+			_, _ = w.Write(next)
+		case "/checksum":
+			fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(digest[:]), binaryName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer proxy.Close()
+
+	// Simulate a stale uppercase proxy and the explicitly exported lowercase
+	// proxy used by the VM setup instructions.
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("https_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "bolt")
+	if err := os.WriteFile(executable, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Client{APIBaseURL: "http://release.test", Repository: "test/boltgo"}).Upgrade(context.Background(), executable, "1.0.0", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Updated || proxyHits < 3 {
+		t.Fatalf("proxy was not used for release and asset requests: result=%+v hits=%d", result, proxyHits)
+	}
+	got, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(next) {
+		t.Fatalf("proxy-upgraded binary=%q, want %q", got, next)
+	}
+}

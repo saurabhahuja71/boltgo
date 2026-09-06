@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 const DefaultRepository = "saurabhahuja71/boltgo"
@@ -129,7 +132,34 @@ func (c Client) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return http.DefaultClient
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	proxy := proxyFromEnvironment()
+	transport.Proxy = func(req *http.Request) (*url.URL, error) {
+		return proxy(req.URL)
+	}
+	return &http.Client{Transport: transport}
+}
+
+// proxyFromEnvironment deliberately prefers lowercase variables. This matches
+// the common shell usage (http_proxy/https_proxy) and prevents an unrelated,
+// stale uppercase value from winning when a user exports a current proxy.
+func proxyFromEnvironment() func(*url.URL) (*url.URL, error) {
+	config := httpproxy.Config{
+		HTTPProxy:  firstEnv("http_proxy", "HTTP_PROXY"),
+		HTTPSProxy: firstEnv("https_proxy", "HTTPS_PROXY"),
+		NoProxy:    firstEnv("no_proxy", "NO_PROXY"),
+		CGI:        os.Getenv("REQUEST_METHOD") != "",
+	}
+	return config.ProxyFunc()
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (c Client) download(ctx context.Context, url string, limit int64) ([]byte, error) {
