@@ -294,6 +294,9 @@ func New(deps Deps) model {
 			{role: "system", text: deps.Summary + " · /help"},
 		},
 	}
+	// Re-apply after the model value is constructed so textarea's internal style
+	// pointer addresses this instance's FocusedStyle (see applyTextareaTheme).
+	applyTextareaTheme(&m.ta, "dark")
 	m.refreshViewport()
 	return m
 }
@@ -2131,9 +2134,13 @@ func todoText() string {
 }
 
 func renderTodoPanel(width, height int) string {
+	// Lip Gloss Width is the content box; borders are outside it. Size the
+	// content so the outer panel occupies exactly `width` columns and lines up
+	// with conversationWidth + divider without JoinHorizontal naked pads.
+	inner := max(10, width-styleBox.GetHorizontalFrameSize())
 	// Lip Gloss Height excludes the panel border; reserve its two border rows
 	// so the rendered outer panel is exactly the top-content height.
-	return styleBox.Width(max(10, width)).Height(max(1, height-2)).Render(todoText())
+	return styleBox.Width(inner).Height(max(1, height-2)).Render(todoText())
 }
 
 func countOpenTodos(items []todos.Item) int {
@@ -2174,8 +2181,10 @@ func applyTheme(name string) {
 		colorBorder = lipgloss.Color("#cbd5e1")
 		colorBackground = lipgloss.Color("#ffffff")
 		colorForeground = lipgloss.Color("#0f172a")
+		// Concrete colors (both Adaptive slots identical) so Light never depends
+		// on terminal background detection when painting message headers.
 		bgUser = lipgloss.AdaptiveColor{Light: "#e0e7ff", Dark: "#e0e7ff"}
-		bgAsst = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#ffffff"}
+		bgAsst = lipgloss.AdaptiveColor{Light: "#f8fafc", Dark: "#f8fafc"}
 		fgBody = lipgloss.AdaptiveColor{Light: "#0f172a", Dark: "#0f172a"}
 	} else {
 		colorMuted = lipgloss.Color("#94a3b8")
@@ -2209,19 +2218,32 @@ func applyTextareaTheme(ta *textarea.Model, name string) {
 	if ta == nil {
 		return
 	}
-	base := lipgloss.NewStyle().Foreground(fgBody)
-	muted := lipgloss.NewStyle().Foreground(colorMuted)
-	prompt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	cursor := lipgloss.NewStyle().Foreground(colorAccent)
-	if name == "black" {
-		base = base.Background(lipgloss.Color("#020617"))
-	} else if name == "light" {
-		base = base.Background(lipgloss.Color("#ffffff"))
+	// Use concrete theme colors (not AdaptiveColor) so Light/Dark do not depend
+	// on terminal background detection. Bubbles computes styles with Inline(true),
+	// so every face that paints cells needs an explicit Background.
+	bg := colorBackground
+	fg := colorForeground
+	switch name {
+	case "black":
+		bg = lipgloss.Color("#020617")
+		fg = lipgloss.Color("#f8fafc")
+	case "light":
+		bg = lipgloss.Color("#ffffff")
+		fg = lipgloss.Color("#0f172a")
+	default:
+		bg = lipgloss.Color("#0f172a")
+		fg = lipgloss.Color("#e2e8f0")
 	}
+	base := lipgloss.NewStyle().Foreground(fg).Background(bg)
+	muted := lipgloss.NewStyle().Foreground(colorMuted).Background(bg)
+	prompt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Background(bg)
+	cursor := lipgloss.NewStyle().Foreground(colorAccent).Background(bg)
 	for _, style := range []*textarea.Style{&ta.FocusedStyle, &ta.BlurredStyle} {
 		style.Base = base
-		style.CursorLine = lipgloss.NewStyle()
-		style.CursorLineNumber = lipgloss.NewStyle()
+		// Cursor line must keep the canvas background; an empty style lets the
+		// textarea's internal width padding fall back to the terminal default.
+		style.CursorLine = lipgloss.NewStyle().Background(bg)
+		style.CursorLineNumber = lipgloss.NewStyle().Foreground(colorMuted).Background(bg)
 		style.EndOfBuffer = muted
 		style.LineNumber = muted
 		style.Placeholder = muted
@@ -2229,6 +2251,109 @@ func applyTextareaTheme(ta *textarea.Model, name string) {
 		style.Text = base
 	}
 	ta.Cursor.Style = cursor
+	ta.Cursor.TextStyle = base
+	// Model/textarea are copied by value in New and Bubble Tea updates. Focus()
+	// stores &FocusedStyle in an unexported pointer; after a copy that pointer
+	// still references the previous value's styles, so View() would keep painting
+	// the old theme. Re-bind it to this textarea instance.
+	if ta.Focused() {
+		_ = ta.Focus()
+	} else {
+		ta.Blur()
+	}
+}
+
+// paintRow renders a single chrome row that occupies the full allocated width.
+// Lip Gloss JoinVertical/JoinHorizontal pad short lines with unstyled spaces;
+// those unpainted cells show the terminal default background (often black) in
+// Light theme. Pad with an explicit background instead of Style.Width, which
+// would wrap a long status line onto a second row.
+func paintRow(style lipgloss.Style, width int, content string) string {
+	rendered := style.Render(content)
+	if width < 1 {
+		return rendered
+	}
+	if gap := width - lipgloss.Width(rendered); gap > 0 {
+		rendered += lipgloss.NewStyle().Background(style.GetBackground()).Render(strings.Repeat(" ", gap))
+	}
+	return rendered
+}
+
+// paintSurface trims viewport/textarea trailing space pads (which are unstyled)
+// and re-paints every line to width with the active canvas background without
+// wrapping existing content.
+func paintSurface(style lipgloss.Style, width, height int, view string) string {
+	if width < 1 {
+		width = 1
+	}
+	lines := strings.Split(trimANSIHorizontalPadding(view), "\n")
+	if height > 0 {
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+	}
+	pad := lipgloss.NewStyle().Foreground(style.GetForeground()).Background(style.GetBackground())
+	for i, line := range lines {
+		gap := width - lipgloss.Width(line)
+		if gap <= 0 {
+			continue
+		}
+		if line == "" {
+			lines[i] = pad.Render(strings.Repeat(" ", gap))
+			continue
+		}
+		lines[i] = line + pad.Render(strings.Repeat(" ", gap))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// joinHorizontalThemed joins columns like lipgloss.JoinHorizontal but pads
+// short lines with the theme background instead of bare spaces.
+func joinHorizontalThemed(bg lipgloss.TerminalColor, parts ...string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	pad := lipgloss.NewStyle().Background(bg)
+	blocks := make([][]string, len(parts))
+	maxWidths := make([]int, len(parts))
+	maxHeight := 0
+	for i, str := range parts {
+		lines := strings.Split(str, "\n")
+		blocks[i] = lines
+		for _, line := range lines {
+			if w := lipgloss.Width(line); w > maxWidths[i] {
+				maxWidths[i] = w
+			}
+		}
+		if len(lines) > maxHeight {
+			maxHeight = len(lines)
+		}
+	}
+	for i := range blocks {
+		for len(blocks[i]) < maxHeight {
+			blocks[i] = append(blocks[i], "")
+		}
+	}
+	var b strings.Builder
+	for row := 0; row < maxHeight; row++ {
+		if row > 0 {
+			b.WriteByte('\n')
+		}
+		for i, block := range blocks {
+			line := block[row]
+			b.WriteString(line)
+			if gap := maxWidths[i] - lipgloss.Width(line); gap > 0 {
+				b.WriteString(pad.Render(strings.Repeat(" ", gap)))
+			}
+		}
+	}
+	return b.String()
 }
 
 func (m model) View() string {
@@ -2239,7 +2364,11 @@ func (m model) View() string {
 	// The conversation is a surface, not a panel. Applying the panel border
 	// here made the viewport's left/right edges look like unexplained black
 	// vertical bars and allowed panel decorations to dominate the transcript.
-	body := styleConversation.Width(m.vp.Width).Render(m.vp.View())
+	//
+	// bubbles/viewport pads each line to Width with unstyled spaces. Feeding
+	// that output to style.Width is a no-op (line already measures full width),
+	// so trim the naked pads and repaint with the theme canvas background.
+	body := paintSurface(styleConversation, m.vp.Width, m.vp.Height, m.vp.View())
 	status := m.status
 	if m.busy && status == "ready" {
 		status = "thinking"
@@ -2262,27 +2391,32 @@ func (m model) View() string {
 	// Keep the fixed footer to one physical row. Wrapping transient tool status
 	// text here creates an extra row immediately above the input and can leave
 	// stale-looking status lines during rapid tool completion updates.
-	statusLine := styleStatus.Render(footer)
-	help := styleHelp.Render("Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline")
+	statusLine := paintRow(styleStatus, w, footer)
+	helpText := "Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline"
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
-		help = styleHelp.Render("PLAN MODE · Ctrl+Q quit · Ctrl+R permission · Enter send · Shift+Enter newline")
+		helpText = "PLAN MODE · Ctrl+Q quit · Ctrl+R permission · Enter send · Shift+Enter newline"
 	}
 	if m.modelPick != nil {
-		help = styleHelp.Render("Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick")
+		helpText = "Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick"
 	}
+	help := paintRow(styleHelp, w, helpText)
 	// Always show workspace path above the prompt so you know where tools write.
 	workspace := m.deps.Workspace
 	if workspace == "" {
 		workspace = mustCwd()
 	}
-	cwdLine := styleHelp.Render("📁 " + displayCwdAt(workspace, max(20, w-8)))
-	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
+	cwdLine := paintRow(styleHelp, w, "📁 "+displayCwdAt(workspace, max(20, w-8)))
+	// Trim textarea/viewport naked trailing pads, then let the themed box paint
+	// the full allocated width (including Light canvas behind the prompt).
+	input := styleBox.Width(max(10, w-2)).Render(trimANSIHorizontalPadding(m.ta.View()))
 	if m.todoOnSide(w) {
 		// A side Todo pane is part of the top content row, so its height must
 		// follow the conversation viewport rather than its two-line contents.
 		todo := renderTodoPanel(todoSideWidth(w), m.vp.Height)
-		divider := lipgloss.NewStyle().Foreground(colorBorder).Render("│")
-		body = lipgloss.JoinHorizontal(lipgloss.Top, body, divider, todo)
+		divider := lipgloss.NewStyle().Foreground(colorBorder).Background(colorBackground).Render("│")
+		body = joinHorizontalThemed(colorBackground, body, divider, todo)
+		// Guarantee the top band occupies the full terminal width with canvas bg.
+		body = paintSurface(styleConversation, w, m.vp.Height, body)
 	}
 	parts := []string{body}
 	if m.todosOpen && !m.todoOnSide(w) {
@@ -2296,10 +2430,15 @@ func (m model) View() string {
 		parts = append(parts, styleBox.Width(max(10, w-2)).Render(commandsText()))
 	}
 	if m.modelPick != nil {
-		parts = append(parts, m.modelPickerView(w))
+		parts = append(parts, paintSurface(styleConversation, w, 0, m.modelPickerView(w)))
 	}
 	parts = append(parts, cwdLine, input, help)
-	return styleRoot.Width(w).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	// JoinVertical pads short lines with unstyled spaces; every chrome row above
+	// is already width-painted, and the conversation band is full width, so the
+	// join should not introduce naked cells. paintSurface on the final frame
+	// still strips any residual unstyled pads before the root canvas style.
+	joined := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	return paintSurface(styleRoot, w, 0, joined)
 }
 
 func wrap(s string, width int) string {
