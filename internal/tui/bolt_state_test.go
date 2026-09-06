@@ -44,9 +44,9 @@ func TestBoltShortcutsAndFooterState(t *testing.T) {
 		}
 	}
 	view := m.View()
-	for _, want := range []string{"Bolt | Permission Mode: ALLOW", "Mouse Mode: INTERACTIVE", "Vision: ON", "Tokens: —", "Ctrl+Q"} {
+	for _, want := range []string{"Bolt · ALLOW", "INTERACTIVE", "Vision ON", "—", "Ctrl+Q"} {
 		if !containsText(view, want) {
-			t.Fatalf("footer missing %q: %s", want, view)
+			t.Fatalf("status/footer missing %q: %s", want, view)
 		}
 	}
 }
@@ -127,11 +127,11 @@ func TestWindowSizeKeepsFixedRegionsUsable(t *testing.T) {
 	m := testModel(t)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 36})
 	m = updated.(model)
-	if m.vp.Width != 98 || m.vp.Height < 5 || m.ta.Width() < 20 {
+	if m.vp.Width != 99 || m.vp.Height < 5 || m.ta.Width() < 20 {
 		t.Fatalf("resize dimensions: viewport=%dx%d input=%d", m.vp.Width, m.vp.Height, m.ta.Width())
 	}
 	view := m.View()
-	for _, want := range []string{"Bolt |", "📁 ", "Message…"} {
+	for _, want := range []string{"Bolt ·", "📁 ", "Message…"} {
 		if !containsText(view, want) {
 			t.Fatalf("resized view missing %q", want)
 		}
@@ -143,11 +143,11 @@ func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
 	m.todosOpen = true
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
 	m = updated.(model)
-	if !m.todoOnSide(120) || m.vp.Width != 85 {
+	if !m.todoOnSide(120) || m.vp.Width != 88 {
 		t.Fatalf("todo side layout not applied: side=%v viewport=%d", m.todoOnSide(120), m.vp.Width)
 	}
 	view := m.View()
-	if strings.Index(view, "Todos") < 0 || strings.Index(view, "Todos") > strings.Index(view, "Bolt |") {
+	if strings.Index(view, "Todos") < 0 || strings.Index(view, "Todos") > strings.Index(view, "Bolt ·") {
 		t.Fatalf("todo panel was not rendered beside conversation before fixed footer")
 	}
 	if m.vp.Height < 20 {
@@ -170,7 +170,7 @@ func TestTodoPanelIsPresentInFinalViewAtWideWidth(t *testing.T) {
 	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final TUI view omitted the empty todo panel: %q", view)
 	}
-	if strings.Index(view, "Todos") >= strings.Index(view, "Bolt |") {
+	if strings.Index(view, "Todos") >= strings.Index(view, "Bolt ·") {
 		t.Fatal("todo panel was not composed above the fixed footer")
 	}
 }
@@ -207,7 +207,7 @@ func TestRepeatedUpdatesKeepFixedUIInOneFinalFrame(t *testing.T) {
 	} {
 		action()
 		view := m.View()
-		for _, marker := range []string{"Bolt |", "📁 ", "Ctrl+Q", "Message…", "Todos"} {
+		for _, marker := range []string{"Bolt ·", "📁 ", "Ctrl+Q", "Message…", "Todos"} {
 			if got := strings.Count(view, marker); got != 1 {
 				t.Fatalf("final frame contains %d copies of %q: %q", got, marker, view)
 			}
@@ -220,12 +220,12 @@ func TestTodoPanelFallsBackAboveFooterWhenNarrow(t *testing.T) {
 	m.todosOpen = true
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 36})
 	m = updated.(model)
-	if m.todoOnSide(80) || m.vp.Width != 78 {
+	if m.todoOnSide(80) || m.vp.Width != 79 {
 		t.Fatalf("narrow todo layout did not use vertical fallback: side=%v viewport=%d", m.todoOnSide(80), m.vp.Width)
 	}
 	view := m.View()
 	todoAt := strings.Index(view, "Todos")
-	statusAt := strings.Index(view, "Bolt |")
+	statusAt := strings.Index(view, "Bolt ·")
 	if todoAt < 0 || statusAt < 0 || todoAt > statusAt {
 		t.Fatalf("narrow todo panel is not fixed above status/footer: todo=%d status=%d view=%q", todoAt, statusAt, view)
 	}
@@ -241,7 +241,7 @@ func TestTodoToggleRelayoutsConversationWithoutChangingFixedFooter(t *testing.T)
 	if !m.todosOpen || m.vp.Width >= before {
 		t.Fatalf("todo toggle did not reserve right panel: before=%d after=%d", before, m.vp.Width)
 	}
-	if !containsText(m.View(), "Bolt |") || !containsText(m.View(), "Message…") {
+	if !containsText(m.View(), "Bolt ·") || !containsText(m.View(), "Message…") {
 		t.Fatal("todo toggle displaced fixed footer/input")
 	}
 }
@@ -259,7 +259,7 @@ func TestTodoToggleAppearsInFinalView(t *testing.T) {
 	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final view omitted empty todo panel: %q", view)
 	}
-	if strings.Index(view, "Todos") > strings.Index(view, "Bolt |") {
+	if strings.Index(view, "Todos") > strings.Index(view, "Bolt ·") {
 		t.Fatal("todo panel was composed below the fixed footer")
 	}
 	if m.vp.Width <= 0 || m.conversationWidth(160) <= 0 {
@@ -309,10 +309,12 @@ func TestLightThemeUsesWhiteBackgroundAndDarkText(t *testing.T) {
 		t.Fatalf("theme=%q, want light", m.themeName)
 	}
 	view := m.View()
-	if !strings.Contains(view, "\x1b[48;2;255;255;255m") {
-		t.Fatalf("light theme did not render a white background: %q", view)
+	// Input faces still use the light canvas; chrome/prose are foreground-first.
+	// Bubbles often combines fg+bg in one SGR (`38;…;48;2;255;255;255m`).
+	if !strings.Contains(view, "48;2;255;255;255") {
+		t.Fatalf("light theme did not render a white input/canvas face: %q", view)
 	}
-	if !strings.Contains(view, "\x1b[38;2;15;23;42") {
+	if !strings.Contains(view, "38;2;15;23;42") {
 		t.Fatalf("light theme did not render dark foreground text: %q", view)
 	}
 }
@@ -336,18 +338,15 @@ func TestLightThemeHasNoStaleDarkComponentBackgrounds(t *testing.T) {
 	)
 	m.refreshViewport()
 	view := m.View()
-	if !strings.Contains(view, "48;2;255;255;255") {
-		t.Fatalf("light view has no light canvas background: %q", view)
-	}
 	if strings.Contains(view, "48;2;2;6;23") || strings.Contains(view, "48;2;15;23;42") {
 		t.Fatalf("light view retained a dark component background: %q", view)
 	}
-	if !strings.Contains(view, "Todos") || !strings.Contains(view, "message…") || !strings.Contains(view, "Bolt |") {
+	if !strings.Contains(view, "Todos") || !strings.Contains(view, "message…") || !strings.Contains(view, "Bolt ·") {
 		t.Fatalf("light view lost a themed component: %q", view)
 	}
 }
 
-func TestConversationBackgroundsStayOnHeaders(t *testing.T) {
+func TestConversationLabelsAreForegroundOnly(t *testing.T) {
 	previous := lipgloss.ColorProfile()
 	defer lipgloss.SetColorProfile(previous)
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -362,9 +361,13 @@ func TestConversationBackgroundsStayOnHeaders(t *testing.T) {
 	}
 	m.refreshViewport()
 	content := m.vp.View()
-	backgrounds := strings.Count(content, "48;2;15;23;42")
-	if backgrounds < 3 {
-		t.Fatalf("conversation did not retain the active surface background: %q", content)
+	plain := ansiForTest.ReplaceAllString(content, "")
+	if !strings.Contains(plain, "You") || !strings.Contains(plain, "Agent") {
+		t.Fatalf("conversation missing role labels: %q", plain)
+	}
+	// Labels/prose must not paint filled message cards.
+	if strings.Contains(content, "48;2;224;231;255") || strings.Count(content, "48;2;15;23;42") > 0 {
+		t.Fatalf("conversation painted card/surface backgrounds on labels/prose: %q", content)
 	}
 }
 
@@ -403,7 +406,8 @@ func TestLightThemeCodeBlockUsesLightBackground(t *testing.T) {
 	if strings.Contains(body, "48;2;55;55;55") || strings.Contains(body, "48;5;236") || strings.Contains(body, "48;2;39;40;34") {
 		t.Fatalf("light code block retained dark Glamour background: %q", body)
 	}
-	if !strings.Contains(body, "48;5;255") {
+	// Modest light code surface (#f1f5f9), content-sized — not full-bleed.
+	if !strings.Contains(body, "48;2;241;245;249") {
 		t.Fatalf("light code block has no deliberate light background: %q", body)
 	}
 }

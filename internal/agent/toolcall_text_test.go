@@ -51,8 +51,12 @@ func TestSanitizeReadFileArgumentsNormalizesProviderWrappers(t *testing.T) {
 		want string
 	}{
 		{name: "file path alias", args: `{"file_path":"main.py"}`, want: `{"path":"main.py"}`},
+		{name: "file alias", args: `{"file":"main.py"}`, want: `{"path":"main.py"}`},
 		{name: "nested object", args: `{"parameters":{"path":"main.py"}}`, want: `{"path":"main.py"}`},
 		{name: "nested string", args: `{"arguments":"{\"path\":\"main.py\"}"}`, want: `{"path":"main.py"}`},
+		{name: "bare path", args: `main.py`, want: `{"path":"main.py"}`},
+		{name: "quoted bare path", args: `"README.md"`, want: `{"path":"README.md"}`},
+		{name: "concatenated cumulative objects", args: `{"path":"main.py"}{"path":"main.py"}`, want: `{"path":"main.py"}`},
 		{name: "missing remains missing", args: `{}`, want: `{}`},
 	} {
 		if got := sanitizeToolArgsJSON("read_file", test.args); got != test.want {

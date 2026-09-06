@@ -1,8 +1,8 @@
 # Continuity
 
-- Summary: Released v1.1.17. Light-theme black strips were unpainted terminal cells from viewport/JoinVertical/JoinHorizontal bare-space padding and a stale textarea style pointer after model copies. View-layer painting now fills chrome and conversation rows with the active theme background without padding stored session text.
-- Files modified: `internal/tui/app.go`, `internal/tui/theme_fill_test.go`, `cmd/agenterm/main.go`, `Makefile`, and this file.
-- Decisions: Fill only during View via `paintRow` / `paintSurface` / `joinHorizontalThemed`. Todo stays fixed-right with frame-aware outer width. Status/workspace/footer stay one content row with themed trailing padding. Textarea theme apply rebinds Focus so copied models pick up Light/Dark faces.
-- Checks: Focused/full Go tests, vet, build, make build, race tests, and diff checks pass with `GOCACHE=/tmp/agenterm-go-build`. Deterministic 160×40 Light View tests assert zero unpainted cells for fresh Light, dark→light, and light→dark→light.
-- TODOs/blockers: Confirm Light theme on a real MATE/wide PTY after upgrade. Provider-backed `read_file` remains separately tracked when the configured Ollama model is unavailable (HTTP 404); path stays required.
-- Freeze state: migration remains frozen; the canonical installer/release instructions point to `saurabhahuja71/boltgo`, and fresh installs make `bolt` plus `bolt-s1`/`bolt-s2`/`bolt-s3` the executable entry points. Local/source builds default to the current published baseline version while release tags continue to inject their exact version. The current release baseline is 1.1.17. The historical Go module path remains `github.com/saurabhahuja71/agenterm` for compatibility.
+- Summary: Released v1.1.18. Codex-like TUI UX polish (content-first conversation, compact status, borderless input, subtler Todo) plus `read_file · path required` fix via cumulative-safe streamed argument merging and stronger path-tool argument normalization.
+- Files modified: `internal/tui/app.go`, `internal/tui/theme_fill_test.go`, `internal/tui/bolt_state_test.go`, `internal/llm/client.go`, `internal/llm/client_test.go`, `internal/agent/agent.go`, `internal/agent/toolcall_text_test.go`, `cmd/agenterm/main.go`, `Makefile`, and this file.
+- Decisions: Quiet terminal space over full-bleed fills. Path remains required; empty `{}` still errors. Cumulative SSE tool argument frames must not duplicate via plain `+=`.
+- Checks: Full Go tests, vet, build, make build, and race tests for agent/llm/tui pass with `GOCACHE=/tmp/agenterm-go-build`.
+- TODOs/blockers: Physical MATE eyeball of Light/Dark UX after upgrade. Live model-backed read_file still depends on a healthy Ollama model endpoint.
+- Freeze state: migration remains frozen; installer points to `saurabhahuja71/boltgo`; launchers `bolt` / `bolt-s1` / `bolt-s2` / `bolt-s3` unchanged. Current release baseline is 1.1.18. Module path remains `github.com/saurabhahuja71/agenterm`.

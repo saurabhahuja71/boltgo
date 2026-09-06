@@ -629,43 +629,19 @@ func sanitizeToolArgsJSON(name, args string) string {
 	if args == "" || args == "null" {
 		return "{}"
 	}
+	// Cumulative stream bugs can concatenate two JSON objects. Prefer the first
+	// complete object that still yields a usable path for file tools.
+	if repaired := repairConcatenatedJSONObjects(args); repaired != args {
+		args = repaired
+	}
 	// Already an object. Provider adapters sometimes wrap arguments one more
 	// time (arguments/parameters/args), or call the required read_file field
 	// file_path. Normalize those shapes before dispatch; do not invent a path
 	// when none is present.
 	if strings.HasPrefix(args, "{") && json.Valid([]byte(args)) {
-		if name == "read_file" {
-			var object map[string]json.RawMessage
-			if err := json.Unmarshal([]byte(args), &object); err == nil {
-				for _, key := range []string{"path", "file_path", "filepath", "filename"} {
-					var path string
-					if raw, ok := object[key]; ok && json.Unmarshal(raw, &path) == nil && strings.TrimSpace(path) != "" {
-						if key == "path" {
-							return args
-						}
-						object["path"], _ = json.Marshal(path)
-						delete(object, key)
-						out, _ := json.Marshal(object)
-						return string(out)
-					}
-				}
-				for _, key := range []string{"arguments", "parameters", "args"} {
-					raw, ok := object[key]
-					if !ok {
-						continue
-					}
-					var nested string
-					if len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &nested) == nil {
-						raw = json.RawMessage(nested)
-					}
-					normalized := sanitizeToolArgsJSON(name, string(raw))
-					var nestedObject map[string]json.RawMessage
-					if json.Unmarshal([]byte(normalized), &nestedObject) == nil {
-						if _, ok := nestedObject["path"]; ok {
-							return string(normalized)
-						}
-					}
-				}
+		if isPathTool(name) {
+			if normalized, ok := normalizePathObjectArgs(args); ok {
+				return normalized
 			}
 		}
 		return args
@@ -693,12 +669,126 @@ func sanitizeToolArgsJSON(name, args string) string {
 		b, _ := json.Marshal(map[string]string{"command": args})
 		return string(b)
 	}
+	// Bare path string for file tools (models often omit the object wrapper).
+	if isPathTool(name) && looksLikeBarePath(args) {
+		b, _ := json.Marshal(map[string]string{"path": strings.Trim(args, `"'`)})
+		return string(b)
+	}
 	// Fallback: wrap as content/path-ish
 	if !json.Valid([]byte(args)) {
-		b, _ := json.Marshal(map[string]string{"input": args})
+		key := "input"
+		if isPathTool(name) {
+			key = "path"
+		}
+		b, _ := json.Marshal(map[string]string{key: args})
 		return string(b)
 	}
 	return args
+}
+
+func isPathTool(name string) bool {
+	switch name {
+	case "read_file", "write_file", "str_replace", "list_dir", "find_files":
+		return true
+	default:
+		return false
+	}
+}
+
+func looksLikeBarePath(s string) bool {
+	s = strings.TrimSpace(strings.Trim(s, `"'`))
+	if s == "" || strings.ContainsAny(s, "\n\r{}[]") {
+		return false
+	}
+	if strings.Contains(s, "/") || strings.Contains(s, "\\") || strings.Contains(s, ".") {
+		return true
+	}
+	// Simple filenames without a slash/dot are still valid relative paths.
+	return !strings.Contains(s, " ")
+}
+
+func pathAliasKeys() []string {
+	return []string{"path", "file_path", "filepath", "filename", "file", "target", "target_file", "name"}
+}
+
+func normalizePathObjectArgs(args string) (string, bool) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(args), &object); err != nil {
+		return args, false
+	}
+	for _, key := range pathAliasKeys() {
+		var path string
+		if raw, ok := object[key]; ok && json.Unmarshal(raw, &path) == nil && strings.TrimSpace(path) != "" {
+			if key == "path" {
+				return args, true
+			}
+			object["path"], _ = json.Marshal(path)
+			delete(object, key)
+			out, _ := json.Marshal(object)
+			return string(out), true
+		}
+	}
+	for _, key := range []string{"arguments", "parameters", "args"} {
+		raw, ok := object[key]
+		if !ok {
+			continue
+		}
+		var nested string
+		if len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &nested) == nil {
+			raw = json.RawMessage(nested)
+		}
+		normalized := sanitizeToolArgsJSON("read_file", string(raw))
+		var nestedObject map[string]json.RawMessage
+		if json.Unmarshal([]byte(normalized), &nestedObject) == nil {
+			if _, ok := nestedObject["path"]; ok {
+				return normalized, true
+			}
+		}
+	}
+	return args, false
+}
+
+// repairConcatenatedJSONObjects recovers from duplicated cumulative argument
+// frames (`{...}{...}`). Prefer the first valid object; if it lacks a path and
+// a later object has one, use the later object.
+func repairConcatenatedJSONObjects(args string) string {
+	if !strings.Contains(args, "}{") {
+		return args
+	}
+	parts := strings.Split(args, "}{")
+	if len(parts) < 2 {
+		return args
+	}
+	var candidates []string
+	for i, part := range parts {
+		switch {
+		case i == 0:
+			part = part + "}"
+		case i == len(parts)-1:
+			part = "{" + part
+		default:
+			part = "{" + part + "}"
+		}
+		if json.Valid([]byte(part)) {
+			candidates = append(candidates, part)
+		}
+	}
+	if len(candidates) == 0 {
+		return args
+	}
+	for _, c := range candidates {
+		var object map[string]json.RawMessage
+		if json.Unmarshal([]byte(c), &object) != nil {
+			continue
+		}
+		for _, key := range pathAliasKeys() {
+			var path string
+			if raw, ok := object[key]; ok && json.Unmarshal(raw, &path) == nil && strings.TrimSpace(path) != "" {
+				return c
+			}
+		}
+	}
+	return candidates[0]
 }
 
 // isTrivialChat is true for short greetings / small-talk that should not

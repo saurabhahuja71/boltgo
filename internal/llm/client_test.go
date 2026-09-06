@@ -136,3 +136,25 @@ func TestMergeToolArgumentDoesNotEraseAccumulatedFragments(t *testing.T) {
 		t.Fatalf("fragment merge=%q", got)
 	}
 }
+
+func TestChatStreamMergesCumulativeDeltaArgumentsWithoutDuplication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Some providers re-send the full arguments string on every delta frame.
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"ma\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"main.py\\\"}\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	message, err := client.ChatStream(context.Background(), ChatRequest{Model: "test"}, testStreamHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 1 || message.ToolCalls[0].Function.Name != "read_file" {
+		t.Fatalf("tool call: %+v", message.ToolCalls)
+	}
+	if message.ToolCalls[0].Function.Arguments != `{"path":"main.py"}` {
+		t.Fatalf("cumulative delta args duplicated or lost: %q", message.ToolCalls[0].Function.Arguments)
+	}
+}

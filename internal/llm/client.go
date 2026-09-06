@@ -434,10 +434,14 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 				acc.Type = tc.Type
 			}
 			if tc.Function.Name != "" {
-				acc.Function.Name += tc.Function.Name
+				// Names may arrive as fragments or as repeated full values.
+				acc.Function.Name = mergeToolArgument(acc.Function.Name, tc.Function.Name)
 			}
 			if tc.Function.Arguments != "" {
-				acc.Function.Arguments += tc.Function.Arguments
+				// Same as the full-message path: support both true deltas and
+				// proxies that re-send a cumulative arguments string each frame.
+				// Plain += duplicates cumulative JSON and drops a usable path.
+				acc.Function.Arguments = mergeToolArgument(acc.Function.Arguments, tc.Function.Arguments)
 			}
 			if h != nil {
 				h.OnToolCallDelta(idx, *acc)
