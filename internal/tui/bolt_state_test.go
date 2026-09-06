@@ -164,11 +164,51 @@ func TestTodoPanelIsPresentInFinalViewAtWideWidth(t *testing.T) {
 	if !m.todoOnSide(120) || m.conversationWidth(120) <= 0 || todoSideWidth(120) <= 0 {
 		t.Fatalf("invalid side layout: conversation=%d todo=%d", m.conversationWidth(120), todoSideWidth(120))
 	}
-	if !strings.Contains(view, "Todos") || !strings.Contains(view, "(no todos)") {
+	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final TUI view omitted the empty todo panel: %q", view)
 	}
 	if strings.Index(view, "Todos") >= strings.Index(view, "Bolt |") {
 		t.Fatal("todo panel was not composed above the fixed footer")
+	}
+}
+
+func TestRepeatedUpdatesKeepFixedUIInOneFinalFrame(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m = updated.(model)
+	m.todosOpen = true
+	m.lines = append(m.lines, chatLine{role: "user", text: "request"})
+	m.refreshViewport()
+	for _, action := range []func(){
+		func() { m.status = "thinking" },
+		func() {
+			m.lines = append(m.lines, chatLine{role: "assistant-stream", text: "stream"})
+			m.refreshViewport()
+		},
+		func() { m.status = "tool running" },
+		func() { m.status = "ready" },
+		func() {
+			m.themeName = "light"
+			applyTheme("light")
+			applyTextareaTheme(&m.ta, "light")
+			m.renderer = newGlamourRenderer(m.vp.Width, "light")
+			m.refreshViewport()
+		},
+		func() {
+			m.themeName = "dark"
+			applyTheme("dark")
+			applyTextareaTheme(&m.ta, "dark")
+			m.renderer = newGlamourRenderer(m.vp.Width, "dark")
+			m.refreshViewport()
+		},
+	} {
+		action()
+		view := m.View()
+		for _, marker := range []string{"Bolt |", "📁 ", "Ctrl+Q", "Message…", "Todos"} {
+			if got := strings.Count(view, marker); got != 1 {
+				t.Fatalf("final frame contains %d copies of %q: %q", got, marker, view)
+			}
+		}
 	}
 }
 
@@ -213,7 +253,7 @@ func TestTodoToggleAppearsInFinalView(t *testing.T) {
 	if !m.todosOpen || !m.todoOnSide(160) {
 		t.Fatal("Ctrl+T did not enable the side todo panel")
 	}
-	if !strings.Contains(view, "Todos") || !strings.Contains(view, "(no todos)") {
+	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final view omitted empty todo panel: %q", view)
 	}
 	if strings.Index(view, "Todos") > strings.Index(view, "Bolt |") {
@@ -345,6 +385,23 @@ func TestConversationMarkdownCodeStylingIsRetained(t *testing.T) {
 	}
 	if !strings.Contains(body, "\x1b[") {
 		t.Fatal("rendered code block lost Markdown styling")
+	}
+}
+
+func TestLightThemeCodeBlockUsesLightBackground(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	applyTheme("light")
+	m := testModel(t)
+	m.themeName = "light"
+	m.renderer = newGlamourRenderer(80, "light")
+	body := m.renderAssistantBody(&chatLine{role: "assistant", text: "```python\nprint(\"hello\")\n```"}, 80)
+	if strings.Contains(body, "48;2;55;55;55") || strings.Contains(body, "48;5;236") || strings.Contains(body, "48;2;39;40;34") {
+		t.Fatalf("light code block retained dark Glamour background: %q", body)
+	}
+	if strings.Contains(body, "48;") {
+		t.Fatalf("light code block introduced an opaque terminal background: %q", body)
 	}
 }
 

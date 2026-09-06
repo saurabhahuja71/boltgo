@@ -27,6 +27,22 @@ func TestFunctionCallArgumentsStringOrObject(t *testing.T) {
 	}
 }
 
+func TestFunctionCallArgumentsAcceptProviderAliases(t *testing.T) {
+	for _, raw := range []string{
+		`{"name":"read_file","parameters":{"path":"main.py"}}`,
+		`{"name":"read_file","args":{"path":"main.py"}}`,
+		`{"name":"read_file","path":"main.py"}`,
+	} {
+		var call FunctionCall
+		if err := json.Unmarshal([]byte(raw), &call); err != nil {
+			t.Fatal(err)
+		}
+		if call.Arguments != `{"path":"main.py"}` {
+			t.Fatalf("%s decoded arguments=%q", raw, call.Arguments)
+		}
+	}
+}
+
 func TestStreamChunkAcceptsFullMessage(t *testing.T) {
 	// Shape the old sglang-toolcall-proxy emitted for stream:true clients.
 	raw := `{

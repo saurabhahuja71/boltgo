@@ -88,28 +88,41 @@ type FunctionCall struct {
 // which would otherwise fail the whole tool_call and drop str_replace.
 func (f *FunctionCall) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
+		Name       string          `json:"name"`
+		Arguments  json.RawMessage `json:"arguments"`
+		Parameters json.RawMessage `json:"parameters"`
+		Args       json.RawMessage `json:"args"`
+		Path       string          `json:"path"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	f.Name = raw.Name
-	if len(raw.Arguments) == 0 || string(raw.Arguments) == "null" {
+	arguments := raw.Arguments
+	if len(arguments) == 0 || string(arguments) == "null" {
+		arguments = raw.Parameters
+	}
+	if len(arguments) == 0 || string(arguments) == "null" {
+		arguments = raw.Args
+	}
+	if (len(arguments) == 0 || string(arguments) == "null") && raw.Path != "" {
+		arguments, _ = json.Marshal(map[string]string{"path": raw.Path})
+	}
+	if len(arguments) == 0 || string(arguments) == "null" {
 		f.Arguments = ""
 		return nil
 	}
 	// Already a JSON string value
-	if raw.Arguments[0] == '"' {
+	if arguments[0] == '"' {
 		var s string
-		if err := json.Unmarshal(raw.Arguments, &s); err != nil {
+		if err := json.Unmarshal(arguments, &s); err != nil {
 			return err
 		}
 		f.Arguments = s
 		return nil
 	}
 	// Object or array → keep as compact JSON text for tool runners
-	f.Arguments = string(raw.Arguments)
+	f.Arguments = string(arguments)
 	return nil
 }
 
