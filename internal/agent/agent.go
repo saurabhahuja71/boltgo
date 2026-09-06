@@ -366,7 +366,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 		}
 
 		// Sanitize tool_calls before history so Ollama doesn't 400 on next round.
+		knownToolNames := toolNameSet(a.Tools)
 		for i := range msg.ToolCalls {
+			msg.ToolCalls[i].Function.Name = normalizeToolName(msg.ToolCalls[i].Function.Name, knownToolNames)
 			msg.ToolCalls[i].Function.Arguments = sanitizeToolArgsJSON(msg.ToolCalls[i].Function.Name, msg.ToolCalls[i].Function.Arguments)
 			if msg.ToolCalls[i].ID == "" {
 				msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", round, i)

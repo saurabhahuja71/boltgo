@@ -30,6 +30,20 @@ func TestExtractToolCallsFromContent(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolNameRepairsConcatenatedProviderNames(t *testing.T) {
+	known := map[string]struct{}{"list_dir": {}, "read_file": {}}
+	for input, want := range map[string]string{
+		"list_dir":           "list_dir",
+		"list_dirread_file":  "list_dir",
+		"read_fileread_file": "read_file",
+		"unknown":            "unknown",
+	} {
+		if got := normalizeToolName(input, known); got != want {
+			t.Fatalf("normalizeToolName(%q)=%q, want %q", input, got, want)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
 		(len(s) > 0 && (func() bool {

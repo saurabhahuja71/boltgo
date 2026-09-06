@@ -32,13 +32,15 @@ var reOSCLeak = regexp.MustCompile(
 )
 
 var (
-	colorMuted  = lipgloss.Color("#94a3b8")
-	colorAccent = lipgloss.Color("#38bdf8")
-	colorUser   = lipgloss.Color("#a78bfa")
-	colorAsst   = lipgloss.Color("#4ade80")
-	colorTool   = lipgloss.Color("#fbbf24")
-	colorError  = lipgloss.Color("#f87171")
-	colorBorder = lipgloss.Color("#1e293b")
+	colorMuted      = lipgloss.Color("#94a3b8")
+	colorAccent     = lipgloss.Color("#38bdf8")
+	colorUser       = lipgloss.Color("#a78bfa")
+	colorAsst       = lipgloss.Color("#4ade80")
+	colorTool       = lipgloss.Color("#fbbf24")
+	colorError      = lipgloss.Color("#f87171")
+	colorBorder     = lipgloss.Color("#1e293b")
+	colorBackground = lipgloss.Color("#0f172a")
+	colorForeground = lipgloss.Color("#e2e8f0")
 
 	// Bubble backgrounds: light grey (You) vs white/slate (Agent) so Q/A
 	// are distinct on light terminals; AdaptiveColor keeps dark terminals readable.
@@ -63,6 +65,7 @@ var (
 			Background(bgAsst).
 			Foreground(fgBody).
 			Padding(0, 1)
+	styleRoot = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)
 )
 
 const todoSideThreshold = 90
@@ -2041,6 +2044,8 @@ func applyTheme(name string) {
 		colorTool = lipgloss.Color("#fde68a")
 		colorError = lipgloss.Color("#fca5a5")
 		colorBorder = lipgloss.Color("#334155")
+		colorBackground = lipgloss.Color("#020617")
+		colorForeground = lipgloss.Color("#f8fafc")
 		bgUser = lipgloss.AdaptiveColor{Light: "#dbeafe", Dark: "#111827"}
 		bgAsst = lipgloss.AdaptiveColor{Light: "#f8fafc", Dark: "#020617"}
 		fgBody = lipgloss.AdaptiveColor{Light: "#0f172a", Dark: "#f8fafc"}
@@ -2052,6 +2057,8 @@ func applyTheme(name string) {
 		colorTool = lipgloss.Color("#a16207")
 		colorError = lipgloss.Color("#b91c1c")
 		colorBorder = lipgloss.Color("#cbd5e1")
+		colorBackground = lipgloss.Color("#ffffff")
+		colorForeground = lipgloss.Color("#0f172a")
 		bgUser = lipgloss.AdaptiveColor{Light: "#e0e7ff", Dark: "#e0e7ff"}
 		bgAsst = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#ffffff"}
 		fgBody = lipgloss.AdaptiveColor{Light: "#0f172a", Dark: "#0f172a"}
@@ -2063,6 +2070,8 @@ func applyTheme(name string) {
 		colorTool = lipgloss.Color("#fbbf24")
 		colorError = lipgloss.Color("#f87171")
 		colorBorder = lipgloss.Color("#1e293b")
+		colorBackground = lipgloss.Color("#0f172a")
+		colorForeground = lipgloss.Color("#e2e8f0")
 		bgUser = lipgloss.AdaptiveColor{Light: "#e5e7eb", Dark: "#1e293b"}
 		bgAsst = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#0f172a"}
 		fgBody = lipgloss.AdaptiveColor{Light: "#1e293b", Dark: "#e2e8f0"}
@@ -2077,6 +2086,7 @@ func applyTheme(name string) {
 	styleBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
 	styleUserBubble = lipgloss.NewStyle().Background(bgUser).Foreground(fgBody).Padding(0, 1)
 	styleAsstBubble = lipgloss.NewStyle().Background(bgAsst).Foreground(fgBody).Padding(0, 1)
+	styleRoot = lipgloss.NewStyle().Background(colorBackground).Foreground(colorForeground)
 }
 
 func applyTextareaTheme(ta *textarea.Model, name string) {
@@ -2130,7 +2140,10 @@ func (m model) View() string {
 		}
 	}
 	footer := fmt.Sprintf("Bolt | Permission Mode: %s | Mouse Mode: %s | Vision: %s | Model: %s | Tokens: %s | %s", strings.ToUpper(string(m.permissionMode)), m.mouseMode, map[bool]string{true: "ON", false: "OFF"}[m.visionEnabled], modelName, tokens, status)
-	statusLine := styleStatus.Render(wrap(footer, max(20, w-4)))
+	// Keep the fixed footer to one physical row. Wrapping transient tool status
+	// text here creates an extra row immediately above the input and can leave
+	// stale-looking status lines during rapid tool completion updates.
+	statusLine := styleStatus.Render(footer)
 	help := styleHelp.Render("Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline")
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
 		help = styleHelp.Render("PLAN MODE · Ctrl+Q quit · Ctrl+R permission · Enter send · Shift+Enter newline")
@@ -2164,7 +2177,7 @@ func (m model) View() string {
 		parts = append(parts, m.modelPickerView(w))
 	}
 	parts = append(parts, cwdLine, input, help)
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	return styleRoot.Width(w).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
 
 func wrap(s string, width int) string {

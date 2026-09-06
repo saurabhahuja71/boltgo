@@ -72,8 +72,23 @@ func TestUpgradeVerifiesChecksumAndAtomicallyReplacesBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != string(next) || !strings.Contains(output.String(), "1.0.0 -> v1.1.0") {
+	if string(got) != string(next) ||
+		!strings.Contains(output.String(), "1.0.0 -> v1.1.0") ||
+		!strings.Contains(output.String(), "Downloading "+binaryName) ||
+		!strings.Contains(output.String(), "100%") {
 		t.Fatalf("upgrade output/file mismatch: output=%q file=%q", output.String(), got)
+	}
+}
+
+func TestReadWithProgressReportsUnknownLength(t *testing.T) {
+	var output strings.Builder
+	data, err := readWithProgress(strings.NewReader("downloaded"), "bolt", -1, 128, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "downloaded" || !strings.Contains(output.String(), "Downloading bolt: ") ||
+		!strings.Contains(output.String(), "10 bytes") {
+		t.Fatalf("unexpected progress output=%q data=%q", output.String(), data)
 	}
 }
 

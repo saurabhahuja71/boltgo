@@ -190,6 +190,27 @@ func TestThemeChangeRebuildsVisibleStylesWithoutResettingState(t *testing.T) {
 	}
 }
 
+func TestLightThemeUsesWhiteBackgroundAndDarkText(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	m := testModel(t)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = updated.(model) // black
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = updated.(model) // light
+	if m.themeName != "light" {
+		t.Fatalf("theme=%q, want light", m.themeName)
+	}
+	view := m.View()
+	if !strings.Contains(view, "\x1b[48;2;255;255;255m") {
+		t.Fatalf("light theme did not render a white background: %q", view)
+	}
+	if !strings.Contains(view, "\x1b[38;2;15;23;42") {
+		t.Fatalf("light theme did not render dark foreground text: %q", view)
+	}
+}
+
 func TestInputUsesOnePromptMarker(t *testing.T) {
 	m := testModel(t)
 	m.width = 100

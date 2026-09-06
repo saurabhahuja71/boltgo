@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -102,12 +103,12 @@ func (c Client) Upgrade(ctx context.Context, executable, currentVersion string, 
 	result.AssetName = asset.Name
 	fmt.Fprintf(output, "Bolt upgrade: %s -> %s (%s)\n", currentVersion, release.TagName, asset.Name)
 
-	binary, err := c.download(ctx, asset.BrowserDownloadURL, 128<<20)
+	binary, err := c.download(ctx, asset.Name, asset.BrowserDownloadURL, 128<<20, output)
 	if err != nil {
 		return result, fmt.Errorf("download %s: %w", asset.Name, err)
 	}
 	if checksum != nil {
-		checksumText, err := c.download(ctx, checksum.BrowserDownloadURL, 16<<10)
+		checksumText, err := c.download(ctx, checksum.Name, checksum.BrowserDownloadURL, 16<<10, output)
 		if err != nil {
 			return result, fmt.Errorf("download checksum %s: %w", checksum.Name, err)
 		}
@@ -162,7 +163,7 @@ func firstEnv(names ...string) string {
 	return ""
 }
 
-func (c Client) download(ctx context.Context, url string, limit int64) ([]byte, error) {
+func (c Client) download(ctx context.Context, name, url string, limit int64, output io.Writer) ([]byte, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, errors.New("release asset has no download URL")
 	}
@@ -180,14 +181,63 @@ func (c Client) download(ctx context.Context, url string, limit int64) ([]byte, 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
+	return readWithProgress(resp.Body, name, resp.ContentLength, limit, output)
+}
+
+func readWithProgress(reader io.Reader, name string, total, limit int64, output io.Writer) ([]byte, error) {
+	if output == nil {
+		output = io.Discard
 	}
-	if int64(len(data)) > limit {
-		return nil, errors.New("release asset is too large")
+	var data bytes.Buffer
+	data.Grow(int(minInt64(total, limit)))
+	buf := make([]byte, 32<<10)
+	var downloaded int64
+	lastPercent := -1
+	progress := func(force bool) {
+		if total > 0 {
+			percent := int(downloaded * 100 / total)
+			if percent > 100 {
+				percent = 100
+			}
+			if force || percent != lastPercent {
+				fmt.Fprintf(output, "\rDownloading %s: %3d%%", name, percent)
+				lastPercent = percent
+			}
+			return
+		}
+		if force || downloaded == int64(len(buf)) || downloaded%(1<<20) < int64(len(buf)) {
+			fmt.Fprintf(output, "\rDownloading %s: %d bytes", name, downloaded)
+		}
 	}
-	return data, nil
+	progress(true)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			downloaded += int64(n)
+			if _, writeErr := data.Write(buf[:n]); writeErr != nil {
+				return nil, writeErr
+			}
+			if downloaded > limit {
+				return nil, errors.New("release asset is too large")
+			}
+			progress(false)
+		}
+		if err == io.EOF {
+			progress(true)
+			fmt.Fprintln(output)
+			return data.Bytes(), nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+func minInt64(a, b int64) int64 {
+	if a < 0 || a > b {
+		return b
+	}
+	return a
 }
 
 func selectAssets(assets []Asset, osName, arch string) (Asset, *Asset, error) {

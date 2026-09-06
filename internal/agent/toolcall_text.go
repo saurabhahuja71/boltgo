@@ -251,3 +251,25 @@ func toolNameSet(reg interface{ Names() []string }) map[string]struct{} {
 	}
 	return m
 }
+
+// normalizeToolName repairs a provider quirk where streamed function-name
+// fragments can contain two adjacent known names (for example,
+// "list_dirread_file"). The tool-call arguments remain authoritative; using
+// the first known name lets the agent execute the call and continue instead of
+// failing the whole turn with an unknown-tool error.
+func normalizeToolName(name string, known map[string]struct{}) string {
+	name = strings.TrimSpace(name)
+	if _, ok := known[name]; ok {
+		return name
+	}
+	best := ""
+	for candidate := range known {
+		if strings.HasPrefix(name, candidate) && len(candidate) > len(best) {
+			best = candidate
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return name
+}
