@@ -238,6 +238,9 @@ type model struct {
 	height int
 	busy   bool
 	status string
+	// turnFailed keeps a provider/tool error visible through EventDone and the
+	// final stream-close event. It is reset when the next turn starts.
+	turnFailed bool
 	// stream accumulates assistant tokens. Must be a pointer: Bubble Tea
 	// copies model by value; a non-empty strings.Builder must not be copied.
 	stream *strings.Builder
@@ -718,7 +721,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gotToken = false
 		m.waitSecs = 0
 		m.paintPending = false
-		m.status = "ready"
+		if m.turnFailed {
+			m.status = "error"
+		} else {
+			m.status = "ready"
+		}
 		m.events = nil
 		m.cancel = nil
 		// Auto-save rolling session after each turn (best-effort).
@@ -774,6 +781,7 @@ func (m model) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.ensureStream().Reset()
 	m.turnAssistant = -1
 	m.busy = true
+	m.turnFailed = false
 	m.gotToken = false
 	m.waitSecs = 0
 	m.busySince = time.Now()
@@ -958,13 +966,15 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		m.approvalDecision = nil
 		m.relayout()
 		line := formatToolEnd(ev.Tool, ev.ToolOut, m.verbose)
+		toolFailed := strings.HasPrefix(strings.TrimSpace(ev.ToolOut), "error:") && !isBenignToolFailure(ev.Tool, ev.ToolOut)
 		if m.verbose {
 			m.lines = append(m.lines, chatLine{role: "tool", text: line})
 		}
-		if !m.verbose && strings.HasPrefix(strings.TrimSpace(ev.ToolOut), "error:") {
-			if !isBenignToolFailure(ev.Tool, ev.ToolOut) {
-				m.lines = append(m.lines, chatLine{role: "error", text: line})
-			}
+		if !m.verbose && toolFailed {
+			m.lines = append(m.lines, chatLine{role: "error", text: line})
+		}
+		if toolFailed {
+			m.turnFailed = true
 		}
 		m.status = line
 		m.upsertThinkingPlaceholder()
@@ -990,6 +1000,9 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		m.flushStreamAsLine()
 		m.lines = append(m.lines, chatLine{role: "error", text: ev.Text})
 		m.status = "error"
+		if !isCancellationText(ev.Text) {
+			m.turnFailed = true
+		}
 		return m, m.schedulePaint(true)
 
 	case agent.EventDone:
@@ -1004,10 +1017,23 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		// Keep input disabled until streamClosedMsg. EventDone is emitted before
 		// the worker closes its channel; reopening input here lets a fast second
 		// prompt race the old worker's final close event.
-		m.status = "finalizing…"
+		if m.turnFailed {
+			m.status = "error"
+		} else {
+			m.status = "finalizing…"
+		}
 		return m, m.schedulePaint(true)
 	}
 	return m, nil
+}
+
+func isCancellationText(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {

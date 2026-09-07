@@ -79,6 +79,93 @@ func TestEventDoneKeepsInputBlockedUntilStreamCloses(t *testing.T) {
 	}
 }
 
+func finishStream(t *testing.T, m model) model {
+	t.Helper()
+	updated, _ := m.applyStreamEvent(agent.Event{Kind: agent.EventDone})
+	closed, _ := updated.Update(streamClosedMsg{})
+	return closed.(model)
+}
+
+func TestProviderErrorSurvivesCompletion(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventError, Text: "provider unavailable"})
+	if m.status != "error" || !m.turnFailed {
+		t.Fatalf("provider error state: status=%q failed=%v", m.status, m.turnFailed)
+	}
+	m = finishStream(t, m)
+	if m.status != "error" || m.busy {
+		t.Fatalf("provider error was overwritten after completion: status=%q busy=%v", m.status, m.busy)
+	}
+}
+
+func TestToolErrorSurvivesCompletion(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToolEnd, Tool: "read_file", ToolOut: "error: permission denied"})
+	if !m.turnFailed {
+		t.Fatal("non-benign tool error did not mark the turn failed")
+	}
+	m = finishStream(t, m)
+	if m.status != "error" {
+		t.Fatalf("tool error was overwritten after completion: status=%q", m.status)
+	}
+}
+
+func TestSuccessfulCompletionStillEndsReady(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: "answer"})
+	m = finishStream(t, m)
+	if m.status != "ready" || m.turnFailed {
+		t.Fatalf("successful turn did not end ready: status=%q failed=%v", m.status, m.turnFailed)
+	}
+}
+
+func TestFailedTurnRetryRestoresReady(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventError, Text: "temporary provider failure"})
+	m = finishStream(t, m)
+	if m.status != "error" {
+		t.Fatalf("initial failure status=%q", m.status)
+	}
+	updated, _ := m.startTurn("retry")
+	m = updated.(model)
+	if m.turnFailed || m.status == "error" {
+		t.Fatalf("retry did not clear failure state: status=%q failed=%v", m.status, m.turnFailed)
+	}
+	m = finishStream(t, m)
+	if m.status != "ready" {
+		t.Fatalf("successful retry did not restore ready: status=%q", m.status)
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+}
+
+func TestCancellationKeepsExistingReadySemantics(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m.status = "cancelling… (Esc)"
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventError, Text: "cancelled"})
+	m = finishStream(t, m)
+	if m.status != "ready" || m.turnFailed {
+		t.Fatalf("cancellation semantics changed: status=%q failed=%v", m.status, m.turnFailed)
+	}
+}
+
+func TestStreamingFailurePreservesErrorStatus(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: "partial response"})
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventError, Text: "stream interrupted"})
+	m = finishStream(t, m)
+	if m.status != "error" || !m.turnFailed {
+		t.Fatalf("streaming failure status=%q failed=%v", m.status, m.turnFailed)
+	}
+}
+
 func TestInputRemainsEditableAndQueuesRequestsFIFO(t *testing.T) {
 	m := testModel(t)
 	m.busy = true
