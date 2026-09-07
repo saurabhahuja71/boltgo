@@ -835,7 +835,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
-	if m.busy {
+	if m.busy && !isStopCommand(text) {
 		m.pendingRequests = append(m.pendingRequests, text)
 		m.lines = append(m.lines, chatLine{role: "queued", text: text})
 		m.status = fmt.Sprintf("queued · %d", len(m.pendingRequests))
@@ -846,6 +846,11 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 		return m.handleSlash(text)
 	}
 	return m.startTurn(text)
+}
+
+func isStopCommand(text string) bool {
+	parts := strings.Fields(text)
+	return len(parts) == 1 && strings.EqualFold(parts[0], "/stop")
 }
 
 func (m model) startTurn(text string) (tea.Model, tea.Cmd) {
@@ -2113,7 +2118,7 @@ func chatBubble(base lipgloss.Style, label, body string, width int) string {
 }
 
 func (m *model) renderAssistantBody(ln *chatLine, width int) string {
-	if ln.role == "assistant-stream" || m.renderer == nil || ln.text == "" {
+	if m.renderer == nil || ln.text == "" {
 		return wrap(ln.text, width-4)
 	}
 	// Reuse cached glamour output when text is unchanged.

@@ -194,6 +194,74 @@ func TestInputRemainsEditableAndQueuesRequestsFIFO(t *testing.T) {
 	}
 }
 
+func TestBusyStopCancelsImmediatelyWithoutQueueing(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	cancelled := false
+	m.cancel = func() { cancelled = true }
+	updated, _ := m.handleSubmit("/stop")
+	m = updated.(model)
+	if !cancelled {
+		t.Fatal("busy /stop did not invoke the active cancellation")
+	}
+	if len(m.pendingRequests) != 0 {
+		t.Fatalf("busy /stop was queued: %#v", m.pendingRequests)
+	}
+	if m.status != "cancelling… (/stop)" {
+		t.Fatalf("busy /stop status=%q", m.status)
+	}
+}
+
+func TestBusyNormalPromptStillQueuesAfterStopFix(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	updated, _ := m.handleSubmit("follow-up")
+	m = updated.(model)
+	if len(m.pendingRequests) != 1 || m.pendingRequests[0] != "follow-up" {
+		t.Fatalf("normal busy prompt was not queued: %#v", m.pendingRequests)
+	}
+}
+
+func TestStopPreservesExistingQueueAndCancellationCompletion(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m.pendingRequests = []string{"already queued"}
+	cancelled := false
+	m.cancel = func() { cancelled = true }
+	updated, _ := m.handleSubmit("/stop")
+	m = updated.(model)
+	if !cancelled || len(m.pendingRequests) != 1 || m.pendingRequests[0] != "already queued" {
+		t.Fatalf("/stop changed existing queue: cancelled=%v queue=%#v", cancelled, m.pendingRequests)
+	}
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventError, Text: "cancelled"})
+	closed := finishStream(t, m)
+	if !closed.busy || len(closed.pendingRequests) != 0 || closed.turnFailed {
+		t.Fatalf("cancelled stop changed queued completion semantics: busy=%v queue=%#v status=%q failed=%v", closed.busy, closed.pendingRequests, closed.status, closed.turnFailed)
+	}
+}
+
+func TestIdleStopKeepsExistingBehavior(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.handleSubmit("/stop")
+	m = updated.(model)
+	if m.busy || len(m.pendingRequests) != 0 || len(m.lines) == 0 || m.lines[len(m.lines)-1].text != "nothing to stop (not busy)" {
+		t.Fatalf("idle /stop behavior changed: busy=%v queue=%#v lines=%#v", m.busy, m.pendingRequests, m.lines)
+	}
+}
+
+func TestStopDuringToolStreamUsesExistingCancellationPath(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	cancelled := false
+	m.cancel = func() { cancelled = true }
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToolStart, Tool: "run_shell", Text: "sleep"})
+	updated, _ := m.handleSubmit("/stop")
+	m = updated.(model)
+	if !cancelled || len(m.pendingRequests) != 0 || m.status != "cancelling… (/stop)" {
+		t.Fatalf("tool-stream /stop path: cancelled=%v queue=%#v status=%q", cancelled, m.pendingRequests, m.status)
+	}
+}
+
 func TestQueuedRequestStartsAfterActiveStreamCloses(t *testing.T) {
 	m := testModel(t)
 	m.busy = true
@@ -706,6 +774,43 @@ func TestConversationMarkdownCodeStylingIsRetained(t *testing.T) {
 	}
 	if !strings.Contains(body, "\x1b[") {
 		t.Fatal("rendered code block lost Markdown styling")
+	}
+}
+
+func TestStreamingAndCompletedMarkdownShareRenderer(t *testing.T) {
+	m := testModel(t)
+	text := "The workspace is **important** and uses `go test ./...`."
+	width := 72
+	streaming := m.renderAssistantBody(&chatLine{role: "assistant-stream", text: text}, width)
+	completed := m.renderAssistantBody(&chatLine{role: "assistant", text: text}, width)
+	if streaming != completed {
+		t.Fatalf("streaming and completed Markdown renderings differ:\nstream=%q\nfinal=%q", streaming, completed)
+	}
+	logical := ansiForTest.ReplaceAllString(streaming, "")
+	if strings.Contains(logical, "**important**") || strings.Contains(logical, "`go test ./...`") {
+		t.Fatalf("streaming output retained raw Markdown markers: %q", logical)
+	}
+}
+
+func TestStreamingMarkdownCompletionDoesNotDuplicateAssistant(t *testing.T) {
+	m := testModel(t)
+	text := "- **one**\n- `two`"
+	m.ensureStream().WriteString(text)
+	m.upsertStreamingAssistant(text)
+	m.refreshViewport()
+	if got := countRole(m.lines, "assistant-stream"); got != 1 {
+		t.Fatalf("streaming assistant count=%d want=1", got)
+	}
+	m.flushStreamAsLineQuiet()
+	if got := countRole(m.lines, "assistant-stream"); got != 0 {
+		t.Fatalf("streaming placeholder remained after completion: %d", got)
+	}
+	if got := countRole(m.lines, "assistant"); got != 1 {
+		t.Fatalf("completed assistant count=%d want=1", got)
+	}
+	m.refreshViewport()
+	if strings.Count(ansiForTest.ReplaceAllString(m.vp.View(), ""), "one") != 1 {
+		t.Fatalf("completed response was duplicated in viewport: %q", m.vp.View())
 	}
 }
 
