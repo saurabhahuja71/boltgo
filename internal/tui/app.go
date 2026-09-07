@@ -1012,7 +1012,8 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		if len(check) > 1200 {
 			check = check[:1200]
 		}
-		if m.verbose || !isMostlyToolNoise(check) {
+		assistantContent := m.verbose || !isMostlyToolNoise(check)
+		if assistantContent {
 			m.clearThinkingPlaceholder()
 			m.upsertStreamingAssistant(cur)
 		} else {
@@ -1803,7 +1804,7 @@ func (m model) busyBannerText() string {
 	text := fmt.Sprintf("Thinking%s  %ds  %s", frame, sec, spinnerFrame())
 	st := strings.TrimSpace(m.status)
 	if st != "" && st != "ready" && !strings.HasPrefix(st, "Thinking") {
-		text = fmt.Sprintf("%s\n%s", text, truncate(st, 96))
+		text = fmt.Sprintf("%s\n%s", text, truncateCells(st, 96))
 	} else if m.deps.Agent != nil && m.deps.Agent.Cfg.Model != "" {
 		text = fmt.Sprintf("%s\nwaiting on %s · Esc cancel", text, m.deps.Agent.Cfg.Model)
 	}
@@ -2679,7 +2680,7 @@ func (m model) View() string {
 		status = "streaming"
 	}
 	if status != "" {
-		status = strings.ToUpper(status[:1]) + status[1:]
+		status = capitalizeFirst(status)
 	}
 	modelName := m.deps.Agent.Cfg.Model
 	if modelName == "" {
@@ -2708,7 +2709,7 @@ func (m model) View() string {
 		tokens,
 		status,
 	)
-	statusLine := styleStatus.Render(truncate(statusText, w))
+	statusLine := styleStatus.Render(truncateCells(statusText, w))
 	helpText := "Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline"
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
 		helpText = "PLAN MODE · Ctrl+Q quit · Ctrl+R permission · Enter send · Shift+Enter newline"
@@ -2716,15 +2717,15 @@ func (m model) View() string {
 	if m.modelPick != nil {
 		helpText = "Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick"
 	}
-	help := styleHelp.Render(truncate(helpText, w))
+	help := styleHelp.Render(truncateCells(helpText, w))
 	workspace := m.deps.Workspace
 	if workspace == "" {
 		workspace = mustCwd()
 	}
-	cwdLine := styleHelp.Render(truncate("📁 "+displayCwdAt(workspace, max(20, w-4)), w))
+	cwdLine := styleHelp.Render(truncateCells("📁 "+displayCwdAt(workspace, max(20, w-4)), w))
 	// Prompt-like input: no rounded/boxed frame.
 	input := trimANSIHorizontalPadding(m.ta.View())
-	parts := []string{styleHeader.Render(truncate(m.deps.Title+" · "+m.deps.Summary+" · /help", w)), body}
+	parts := []string{styleHeader.Render(truncateCells(m.deps.Title+" · "+m.deps.Summary+" · /help", w)), body}
 	parts = append(parts, statusLine)
 	dialogW := max(10, w)
 	if m.pendingApproval != nil {
@@ -2737,7 +2738,8 @@ func (m model) View() string {
 		parts = append(parts, m.modelPickerView(dialogW+2))
 	}
 	parts = append(parts, cwdLine, input, help)
-	return fitFrameHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), l.height)
+	frame := fitFrameHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), l.height)
+	return frame
 }
 
 func wrap(s string, width int) string {
@@ -2746,23 +2748,67 @@ func wrap(s string, width int) string {
 	}
 	var b strings.Builder
 	for _, line := range strings.Split(s, "\n") {
-		for len(line) > width {
-			b.WriteString(line[:width])
+		if line == "" {
 			b.WriteByte('\n')
-			line = line[width:]
+			continue
 		}
-		b.WriteString(line)
+		used := 0
+		for _, r := range line {
+			cellWidth := lipgloss.Width(string(r))
+			if used > 0 && used+cellWidth > width {
+				b.WriteByte('\n')
+				used = 0
+			}
+			b.WriteRune(r)
+			used += cellWidth
+		}
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
 func truncate(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
+	return truncateCells(s, n)
+}
+
+// capitalizeFirst uppercases the first Unicode character without splitting
+// its UTF-8 encoding. Status text can begin with the tool arrow (→).
+func capitalizeFirst(s string) string {
+	r, size := utf8.DecodeRuneInString(s)
+	if size == 0 {
 		return s
 	}
-	return s[:n] + "…"
+	return string(unicode.ToUpper(r)) + s[size:]
+}
+
+// truncateCells limits a plain-text line by terminal cells rather than bytes.
+// Fixed regions must remain one physical terminal row; slicing a UTF-8 status
+// string by bytes can create replacement characters or a wrapped line, which
+// defeats Bubble Tea's line-based differential renderer.
+func truncateCells(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if n <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	const ellipsis = "…"
+	limit := n - lipgloss.Width(ellipsis)
+	if limit <= 0 {
+		return ellipsis
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		cellWidth := lipgloss.Width(string(r))
+		if used+cellWidth > limit {
+			break
+		}
+		b.WriteRune(r)
+		used += cellWidth
+	}
+	return b.String() + ellipsis
 }
 
 func spinnerFrame() string {

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func testModel(t *testing.T) model {
@@ -52,6 +53,50 @@ func TestBoltShortcutsAndFooterState(t *testing.T) {
 		if !containsText(view, want) {
 			t.Fatalf("status/footer missing %q: %s", want, view)
 		}
+	}
+}
+
+func TestTruncateCellsKeepsFixedStatusOnOneTerminalRow(t *testing.T) {
+	status := "Bolt · ASK · SELECT · Darwin-9B-Opus · 12171 tokens · ← read_file · ok (2.0 KB) ⠋"
+	got := truncateCells(status, 40)
+	if lipgloss.Width(got) > 40 {
+		t.Fatalf("truncated status width=%d want <= 40: %q", lipgloss.Width(got), got)
+	}
+	if strings.ContainsRune(got, '\uFFFD') {
+		t.Fatalf("truncated status contains replacement character: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("truncated status missing ellipsis: %q", got)
+	}
+}
+
+func TestThinkingBannerDoesNotSplitUnicodeStatus(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	m.status = "← read_file · ok (2.0 KB)"
+	banner := m.busyBannerText()
+	if strings.ContainsRune(banner, '\uFFFD') {
+		t.Fatalf("thinking banner contains replacement character: %q", banner)
+	}
+	if got := lipgloss.Width(strings.Split(banner, "\n")[1]); got > 96 {
+		t.Fatalf("thinking status width=%d want <= 96: %q", got, banner)
+	}
+}
+
+func TestStatusCapitalizationDoesNotSplitToolArrow(t *testing.T) {
+	status := capitalizeFirst("→ list_dir")
+	if status != "→ list_dir" {
+		t.Fatalf("status changed unexpectedly: %q", status)
+	}
+	if !utf8.ValidString(status) {
+		t.Fatalf("status is not valid UTF-8: %q", status)
+	}
+}
+
+func TestWrapDoesNotSplitUnicode(t *testing.T) {
+	got := wrap("prefix ← read_file suffix", 20)
+	if strings.ContainsRune(got, '\uFFFD') {
+		t.Fatalf("wrapped text contains replacement character: %q", got)
 	}
 }
 
