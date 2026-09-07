@@ -774,7 +774,7 @@ func TestLightThemeHasNoStaleDarkComponentBackgrounds(t *testing.T) {
 	}
 }
 
-func TestConversationLabelsAreForegroundOnly(t *testing.T) {
+func TestConversationUsesThemeCanvasAndForeground(t *testing.T) {
 	previous := lipgloss.ColorProfile()
 	defer lipgloss.SetColorProfile(previous)
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -793,9 +793,43 @@ func TestConversationLabelsAreForegroundOnly(t *testing.T) {
 	if !strings.Contains(plain, "You") || !strings.Contains(plain, "Agent") {
 		t.Fatalf("conversation missing role labels: %q", plain)
 	}
-	// Labels/prose must not paint filled message cards.
-	if strings.Contains(content, "48;2;224;231;255") || strings.Count(content, "48;2;15;23;42") > 0 {
-		t.Fatalf("conversation painted card/surface backgrounds on labels/prose: %q", content)
+	// Conversation content belongs to the active canvas. This prevents a
+	// black terminal default from leaking through themed message rows.
+	if !strings.Contains(content, "48;2;15;23;42") {
+		t.Fatalf("conversation did not use the dark theme canvas: %q", content)
+	}
+}
+
+func TestThemeViewPaintsCanvasAndMatchingForeground(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+
+	tests := []struct {
+		name, background, foreground string
+	}{
+		{"dark", "48;2;15;23;42", "38;2;226;232;240"},
+		{"black", "48;2;2;6;23", "38;2;248;250;252"},
+		{"light", "48;2;255;255;255", "38;2;15;23;42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			applyTheme(tt.name)
+			m := testModel(t)
+			m.themeName = tt.name
+			applyTextareaTheme(&m.ta, tt.name)
+			m.width, m.height = 100, 30
+			m.relayout()
+			m.lines = []chatLine{{role: "user", text: "canvas check"}, {role: "assistant", text: "readable text"}}
+			m.refreshViewport()
+			view := m.View()
+			if !strings.Contains(view, tt.background) {
+				t.Fatalf("%s theme did not paint its canvas: %q", tt.name, view)
+			}
+			if !strings.Contains(view, tt.foreground) {
+				t.Fatalf("%s theme did not paint its matching foreground: %q", tt.name, view)
+			}
+		})
 	}
 }
 

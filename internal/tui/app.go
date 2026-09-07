@@ -59,14 +59,15 @@ var (
 	styleAsst   = lipgloss.NewStyle().Foreground(colorAsst).Bold(true)
 	styleTool   = lipgloss.NewStyle().Foreground(colorTool)
 	styleErr    = lipgloss.NewStyle().Foreground(colorError)
-	// Dialogs/overlays keep a light border; input does not use this.
-	styleBox = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Padding(0, 1)
-	// Conversation and message bodies sit on the terminal background.
-	styleConversation = lipgloss.NewStyle().Foreground(fgBody)
-	styleUserBubble   = lipgloss.NewStyle().Foreground(fgBody)
-	styleAsstBubble   = lipgloss.NewStyle().Foreground(fgBody)
-	styleTodo         = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Foreground(fgBody).Padding(0, 1)
-	styleRoot         = lipgloss.NewStyle().Foreground(colorForeground)
+	// Every surface owns both colors. Terminal defaults are not reliable: a
+	// light theme must paint a light canvas, and its foreground must change with
+	// it instead of relying on the terminal's current background.
+	styleBox          = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Foreground(colorForeground).Background(colorBackground).Padding(0, 1)
+	styleConversation = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
+	styleUserBubble   = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
+	styleAsstBubble   = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
+	styleTodo         = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Foreground(fgBody).Background(colorBackground).Padding(0, 1)
+	styleRoot         = lipgloss.NewStyle().Foreground(colorForeground).Background(colorBackground)
 )
 
 const todoSideThreshold = 90
@@ -350,6 +351,11 @@ func (m *model) syncLayout() bool {
 }
 
 func New(deps Deps) model {
+	theme := strings.ToLower(strings.TrimSpace(os.Getenv("AGENTERM_THEME")))
+	if theme != "dark" && theme != "black" && theme != "light" {
+		theme = "dark"
+	}
+	applyTheme(theme)
 	ta := textarea.New()
 	ta.Placeholder = "Message…"
 	ta.Focus()
@@ -411,7 +417,7 @@ func New(deps Deps) model {
 	// Use an explicit style — WithAutoStyle() queries OSC 11 (bg color) and the
 	// reply often appears as garbage in the input line on first launch. The
 	// renderer is rebuilt on every theme switch in Update.
-	r := newGlamourRenderer(80, "dark")
+	r := newGlamourRenderer(80, theme)
 
 	m := model{
 		deps:            deps,
@@ -427,13 +433,13 @@ func New(deps Deps) model {
 		visionEnabled:   deps.Agent.Cfg.VisionEnabled,
 		visionSupported: false,
 		followBottom:    true,
-		themeName:       "dark",
+		themeName:       theme,
 		scrubLeft:       5, // a few startup passes to catch late OSC replies
 		lines:           nil,
 	}
 	// Re-apply after the model value is constructed so textarea's internal style
 	// pointer addresses this instance's FocusedStyle (see applyTextareaTheme).
-	applyTextareaTheme(&m.ta, "dark")
+	applyTextareaTheme(&m.ta, theme)
 	m.refreshViewport()
 	return m
 }
@@ -2476,12 +2482,12 @@ func applyTheme(name string) {
 	styleAsst = lipgloss.NewStyle().Foreground(colorAsst).Bold(true)
 	styleTool = lipgloss.NewStyle().Foreground(colorTool)
 	styleErr = lipgloss.NewStyle().Foreground(colorError)
-	styleBox = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Padding(0, 1)
-	styleConversation = lipgloss.NewStyle().Foreground(fgBody)
-	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody)
-	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody)
-	styleTodo = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Foreground(fgBody).Padding(0, 1)
-	styleRoot = lipgloss.NewStyle().Foreground(colorForeground)
+	styleBox = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Foreground(colorForeground).Background(colorBackground).Padding(0, 1)
+	styleConversation = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
+	styleUserBubble = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
+	styleAsstBubble = lipgloss.NewStyle().Foreground(fgBody).Background(colorBackground)
+	styleTodo = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Foreground(fgBody).Background(colorBackground).Padding(0, 1)
+	styleRoot = lipgloss.NewStyle().Foreground(colorForeground).Background(colorBackground)
 }
 
 func applyTextareaTheme(ta *textarea.Model, name string) {
@@ -2564,18 +2570,35 @@ func paintSurface(style lipgloss.Style, width, height int, view string) string {
 		}
 	}
 	pad := lipgloss.NewStyle().Foreground(style.GetForeground()).Background(style.GetBackground())
+	bgPrefix := backgroundPrefix(style.GetBackground())
 	for i, line := range lines {
 		gap := width - lipgloss.Width(line)
-		if gap <= 0 {
-			continue
-		}
 		if line == "" {
 			lines[i] = pad.Render(strings.Repeat(" ", gap))
 			continue
 		}
-		lines[i] = line + pad.Render(strings.Repeat(" ", gap))
+		// Nested Lip Gloss styles emit resets that clear an outer background.
+		// Reapply the canvas after every reset so light/dark/black remains visible
+		// behind every glyph, including headers, Markdown, and dialog contents.
+		line = bgPrefix + strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+bgPrefix)
+		padding := ""
+		if gap > 0 {
+			padding = pad.Render(strings.Repeat(" ", gap))
+		}
+		lines[i] = line + padding + "\x1b[0m"
 	}
 	return strings.Join(lines, "\n")
+}
+
+// backgroundPrefix asks Lip Gloss for the terminal-appropriate escape
+// sequence instead of hard-coding true-colour output. This keeps the canvas
+// correct on true-colour, 256-colour, and basic ANSI terminals alike.
+func backgroundPrefix(bg lipgloss.TerminalColor) string {
+	rendered := lipgloss.NewStyle().Background(bg).Render(" ")
+	if i := strings.IndexByte(rendered, ' '); i >= 0 {
+		return rendered[:i]
+	}
+	return ""
 }
 
 // joinHorizontalThemed joins columns like lipgloss.JoinHorizontal but pads
@@ -2673,7 +2696,7 @@ func (m model) View() string {
 	body = padBlock(body, l.conversationWidth, l.conversationHeight)
 	if l.todoWidth > 0 {
 		todo := renderTodoPanel(l.todoWidth, l.conversationHeight)
-		body = joinHorizontalThemed(lipgloss.NoColor{}, body, todo)
+		body = joinHorizontalThemed(colorBackground, body, todo)
 	}
 	status := m.status
 	if m.busy && (status == "ready" || status == "") {
@@ -2739,7 +2762,9 @@ func (m model) View() string {
 	}
 	parts = append(parts, cwdLine, input, help)
 	frame := fitFrameHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), l.height)
-	return frame
+	// Paint the complete frame so changing themes also changes the unused
+	// terminal canvas, not only the characters that happen to be present.
+	return paintSurface(styleRoot, w, l.height, frame)
 }
 
 func wrap(s string, width int) string {
@@ -2832,6 +2857,13 @@ func min(a, b int) int {
 
 // Run launches the full-screen TUI.
 func Run(deps Deps) error {
+	// Bolt's TUI has an explicit, user-toggleable color theme. Respecting a
+	// process-wide NO_COLOR=1 here would silently turn all three themes into
+	// the terminal default, making light mode indistinguishable from black.
+	// Remove it before Lip Gloss detects the terminal profile.
+	if os.Getenv("NO_COLOR") != "" {
+		_ = os.Unsetenv("NO_COLOR")
+	}
 	// Discourage libraries from probing terminal fg/bg via OSC (leaks into stdin).
 	// Fixed styles above are the main fix; these env hints help termenv/glamour.
 	if os.Getenv("GLAMOUR_STYLE") == "" {

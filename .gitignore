@@ -16,6 +16,7 @@ vendor/
 .env.*
 !.env.example
 dist/
+CONTINUITY.md
 
 # Generated benchmark outputs (retain locally, do not ship in source).
 /test-results/

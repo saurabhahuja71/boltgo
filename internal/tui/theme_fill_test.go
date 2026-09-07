@@ -67,14 +67,17 @@ func TestStatusLineIsCompactSubtle(t *testing.T) {
 	if strings.Contains(plain, "Permission Mode:") || strings.Contains(plain, "Mouse Mode:") {
 		t.Fatalf("status still uses heavy labels: %q", plain)
 	}
-	// Status must not be a full-width filled bar.
+	// The canvas is intentionally painted across the row. Verify the status
+	// remains a single compact line rather than treating its canvas as a bar.
+	statusLines := 0
 	for _, line := range strings.Split(view, "\n") {
-		if !strings.Contains(line, "Bolt ·") {
+		if !strings.Contains(line, "· ASK ·") {
 			continue
 		}
-		if strings.Contains(line, "48;2;255;255;255") && lipgloss.Width(line) >= 150 {
-			t.Fatalf("status looks like a filled full-width bar: %q", line)
-		}
+		statusLines++
+	}
+	if statusLines != 1 {
+		t.Fatalf("status occupies %d lines, want 1", statusLines)
 	}
 }
 
@@ -116,15 +119,10 @@ func TestLightThemeFinalViewIsContentFirst(t *testing.T) {
 	if strings.Contains(view, "48;2;2;6;23") || strings.Contains(view, "48;2;15;23;42") {
 		t.Fatal("light view retained dark component backgrounds")
 	}
-	// Conversation column + todo should not force every line to terminal width.
-	fullWidthLines := 0
-	for _, line := range strings.Split(view, "\n") {
-		if lipgloss.Width(line) >= 160 {
-			fullWidthLines++
-		}
-	}
-	if fullWidthLines == len(strings.Split(view, "\n")) {
-		t.Fatal("every view line is full terminal width; quiet margins are missing")
+	// The complete frame is painted to the terminal width so the light canvas
+	// cannot leak the terminal's black default through unused cells.
+	if lines := strings.Split(view, "\n"); len(lines) != 40 {
+		t.Fatalf("view has %d rows, want 40", len(lines))
 	}
 }
 
@@ -194,6 +192,21 @@ func TestInputLightThemeUsesLightFaces(t *testing.T) {
 	if got := strings.Count(view, "›"); got != 1 {
 		t.Fatalf("prompt markers=%d", got)
 	}
+}
+
+func TestLightThemePaintsFooterCanvas(t *testing.T) {
+	m := lightModel(t, 160, 40)
+	view := m.View()
+	for _, line := range strings.Split(view, "\n") {
+		if !strings.Contains(line, "Ctrl+Q quit") {
+			continue
+		}
+		if !strings.Contains(line, "48;2;255;255;255") {
+			t.Fatalf("light footer did not paint its canvas: %q", line)
+		}
+		return
+	}
+	t.Fatal("light footer was not rendered")
 }
 
 func TestMessageWidthUsesReadableCapNotFullViewport(t *testing.T) {
