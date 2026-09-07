@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -376,6 +377,81 @@ func TestTodoToggleAppearsInFinalView(t *testing.T) {
 	}
 	if m.vp.Width <= 0 || m.conversationWidth(160) <= 0 {
 		t.Fatal("todo layout produced a zero-width conversation")
+	}
+}
+
+func TestViewportBottomDoesNotCorruptFixedRegions(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(model)
+
+	assertFrame := func(state string) {
+		view := m.View()
+		header, status, input, footer := fixedRegionCounts(view)
+		if header != 1 || status != 1 || input != 1 || footer != 1 {
+			t.Fatalf("%s fixed regions: header=%d status=%d input=%d footer=%d\n%s", state, header, status, input, footer, view)
+		}
+		if got := lipgloss.Height(view); got != 40 {
+			t.Fatalf("%s frame height=%d want=40", state, got)
+		}
+		l := m.layoutFor(120, 40)
+		r := m.rectsFor(l)
+		if r.conversation.bottom > r.status.top || r.todo.bottom > r.status.top ||
+			r.status.bottom > r.input.top || r.input.bottom > r.footer.top || r.footer.bottom > 40 {
+			t.Fatalf("%s overlapping layout rectangles: %+v", state, r)
+		}
+		if m.vp.Height != l.conversationHeight {
+			t.Fatalf("%s viewport height=%d want body=%d", state, m.vp.Height, l.conversationHeight)
+		}
+	}
+
+	assertFrame("empty")
+	for i := 0; i < 500; i++ {
+		m.lines = append(m.lines, chatLine{role: "system", text: fmt.Sprintf("conversation line %03d", i)})
+	}
+	m.refreshViewport()
+	assertFrame("500 lines")
+	if !m.vp.AtBottom() || !m.followBottom {
+		t.Fatalf("long conversation did not follow bottom: offset=%d bottom=%v follow=%v", m.vp.YOffset, m.vp.AtBottom(), m.followBottom)
+	}
+
+	before := m.vp.YOffset
+	m.vp.ScrollUp(3)
+	m.followBottom = m.vp.AtBottom()
+	if m.followBottom {
+		t.Fatal("manual scroll up left follow-bottom enabled")
+	}
+	m.lines = append(m.lines, chatLine{role: "assistant-stream", text: "new streamed line"})
+	m.refreshViewport()
+	if m.vp.YOffset != before-3 {
+		t.Fatalf("streaming changed manual scroll: before=%d after=%d", before-3, m.vp.YOffset)
+	}
+	assertFrame("scrolled up")
+
+	m.vp.GotoBottom()
+	m.followBottom = true
+	m.lines = append(m.lines, chatLine{role: "tool", text: "tool output at bottom"})
+	m.refreshViewport()
+	assertFrame("one line beyond bottom")
+	if !m.vp.AtBottom() {
+		t.Fatal("returning to bottom did not re-enable bottom following")
+	}
+}
+
+func TestViewportBoundaryHeightsKeepFixedRegions(t *testing.T) {
+	for _, contentHeight := range []int{1, 2, 33, 34, 35, 66, 330} {
+		m := testModel(t)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		m = updated.(model)
+		m.vp.SetContent(strings.Repeat("line\n", contentHeight-1) + "line")
+		m.vp.GotoBottom()
+		if got := lipgloss.Height(m.View()); got != 40 {
+			t.Fatalf("content height %d rendered frame height=%d", contentHeight, got)
+		}
+		header, status, input, footer := fixedRegionCounts(m.View())
+		if header != 1 || status != 1 || input != 1 || footer != 1 {
+			t.Fatalf("content height %d fixed counts=%d/%d/%d/%d", contentHeight, header, status, input, footer)
+		}
 	}
 }
 

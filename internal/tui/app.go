@@ -83,6 +83,18 @@ type tuiLayout struct {
 	conversationWidth  int
 }
 
+// layoutRect describes a row range in the final terminal frame. Bottom is
+// exclusive, matching the usual [top, bottom) rectangle convention.
+type layoutRect struct {
+	top, bottom int
+}
+
+func (r layoutRect) height() int { return max(0, r.bottom-r.top) }
+
+type layoutRects struct {
+	conversation, todo, status, input, footer layoutRect
+}
+
 // contentMaxWidth caps readable conversation/prose width so wide terminals
 // keep quiet margins instead of stretching every message edge-to-edge.
 func contentMaxWidth(avail int) int {
@@ -164,17 +176,36 @@ func (m model) layoutFor(width, height int) tuiLayout {
 	}
 	l.conversationWidth = max(1, width-l.todoWidth)
 	fixed := l.headerHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight
-	if m.commandsOpen {
-		fixed += lipgloss.Height(styleBox.Width(max(10, width)).Render(commandsText()))
-	}
-	if m.pendingApproval != nil {
-		fixed += lipgloss.Height(styleBox.Width(max(10, width)).Render(approvalText(m.pendingApproval)))
-	}
-	if m.modelPick != nil {
-		fixed += lipgloss.Height(m.modelPickerView(width + 2))
-	}
+	fixed += m.optionalPanelHeight(width)
 	l.conversationHeight = max(1, height-fixed)
 	return l
+}
+
+func (m model) optionalPanelHeight(width int) int {
+	height := 0
+	if m.commandsOpen {
+		height += lipgloss.Height(styleBox.Width(max(10, width)).Render(commandsText()))
+	}
+	if m.pendingApproval != nil {
+		height += lipgloss.Height(styleBox.Width(max(10, width)).Render(approvalText(m.pendingApproval)))
+	}
+	if m.modelPick != nil {
+		height += lipgloss.Height(m.modelPickerView(width + 2))
+	}
+	return height
+}
+
+func (m model) rectsFor(l tuiLayout) layoutRects {
+	conversationTop := l.headerHeight
+	statusTop := conversationTop + l.conversationHeight
+	inputTop := statusTop + l.statusHeight + m.optionalPanelHeight(l.width) + l.workspaceHeight
+	return layoutRects{
+		conversation: layoutRect{conversationTop, statusTop},
+		todo:         layoutRect{conversationTop, statusTop},
+		status:       layoutRect{statusTop, statusTop + l.statusHeight},
+		input:        layoutRect{inputTop, inputTop + l.inputHeight},
+		footer:       layoutRect{inputTop + l.inputHeight, l.height},
+	}
 }
 
 // Deps wired from main.
@@ -227,12 +258,16 @@ type model struct {
 	// modelPick: interactive /model list (Tab cycle, Enter select, Esc cancel).
 	modelPick *modelPicker
 	// paintThrottle: avoid full viewport rebuilds on every token (large answers hang).
-	lastPaint        time.Time
-	paintPending     bool
-	permissionMode   permissions.Mode
-	mouseMode        string
-	visionEnabled    bool
-	visionSupported  bool
+	lastPaint       time.Time
+	paintPending    bool
+	permissionMode  permissions.Mode
+	mouseMode       string
+	visionEnabled   bool
+	visionSupported bool
+	// followBottom is true when new content should keep the viewport pinned to
+	// the latest line. Manual scrolling changes it until the user returns to
+	// the bottom.
+	followBottom     bool
 	todosOpen        bool
 	commandsOpen     bool
 	themeName        string
@@ -268,8 +303,15 @@ func (m *model) relayout() {
 		return
 	}
 	l := m.layoutFor(m.width, m.height)
+	oldOffset := m.vp.YOffset
 	m.vp.Width = l.conversationWidth
 	m.vp.Height = l.conversationHeight
+	if m.followBottom {
+		m.vp.GotoBottom()
+	} else {
+		// Changing height can leave Bubble's offset past the new maximum.
+		m.vp.SetYOffset(oldOffset)
+	}
 	m.ta.SetWidth(max(20, m.width-2))
 	m.ta.SetHeight(l.inputHeight)
 	m.renderer = newGlamourRenderer(max(40, m.messageWidth()), m.themeName)
@@ -365,6 +407,7 @@ func New(deps Deps) model {
 		mouseMode:       "SELECT",
 		visionEnabled:   deps.Agent.Cfg.VisionEnabled,
 		visionSupported: false,
+		followBottom:    true,
 		themeName:       "dark",
 		scrubLeft:       5, // a few startup passes to catch late OSC replies
 		lines:           nil,
@@ -523,6 +566,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Chat scroll keys — handle before the textarea so large answers are reachable.
 		if m.handleChatScrollKey(msg) {
+			m.followBottom = m.vp.AtBottom()
 			return m, nil
 		}
 		switch msg.String() {
@@ -607,6 +651,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mouseMode == "INTERACTIVE" {
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg)
+			m.followBottom = m.vp.AtBottom()
 			return m, cmd
 		}
 
@@ -734,6 +779,7 @@ func (m model) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.busySince = time.Now()
 	m.status = fmt.Sprintf("Thinking… (%s)", m.deps.Agent.Cfg.Model)
 	// New turn: jump to the latest content so the question is visible.
+	m.followBottom = true
 	m.vp.GotoBottom()
 	m.upsertThinkingPlaceholder()
 	m.refreshViewport()
@@ -2069,6 +2115,16 @@ func trimANSIHorizontalPadding(s string) string {
 var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 func (m *model) refreshViewport() {
+	// Ensure content is painted with the final viewport dimensions. This also
+	// makes refreshes triggered by optional panels use the same geometry as
+	// View, before bottom state is evaluated.
+	m.syncLayout()
+	// Reconcile direct viewport movement as well as movements handled by our
+	// key/mouse paths. This is important during resize and keeps tests or other
+	// callers that adjust YOffset from being unexpectedly pulled to the bottom.
+	if m.followBottom && !m.vp.AtBottom() {
+		m.followBottom = false
+	}
 	var b strings.Builder
 	col := m.vp.Width
 	if col < 20 {
@@ -2115,10 +2171,11 @@ func (m *model) refreshViewport() {
 	// Stick to bottom only when already following the latest lines. If the user
 	// scrolled up to read a long answer, keep their YOffset across refreshes
 	// (streaming / busy ticks would otherwise yank them back down).
-	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(b.String())
-	if atBottom {
+	if m.followBottom {
 		m.vp.GotoBottom()
+	} else {
+		m.vp.SetYOffset(m.vp.YOffset)
 	}
 	m.lastPaint = time.Now()
 }
