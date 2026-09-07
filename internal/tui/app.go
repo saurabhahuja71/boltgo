@@ -177,7 +177,11 @@ func (m model) layoutFor(width, height int) tuiLayout {
 	l.conversationWidth = max(1, width-l.todoWidth)
 	fixed := l.headerHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight
 	fixed += m.optionalPanelHeight(width)
-	l.conversationHeight = max(1, height-fixed)
+	// Fixed regions own the bottom of the frame. When optional panels consume
+	// the whole terminal there may be no conversation rows left; allowing zero
+	// here keeps the model frame within the terminal instead of relying on the
+	// Bubble Tea renderer to truncate it from the top.
+	l.conversationHeight = max(0, height-fixed)
 	return l
 }
 
@@ -260,6 +264,12 @@ type model struct {
 	scrubLeft int
 	// modelPick: interactive /model list (Tab cycle, Enter select, Esc cancel).
 	modelPick *modelPicker
+	// modelDiscoveryLoading owns the asynchronous /model request while the
+	// existing picker is still closed. A generation prevents late results from
+	// reopening the picker after cancellation or a newer request.
+	modelDiscoveryLoading bool
+	modelDiscoverySeq     uint64
+	modelDiscoveryCancel  context.CancelFunc
 	// paintThrottle: avoid full viewport rebuilds on every token (large answers hang).
 	lastPaint       time.Time
 	paintPending    bool
@@ -300,6 +310,12 @@ type streamEvMsg agent.Event
 type streamClosedMsg struct{}
 type busyTickMsg time.Time
 type paintDueMsg struct{}
+
+type modelDiscoveryMsg struct {
+	generation uint64
+	ids        []string
+	err        error
+}
 
 func (m *model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
@@ -564,6 +580,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modelPick != nil {
 			return m.handleModelPickKeys(msg)
 		}
+		if m.modelDiscoveryLoading {
+			switch msg.String() {
+			case "esc":
+				m.cancelModelDiscovery()
+				m.ta.Focus()
+				m.status = "ready"
+				m.lines = append(m.lines, chatLine{role: "system", text: "model discovery cancelled"})
+				m.refreshViewport()
+				return m, nil
+			case "ctrl+c", "ctrl+q":
+				m.cancelModelDiscovery()
+				return m, tea.Quit
+			default:
+				// Keep discovery modal while resize and quit remain responsive.
+				return m, nil
+			}
+		}
 		if m.pendingApproval != nil && isApprovalDecisionKey(msg) {
 			return m.handleApprovalKey(msg)
 		}
@@ -682,6 +715,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paintPending = false
 			m.refreshViewport()
 		}
+
+	case modelDiscoveryMsg:
+		if msg.generation != m.modelDiscoverySeq || !m.modelDiscoveryLoading {
+			return m, nil
+		}
+		m.modelDiscoveryLoading = false
+		m.modelDiscoveryCancel = nil
+		if msg.err != nil {
+			m.ta.Focus()
+			m.status = "ready"
+			m.lines = append(m.lines, chatLine{
+				role: "error",
+				text: fmt.Sprintf("could not list models: %v\ncurrent: %s\nusage: /model <name>", msg.err, m.deps.Agent.Cfg.Model),
+			})
+			m.refreshViewport()
+			return m, nil
+		}
+		if len(msg.ids) == 0 {
+			m.ta.Focus()
+			m.status = "ready"
+			m.lines = append(m.lines, chatLine{
+				role: "system",
+				text: "no models reported by server\ncurrent: " + m.deps.Agent.Cfg.Model + "\nusage: /model <name>",
+			})
+			m.refreshViewport()
+			return m, nil
+		}
+		idx := 0
+		for i, id := range msg.ids {
+			if id == m.deps.Agent.Cfg.Model {
+				idx = i
+				break
+			}
+		}
+		m.modelPick = &modelPicker{ids: msg.ids, idx: idx}
+		m.ta.Blur()
+		m.status = "pick model · Tab next · Enter select · Esc cancel"
+		m.refreshViewport()
+		return m, nil
 
 	case streamBatchMsg:
 		// Coalesced tokens + the next control event from waitNext.
@@ -1405,44 +1477,47 @@ func listWorkspaceSessions(dir string, limit int) ([]string, error) {
 	return out, nil
 }
 
+func (m *model) cancelModelDiscovery() {
+	if m.modelDiscoveryCancel != nil {
+		m.modelDiscoveryCancel()
+	}
+	m.modelDiscoveryCancel = nil
+	m.modelDiscoveryLoading = false
+	m.modelDiscoverySeq++
+}
+
+func discoverModelsCmd(client *llm.Client, ctx context.Context, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		ids, err := client.ListModels(ctx)
+		return modelDiscoveryMsg{generation: generation, ids: ids, err: err}
+	}
+}
+
 // handleModelCmd implements Grok-style mid-chat model switch and listing.
 // /model or /model list opens an interactive picker: Tab cycles, Enter selects, Esc cancels.
 // /model <name> still switches immediately.
 func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
-	cur := m.deps.Agent.Cfg.Model
-	// /model  or  /model list  → interactive picker
+	// /model  or  /model list  → asynchronously load the interactive picker.
 	if len(parts) < 2 || strings.EqualFold(parts[1], "list") || strings.EqualFold(parts[1], "ls") {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		ids, err := m.deps.Agent.Client.ListModels(ctx)
-		if err != nil {
-			m.lines = append(m.lines, chatLine{
-				role: "error",
-				text: fmt.Sprintf("could not list models: %v\ncurrent: %s\nusage: /model <name>", err, cur),
-			})
-			m.refreshViewport()
+		if m.modelDiscoveryLoading {
 			return m, nil
 		}
-		if len(ids) == 0 {
-			m.lines = append(m.lines, chatLine{
-				role: "system",
-				text: "no models reported by server\ncurrent: " + cur + "\nusage: /model <name>",
-			})
-			m.refreshViewport()
-			return m, nil
-		}
-		idx := 0
-		for i, id := range ids {
-			if id == cur {
-				idx = i
-				break
-			}
-		}
-		m.modelPick = &modelPicker{ids: ids, idx: idx}
+		ctx, cancel := context.WithCancel(context.Background())
+		m.modelDiscoverySeq++
+		generation := m.modelDiscoverySeq
+		m.modelDiscoveryLoading = true
+		m.modelDiscoveryCancel = cancel
+		m.modelPick = nil
 		m.ta.Blur()
-		m.status = "pick model · Tab next · Enter select · Esc cancel"
+		m.status = "loading models… (Esc cancel)"
 		m.refreshViewport()
-		return m, nil
+		return m, discoverModelsCmd(m.deps.Agent.Client, ctx, generation)
+	}
+
+	// A direct model selection supersedes any in-flight discovery. Normal key
+	// input is modal while loading, but this also protects programmatic callers.
+	if m.modelDiscoveryLoading {
+		m.cancelModelDiscovery()
 	}
 
 	// /model <name> — tags may include ":" (e.g. qwen2.5-coder:32b); join rest.
@@ -2564,6 +2639,24 @@ func padBlock(s string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+// fitFrameHeight makes View's output an exact terminal-sized frame. The fixed
+// regions are composed last, so if an unusually small terminal cannot display
+// every optional panel, retaining the bottom rows is the least surprising and
+// prevents a previous frame's rows from being mistaken for current content.
+func fitFrameHeight(s string, height int) string {
+	if height <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > height {
+		lines = lines[len(lines)-height:]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m model) View() string {
 	l := m.layoutFor(m.width, m.height)
 	w := l.width
@@ -2639,7 +2732,7 @@ func (m model) View() string {
 		parts = append(parts, m.modelPickerView(dialogW+2))
 	}
 	parts = append(parts, cwdLine, input, help)
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	return fitFrameHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), l.height)
 }
 
 func wrap(s string, width int) string {

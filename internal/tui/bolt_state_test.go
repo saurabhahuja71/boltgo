@@ -10,11 +10,14 @@ import (
 	"github.com/saurabhahuja71/agenterm/internal/llm"
 	"github.com/saurabhahuja71/agenterm/internal/permissions"
 	"github.com/saurabhahuja71/agenterm/internal/tools"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testModel(t *testing.T) model {
@@ -542,6 +545,43 @@ func TestViewportBoundaryHeightsKeepFixedRegions(t *testing.T) {
 	}
 }
 
+func TestOptionalPanelsKeepViewWithinTerminalHeight(t *testing.T) {
+	m := testModel(t)
+	m.commandsOpen = true
+	m.pendingApproval = &permissions.Request{Tool: "read_file", Arguments: `{"path":"README.md"}`}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = updated.(model)
+	if got := lipgloss.Height(m.View()); got != 24 {
+		t.Fatalf("optional-panel frame height=%d want=24", got)
+	}
+	if m.vp.Height < 0 {
+		t.Fatalf("conversation height=%d", m.vp.Height)
+	}
+}
+
+func TestFrameHeightChangesDoNotLeaveDuplicateBottomRegions(t *testing.T) {
+	m := testModel(t)
+	for _, tc := range []struct {
+		width, height int
+	}{
+		{120, 40},
+		{80, 24},
+		{160, 40},
+		{100, 30},
+	} {
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: tc.width, Height: tc.height})
+		m = updated.(model)
+		view := m.View()
+		if got := lipgloss.Height(view); got != tc.height {
+			t.Fatalf("%dx%d rendered height=%d", tc.width, tc.height, got)
+		}
+		header, status, input, footer := fixedRegionCounts(view)
+		if header != 1 || status != 1 || input != 1 || footer != 1 {
+			t.Fatalf("%dx%d fixed regions=%d/%d/%d/%d\n%s", tc.width, tc.height, header, status, input, footer, view)
+		}
+	}
+}
+
 func TestThemeChangeRebuildsVisibleStylesWithoutResettingState(t *testing.T) {
 	previous := lipgloss.ColorProfile()
 	defer lipgloss.SetColorProfile(previous)
@@ -812,6 +852,129 @@ func TestSlashSessionsUseWorkspaceStorage(t *testing.T) {
 	if len(updated.(model).deps.Agent.History) < 2 {
 		t.Fatal("workspace session was not loaded")
 	}
+}
+
+func modelWithHTTPServer(t *testing.T, handler http.Handler) (model, *httptest.Server) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	cfg := config.Default()
+	cfg.PermissionMode = "ask"
+	ag := agent.New(cfg, llm.New(server.URL, "test"), tools.DefaultBuiltins(false))
+	return New(Deps{Title: "Bolt", Summary: "test", Agent: ag}), server
+}
+
+func TestModelCommandReturnsBeforeDiscoveryCompletes(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	m, server := modelWithHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		_, _ = w.Write([]byte(`{"data":[{"id":"slow-model"}]}`))
+	}))
+	defer server.Close()
+
+	updated, cmd := m.handleSlash("/model")
+	m = updated.(model)
+	if cmd == nil || !m.modelDiscoveryLoading || m.modelPick != nil {
+		t.Fatalf("/model did not enter loading state: cmd=%v loading=%v picker=%v", cmd != nil, m.modelDiscoveryLoading, m.modelPick != nil)
+	}
+	if m.status != "loading models… (Esc cancel)" || m.ta.Focused() {
+		t.Fatalf("loading state not represented correctly: status=%q focused=%v", m.status, m.ta.Focused())
+	}
+
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("discovery request did not start")
+	}
+
+	resized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if resized.(model).width != 100 {
+		t.Fatal("Update loop did not process resize during discovery")
+	}
+	close(release)
+	msg := <-done
+	completed, _ := resized.(model).Update(msg)
+	m = completed.(model)
+	if m.modelDiscoveryLoading || m.modelPick == nil || len(m.modelPick.ids) != 1 || m.modelPick.ids[0] != "slow-model" {
+		t.Fatalf("discovery completion did not open picker: loading=%v picker=%v", m.modelDiscoveryLoading, m.modelPick)
+	}
+}
+
+func TestModelDiscoveryFailureRestoresPrompt(t *testing.T) {
+	m, server := modelWithHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "provider unavailable", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	updated, cmd := m.handleSlash("/model list")
+	m = updated.(model)
+	msg := cmd()
+	updated, _ = m.Update(msg)
+	m = updated.(model)
+	if m.modelDiscoveryLoading || m.modelPick != nil || !m.ta.Focused() || m.status != "ready" {
+		t.Fatalf("failure did not restore prompt: loading=%v picker=%v focused=%v status=%q", m.modelDiscoveryLoading, m.modelPick, m.ta.Focused(), m.status)
+	}
+	if !containsText(m.lines[len(m.lines)-1].text, "could not list models") {
+		t.Fatal("provider failure was not surfaced")
+	}
+}
+
+func TestCancelledModelDiscoveryIgnoresLateResult(t *testing.T) {
+	started := make(chan struct{})
+	m, server := modelWithHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	updated, cmd := m.handleSlash("/model")
+	m = updated.(model)
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("discovery request did not start")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+	if m.modelDiscoveryLoading || m.modelPick != nil || !m.ta.Focused() {
+		t.Fatalf("cancel did not restore prompt: loading=%v picker=%v focused=%v", m.modelDiscoveryLoading, m.modelPick, m.ta.Focused())
+	}
+	late := <-done
+	updated, _ = m.Update(late)
+	m = updated.(model)
+	if m.modelPick != nil || m.modelDiscoveryLoading {
+		t.Fatal("late cancelled result reopened or retained discovery UI")
+	}
+}
+
+func TestOlderModelDiscoveryResultCannotOverwriteNewerRequest(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.handleSlash("/model")
+	m = updated.(model)
+	oldGeneration := m.modelDiscoverySeq
+	m.cancelModelDiscovery()
+	updated, _ = m.handleSlash("/model")
+	m = updated.(model)
+	newGeneration := m.modelDiscoverySeq
+	if oldGeneration == newGeneration || !m.modelDiscoveryLoading {
+		t.Fatalf("new discovery did not get a new generation: old=%d new=%d loading=%v", oldGeneration, newGeneration, m.modelDiscoveryLoading)
+	}
+	updated, _ = m.Update(modelDiscoveryMsg{generation: oldGeneration, ids: []string{"old-model"}})
+	m = updated.(model)
+	if m.modelPick != nil || !m.modelDiscoveryLoading {
+		t.Fatal("stale result changed current discovery state")
+	}
+	updated, _ = m.Update(modelDiscoveryMsg{generation: newGeneration, ids: []string{"new-model"}})
+	m = updated.(model)
+	if m.modelPick == nil || len(m.modelPick.ids) != 1 || m.modelPick.ids[0] != "new-model" {
+		t.Fatalf("current result did not populate picker: %#v", m.modelPick)
+	}
+	m.cancelModelDiscovery()
 }
 
 func containsText(s, want string) bool {
