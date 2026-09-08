@@ -85,3 +85,14 @@ Models are **not** bundled in the binary. You need Ollama, SGLang, or another AP
 
 - Roadmap and Grok-class UX gaps: [`grok-parity-roadmap.md`](grok-parity-roadmap.md)
 - Example config: [`../configs/config.example.toml`](../configs/config.example.toml)
+
+## Live worktree summary
+
+The TUI's compact `Files · +additions -deletions` indicator is collected from
+Git's current worktree relative to `HEAD`. It includes pre-existing changes,
+staged and unstaged changes, and untracked files; it is not an attribution of
+changes to the current agent turn. Untracked text files contribute their line
+count as additions when they are at most 1 MiB. Binary, oversized, unreadable,
+or directory entries are shown without invented line totals. Git inspection is
+performed asynchronously after startup and tool completion, so it does not
+block the Bubble Tea update loop.

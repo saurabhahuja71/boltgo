@@ -289,7 +289,10 @@ type model struct {
 	approvalDecision chan permissions.Decision
 	tokenUsage       *llm.Usage
 	// pendingRequests contains canonical, unrendered user input in FIFO order.
-	pendingRequests []string
+	pendingRequests      []string
+	worktree             worktreeSummary
+	worktreeGeneration   uint64
+	worktreeRefreshAgain bool
 }
 
 // paintInterval is the minimum time between streaming viewport rebuilds.
@@ -420,22 +423,24 @@ func New(deps Deps) model {
 	r := newGlamourRenderer(80, theme)
 
 	m := model{
-		deps:            deps,
-		vp:              vp,
-		ta:              ta,
-		status:          "ready",
-		stream:          &strings.Builder{},
-		turnAssistant:   -1,
-		renderer:        r,
-		verbose:         false, // compact tools by default
-		permissionMode:  deps.Agent.Permissions.Mode,
-		mouseMode:       "SELECT",
-		visionEnabled:   deps.Agent.Cfg.VisionEnabled,
-		visionSupported: false,
-		followBottom:    true,
-		themeName:       theme,
-		scrubLeft:       5, // a few startup passes to catch late OSC replies
-		lines:           nil,
+		deps:               deps,
+		vp:                 vp,
+		ta:                 ta,
+		status:             "ready",
+		stream:             &strings.Builder{},
+		turnAssistant:      -1,
+		renderer:           r,
+		verbose:            false, // compact tools by default
+		permissionMode:     deps.Agent.Permissions.Mode,
+		mouseMode:          "SELECT",
+		visionEnabled:      deps.Agent.Cfg.VisionEnabled,
+		visionSupported:    false,
+		followBottom:       true,
+		themeName:          theme,
+		scrubLeft:          5, // a few startup passes to catch late OSC replies
+		worktree:           worktreeSummary{RefreshInProgress: true},
+		worktreeGeneration: 1,
+		lines:              nil,
 	}
 	// Re-apply after the model value is constructed so textarea's internal style
 	// pointer addresses this instance's FocusedStyle (see applyTextareaTheme).
@@ -453,7 +458,26 @@ func (m *model) ensureStream() *strings.Builder {
 
 func (m model) Init() tea.Cmd {
 	// Scrub any OSC color-query junk already sitting in the input buffer.
-	return tea.Batch(textarea.Blink, scrubInputCmd(), tea.DisableMouse)
+	workspace := m.deps.Workspace
+	if workspace == "" {
+		workspace = mustCwd()
+	}
+	return tea.Batch(textarea.Blink, scrubInputCmd(), tea.DisableMouse,
+		worktreeRefreshCmd(workspace, 1))
+}
+
+func (m *model) scheduleWorktreeRefresh() tea.Cmd {
+	if m.worktree.RefreshInProgress {
+		m.worktreeRefreshAgain = true
+		return nil
+	}
+	workspace := m.deps.Workspace
+	if workspace == "" {
+		workspace = mustCwd()
+	}
+	m.worktreeGeneration++
+	m.worktree.RefreshInProgress = true
+	return worktreeRefreshCmd(workspace, m.worktreeGeneration)
 }
 
 type scrubInputMsg struct{}
@@ -722,6 +746,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 		}
 
+	case worktreeDeltaMsg:
+		if msg.Generation != m.worktreeGeneration {
+			return m, nil
+		}
+		m.worktree.RefreshInProgress = false
+		if msg.Err == nil {
+			m.worktree = msg.Summary
+		}
+		if m.worktreeRefreshAgain {
+			m.worktreeRefreshAgain = false
+			return m, m.scheduleWorktreeRefresh()
+		}
+		return m, nil
+
 	case modelDiscoveryMsg:
 		if msg.generation != m.modelDiscoverySeq || !m.modelDiscoveryLoading {
 			return m, nil
@@ -900,7 +938,7 @@ func (m model) startTurn(text string) (tea.Model, tea.Cmd) {
 		close(ch)
 	}()
 
-	return m, tea.Batch(waitNext(ch), busyTick())
+	return m, tea.Batch(waitNext(ch), busyTick(), m.scheduleWorktreeRefresh())
 }
 
 func (m model) startNextQueued() (tea.Model, tea.Cmd) {
@@ -1062,7 +1100,7 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		}
 		m.status = line
 		m.upsertThinkingPlaceholder()
-		return m, m.schedulePaint(true)
+		return m, tea.Batch(m.schedulePaint(true), m.scheduleWorktreeRefresh())
 
 	case agent.EventStatus:
 		if ev.Text != "" {
@@ -2732,6 +2770,9 @@ func (m model) View() string {
 		tokens,
 		status,
 	)
+	if summary := compactWorktreeSummary(m.worktree, w); summary != "" {
+		statusText = summary + " · " + statusText
+	}
 	statusLine := styleStatus.Render(truncateCells(statusText, w))
 	helpText := "Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline"
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
