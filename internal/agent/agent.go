@@ -49,6 +49,9 @@ type Agent struct {
 	// PlanMode: Grok-like plan first — no tools; model only outlines steps.
 	PlanMode    bool
 	Permissions *permissions.Manager
+	// GitHubFallback is injectable for deterministic tests; production uses the
+	// default lazy gh capability probe when it is zero-valued.
+	GitHubFallback tools.GitHubFallbackDeps
 }
 
 func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
@@ -407,18 +410,29 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			emit(Event{Kind: EventToolStart, Tool: name, Text: args})
 			emit(Event{Kind: EventStatus, Text: fmt.Sprintf("running %s…", name)})
-			var out string
-			var err error
+			var result tools.ExecutionResult
 			if decision == permissions.Deny {
-				out = "error: permission denied"
+				result = tools.ExecutionResult{Output: "error: permission denied", Category: tools.FailurePermissionDenied, PermissionDenied: true}
 			} else {
-				out, err = a.Tools.Run(ctx, name, args)
+				result = a.Tools.RunDetailed(ctx, name, args)
+				if name == "fetch" && result.Category == tools.FailureNotFound {
+					resource := tools.ClassifyResourceURL(toolURL(args))
+					if resource.Type == tools.ResourceGitHubActionsRun || resource.Type == tools.ResourceGitHubActionsJob {
+						emit(Event{Kind: EventStatus, Text: "fetch failed · HTTP 404 · trying GitHub Actions fallback"})
+						fallbackDeps := a.GitHubFallback
+						if fallbackDeps.Capabilities == nil && fallbackDeps.RunCommand == nil {
+							fallbackDeps = tools.DefaultGitHubFallbackDeps()
+						}
+						fallback := tools.ResolveGitHubActionsFallback(ctx, resource, fallbackDeps)
+						fallback.Output = fmt.Sprintf("initial fetch failed (HTTP 404)\n\n%s", fallback.Output)
+						fallback.Attempts = append([]tools.ExecutionAttempt{{Operation: "fetch", Category: result.Category, HTTPStatus: result.HTTPStatus}}, fallback.Attempts...)
+						result = fallback
+					}
+				}
 			}
-			if err != nil {
-				out = fmt.Sprintf("error: %v\n%s", err, out)
-			}
+			out := result.Output
 			// Cap what the model sees so it does not re-dump huge listings into chat.
-			outForModel := capToolResult(out, 6_000)
+			outForModel := capToolResult(result.ModelOutput(), 6_000)
 			emit(Event{Kind: EventToolEnd, Tool: name, ToolOut: out}) // TUI uses compact formatter
 			a.History = append(a.History, llm.Message{
 				Role:       llm.RoleTool,
@@ -620,6 +634,19 @@ func capToolResult(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n…[truncated for model; do not invent the rest]…"
+}
+
+func toolURL(argsJSON string) string {
+	var args map[string]any
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return ""
+	}
+	for _, key := range []string{"url", "uri", "href"} {
+		if value, ok := args[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // sanitizeToolArgsJSON fixes common model argument shapes so tools run and

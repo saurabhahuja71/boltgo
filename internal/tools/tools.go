@@ -589,16 +589,24 @@ func (fetchURL) Schema() map[string]any {
 	}
 }
 func (fetchURL) Run(ctx context.Context, argsJSON string) (string, error) {
+	result := (fetchURL{}).RunDetailed(ctx, argsJSON)
+	if result.Category == FailureInvalidInput {
+		return "", fmt.Errorf("%s", result.Output)
+	}
+	return result.Output, nil
+}
+
+func (fetchURL) RunDetailed(ctx context.Context, argsJSON string) ExecutionResult {
 	var in struct {
 		URL        string `json:"url"`
 		TimeoutSec int    `json:"timeout_sec"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || strings.TrimSpace(in.URL) == "" {
-		return "", fmt.Errorf("url required")
+		return ExecutionResult{Output: "url required", Category: FailureInvalidInput}
 	}
 	u := strings.TrimSpace(in.URL)
 	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		return "", fmt.Errorf("url must start with http:// or https://")
+		return ExecutionResult{Output: "url must start with http:// or https://", Category: FailureInvalidInput}
 	}
 	sec := in.TimeoutSec
 	if sec <= 0 {
@@ -611,7 +619,7 @@ func (fetchURL) Run(ctx context.Context, argsJSON string) (string, error) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", err
+		return resultFromOutput("", err)
 	}
 	req.Header.Set("User-Agent", "agenterm-fetch/0.2")
 	client := &http.Client{
@@ -626,12 +634,16 @@ func (fetchURL) Run(ctx context.Context, argsJSON string) (string, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Sprintf("error: fetch failed: %v", err), nil
+		result := resultFromOutput(fmt.Sprintf("error: fetch failed: %v", err), nil)
+		if ctx.Err() != nil {
+			result.Category, result.Retryable, result.Timeout = FailureTimeout, true, true
+		}
+		return result
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 100_000))
 	if err != nil {
-		return fmt.Sprintf("error: read body: %v", err), nil
+		return resultFromOutput(fmt.Sprintf("error: read body: %v", err), nil)
 	}
 	s := string(body)
 	if len(body) >= 100_000 {
@@ -641,7 +653,7 @@ func (fetchURL) Run(ctx context.Context, argsJSON string) (string, error) {
 	if len(s) > 8_000 {
 		s = s[:8_000] + "\n…[truncated for chat]…"
 	}
-	return fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, s), nil
+	return resultFromOutput(fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, s), nil)
 }
 
 type findFiles struct{ Workspace string }
