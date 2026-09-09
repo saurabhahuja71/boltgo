@@ -18,6 +18,15 @@ var (
 	reFencedJSON = regexp.MustCompile("(?s)```(?:json|tool)?\\s*(\\{.*?\\})\\s*```")
 )
 
+// hasUnsupportedToolMarkup identifies common template tags that are not
+// OpenAI-compatible tool_calls. They are retried once, but never executed as
+// shell or treated as a completed coding task.
+func hasUnsupportedToolMarkup(content string) bool {
+	low := strings.ToLower(content)
+	return (strings.Contains(low, "<function=") && strings.Contains(low, "</function>")) ||
+		strings.Contains(low, "</tool_call>") || strings.Contains(low, "<tool_call>")
+}
+
 type textToolCall struct {
 	Name      string          `json:"name"`
 	Tool      string          `json:"tool"`

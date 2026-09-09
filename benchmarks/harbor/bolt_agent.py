@@ -44,7 +44,11 @@ class Bolt(BaseInstalledAgent):
                                ("--api-key", "AGENTERM_API_KEY")):
             if os.environ.get(env_name):
                 flags += [flag, os.environ[env_name]]
-        command = "bolt " + " ".join(shlex.quote(x) for x in flags)
+        # Harbor task images may inherit proxy variables from the host. Keep
+        # the host-gateway provider path direct without changing Bolt itself.
+        command = "env NO_PROXY=host.containers.internal,host.docker.internal "
+        command += "no_proxy=host.containers.internal,host.docker.internal bolt "
+        command += " ".join(shlex.quote(x) for x in flags)
         command += " exec " + shlex.quote(instruction)
         result = await self.exec_as_agent(environment, command=command)
         self.logger.info("bolt stdout:\n%s", result.stdout or "")

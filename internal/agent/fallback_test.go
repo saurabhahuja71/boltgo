@@ -54,8 +54,8 @@ func TestGitHubActions404FallbackPreservesIntentAndContinuesLoop(t *testing.T) {
 	if err := ag.RunUserMessage(context.Background(), "download this GitHub Actions job log", func(e Event) { events = append(events, e) }); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 2 {
-		t.Fatalf("model requests=%d, want fallback result follow-up", requests)
+	if requests != 3 {
+		t.Fatalf("model requests=%d, want fallback follow-up plus verification", requests)
 	}
 	if !strings.Contains(ag.History[1].Content, "download this GitHub Actions job log") {
 		t.Fatalf("intent missing: %+v", ag.History[1])

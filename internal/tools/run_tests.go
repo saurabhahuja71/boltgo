@@ -62,7 +62,7 @@ func (r runTests) Run(ctx context.Context, argsJSON string) (string, error) {
 		s = s[:40_000] + "\n…[truncated]…"
 	}
 	if err != nil {
-		return fmt.Sprintf("$ %s\n%s\n[exit error: %v]", cmdStr, s, err), nil
+		return fmt.Sprintf("$ %s\n%s\n[exit error: %v]", cmdStr, s, err), err
 	}
 	return fmt.Sprintf("$ %s\n%s\nok", cmdStr, s), nil
 }

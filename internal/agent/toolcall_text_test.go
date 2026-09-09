@@ -30,6 +30,15 @@ func TestExtractToolCallsFromContent(t *testing.T) {
 	}
 }
 
+func TestUnsupportedToolMarkupIsDetectedWithoutChangingProtocol(t *testing.T) {
+	if !hasUnsupportedToolMarkup("<function=repo_map>\n</function>\n</tool_call>") {
+		t.Fatal("expected unsupported template markup to be detected")
+	}
+	if hasUnsupportedToolMarkup("ordinary answer mentioning tool_calls") {
+		t.Fatal("ordinary prose was misclassified as tool markup")
+	}
+}
+
 func TestNormalizeToolNameRepairsConcatenatedProviderNames(t *testing.T) {
 	known := map[string]struct{}{"list_dir": {}, "read_file": {}}
 	for input, want := range map[string]string{

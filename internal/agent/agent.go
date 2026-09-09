@@ -46,6 +46,14 @@ type Agent struct {
 	History []llm.Message
 	// MaxToolRounds prevents infinite tool loops.
 	MaxToolRounds int
+	// MaxIterations bounds model decisions, including verification/replanning.
+	MaxIterations int
+	// MaxToolCalls bounds total tool executions in one user turn.
+	MaxToolCalls int
+	// MaxRetries bounds repeated recovery attempts after failed tools.
+	MaxRetries int
+	// RunState is the compact control state for the active user turn.
+	RunState AgentRunState
 	// PlanMode: Grok-like plan first — no tools; model only outlines steps.
 	PlanMode    bool
 	Permissions *permissions.Manager
@@ -74,6 +82,9 @@ func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 		Tools:         reg,
 		History:       hist,
 		MaxToolRounds: 8,
+		MaxIterations: 16,
+		MaxToolCalls:  24,
+		MaxRetries:    4,
 		Permissions:   permissions.New(permissions.Mode(e.PermissionMode), permissions.DefaultStorePath()),
 	}
 }
@@ -109,6 +120,7 @@ func (a *Agent) Reset() {
 		sys = a.History[0].Content
 	}
 	a.History = nil
+	a.RunState = AgentRunState{}
 	if sys != "" {
 		a.History = []llm.Message{{Role: llm.RoleSystem, Content: sys}}
 	}
@@ -168,6 +180,8 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		a.Permissions = permissions.New(permissions.ModeAllow, permissions.DefaultStorePath())
 	}
 	a.CompactHistory()
+	a.RunState.reset(user)
+	verificationRequested := false
 
 	// @path mentions → attach file/dir context
 	payload, attached := expandMentions(user)
@@ -229,6 +243,18 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	if isActionRequest(user) && maxRounds < 12 {
 		maxRounds = 12 // branch + edit + commit may need more steps
 	}
+	maxIterations := a.MaxIterations
+	if maxIterations <= 0 {
+		maxIterations = maxRounds * 2
+	}
+	maxToolCalls := a.MaxToolCalls
+	if maxToolCalls <= 0 {
+		maxToolCalls = maxRounds * 3
+	}
+	maxRetries := a.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
 
 	toolsUsed := 0
 	for round := 0; round < maxRounds; round++ {
@@ -237,16 +263,29 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 			emit(Event{Kind: EventDone})
 			return err
 		}
+		a.RunState.beginIteration()
+		if a.RunState.Iterations > maxIterations {
+			a.RunState.Phase = PhaseBlocked
+			emit(Event{Kind: EventError, Text: "agent iteration limit reached; stopping safely"})
+			emit(Event{Kind: EventDone})
+			return nil
+		}
+		emit(Event{Kind: EventStatus, Text: stateStatus(a.RunState.Phase)})
 
 		// Build request messages; after tools, add a non-persisted brief-answer nudge.
 		msgs := a.History
+		control := llm.Message{Role: llm.RoleUser, Content: a.RunState.controlContext()}
+		msgs = append(append([]llm.Message{}, msgs...), control)
 		if toolsUsed > 0 {
-			msgs = append(append([]llm.Message{}, a.History...), llm.Message{
+			msgs = append(msgs, llm.Message{
 				Role:    llm.RoleUser,
 				Content: afterToolsAnswerHint(user, toolsUsed),
 			})
+			if verificationRequested {
+				msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: verificationPrompt(a.RunState.OriginalGoal)})
+			}
 		} else if isActionRequest(user) && round == 0 {
-			msgs = append(append([]llm.Message{}, a.History...), llm.Message{
+			msgs = append(msgs, llm.Message{
 				Role: llm.RoleUser,
 				Content: `The user wants real on-disk changes. Call tools now:
 1) read_file if needed, 2) str_replace or write_file, 3) git add/commit/push only if they asked.
@@ -279,7 +318,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if round > 0 && a.Cfg.EnableTools && a.Tools != nil && toolsUsed < toolCap && round < toolCap {
 			roundTools = a.Tools.LLMTools()
 		}
-		if toolsUsed >= toolCap || round >= toolCap {
+		if toolsUsed >= toolCap || toolsUsed >= maxToolCalls || a.RunState.Retries >= maxRetries || round >= toolCap {
 			roundTools = nil // force plain-text answer
 			emit(Event{Kind: EventStatus, Text: "final answer (no more tools)"})
 		}
@@ -295,9 +334,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 		}
 
 		emit(Event{Kind: EventStatus, Text: fmt.Sprintf("calling %s (round %d)…", a.Cfg.Model, round+1)})
-		handler := &streamBridge{emit: emit}
+		handler := &streamBridge{emit: emit, quiet: verificationRequested}
 		msg, err := a.Client.ChatStream(ctx, req, handler)
 		if err != nil {
+			a.RunState.Phase = PhaseBlocked
 			if ctx.Err() != nil {
 				emit(Event{Kind: EventError, Text: "cancelled"})
 			} else {
@@ -333,11 +373,23 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 			}
 		}
+		unsupportedToolMarkup := hasUnsupportedToolMarkup(msg.Content)
 
 		// Persist assistant turn (without the ephemeral after-tools system nudge)
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
+			if unsupportedToolMarkup && len(roundTools) > 0 {
+				emit(Event{Kind: EventStatus, Text: "unsupported tool-call format; expected structured tool calls"})
+				if toolsUsed == 0 && round == 0 {
+					a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "[agenterm] Your previous tool request used unsupported markup. Use the provided API tools and emit a structured tool call; do not print <function=...> or </tool_call>."})
+					continue
+				}
+				a.RunState.Phase = PhaseBlocked
+				emit(Event{Kind: EventError, Text: "unsupported tool-call format; stopping safely"})
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			// Shell dump / empty — don't leave the user staring at a blank "ready".
 			trim := strings.TrimSpace(msg.Content)
 			if trim == "" || isShellOnlyAssistantText(trim) {
@@ -364,6 +416,70 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 				emit(Event{Kind: EventToken, Text: "(no answer — model returned empty or a shell command. Try /retry with a clearer request, or /tools on.)"})
 			}
+			if toolsUsed > 0 && !verificationRequested {
+				a.RunState.Phase = PhaseVerify
+				a.RunState.Verification = VerificationPending
+				verificationRequested = true
+				emit(Event{Kind: EventStatus, Text: stateStatus(PhaseVerify)})
+				continue
+			}
+			if toolsUsed > 0 {
+				if verificationRequested && a.RunState.hasMutation() && !a.RunState.hasSuccessfulVerificationEvidence() {
+					a.RunState.Verification = VerificationBlocked
+					a.RunState.Phase = PhaseReplan
+					a.RunState.Retries++
+					if a.RunState.Retries < maxRetries {
+						verificationRequested = false
+						emit(Event{Kind: EventStatus, Text: stateStatus(PhaseReplan)})
+						continue
+					}
+					a.RunState.Phase = PhaseBlocked
+					emit(Event{Kind: EventStatus, Text: stateStatus(PhaseBlocked)})
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				// The verification request is private; reveal only its concise final answer.
+				if verificationRequested && strings.TrimSpace(msg.Content) != "" {
+					emit(Event{Kind: EventToken, Text: msg.Content})
+				}
+				if verificationRequested && verificationTextFailed(msg.Content) {
+					a.RunState.Verification = VerificationBlocked
+					a.RunState.Phase = PhaseReplan
+					a.RunState.Retries++
+					if a.RunState.Retries < maxRetries {
+						verificationRequested = false
+						emit(Event{Kind: EventStatus, Text: stateStatus(PhaseReplan)})
+						continue
+					}
+					a.RunState.Phase = PhaseBlocked
+					emit(Event{Kind: EventStatus, Text: stateStatus(PhaseBlocked)})
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				if a.RunState.canVerify() {
+					a.RunState.Verification = VerificationPassed
+					if a.RunState.canComplete() {
+						a.RunState.Phase = PhaseComplete
+						emit(Event{Kind: EventStatus, Text: stateStatus(PhaseComplete)})
+					} else {
+						a.RunState.Phase = PhaseBlocked
+						emit(Event{Kind: EventError, Text: "acceptance criteria incomplete; completion blocked"})
+					}
+				} else {
+					a.RunState.Verification = VerificationBlocked
+					a.RunState.Phase = PhaseBlocked
+					emit(Event{Kind: EventStatus, Text: stateStatus(PhaseBlocked)})
+				}
+			}
+			emit(Event{Kind: EventDone})
+			return nil
+		}
+		// Tool availability is an execution boundary, not only a prompt hint.
+		// A provider may emit a stale/ignored tool call even when the current
+		// request advertised no tools because a bound was reached.
+		if len(roundTools) == 0 {
+			a.RunState.Phase = PhaseBlocked
+			emit(Event{Kind: EventError, Text: "tool call rejected: bounded autonomy limit reached"})
 			emit(Event{Kind: EventDone})
 			return nil
 		}
@@ -387,6 +503,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 		}
 
 		// Execute tools sequentially (each tool has its own timeout inside the runner).
+		a.RunState.Phase = PhaseAct
+		// New evidence invalidates the previous verification attempt; the next
+		// tool-free response must pass through the gate again.
+		verificationRequested = false
 		for _, tc := range msg.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				emit(Event{Kind: EventError, Text: "cancelled"})
@@ -430,6 +550,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 					}
 				}
 			}
+			a.RunState.CurrentStep = name
+			a.RunState.addObservation(name, args, result)
+			if result.Category != tools.FailureSuccess {
+				a.RunState.Retries++
+				emit(Event{Kind: EventStatus, Text: stateStatus(a.RunState.Phase)})
+			}
 			out := result.Output
 			// Cap what the model sees so it does not re-dump huge listings into chat.
 			outForModel := capToolResult(result.ModelOutput(), 6_000)
@@ -444,16 +570,21 @@ Do not answer with only a markdown plan or shell snippets.`,
 		}
 		// loop: model continues with tool results
 	}
+	a.RunState.Phase = PhaseBlocked
 	emit(Event{Kind: EventError, Text: "max tool rounds reached"})
 	emit(Event{Kind: EventDone})
 	return nil
 }
 
 type streamBridge struct {
-	emit func(Event)
+	emit  func(Event)
+	quiet bool
 }
 
 func (s *streamBridge) OnToken(token string) {
+	if s.quiet {
+		return
+	}
 	s.emit(Event{Kind: EventToken, Text: token})
 }
 

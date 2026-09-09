@@ -1,5 +1,23 @@
 # Bolt agent evaluation
 
+## Standalone Bolt Coding Eval
+
+This Docker-free harness creates isolated temporary Go repositories, invokes
+the existing headless Bolt binary, and independently checks every task:
+
+```bash
+python3 benchmarks/bolt_coding_eval.py --self-test
+python3 benchmarks/bolt_coding_eval.py \
+  --base-url "$AGENTERM_BASE_URL" \
+  --model "/sglang-data/models/gpt-oss-120b" \
+  --api-key "$AGENTERM_API_KEY"
+```
+
+Results are written to `test-results/bolt-coding-eval.json` and
+`test-results/bolt-coding-eval.md`; per-task logs and saved Bolt state are
+under `test-results/bolt-coding-eval/<task-id>/`. Use the same task set and
+only change `--model`/provider settings for future model comparisons.
+
 This directory is the reproducible evaluation entry point. Benchmark source
 checkouts belong outside this repository and are never modified.
 

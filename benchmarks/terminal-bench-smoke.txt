@@ -3,14 +3,9 @@ fix-code-vulnerability
 fix-git
 git-leak-recovery
 large-scale-text-editing
-configure-git-webserver
 sanitize-git-repo
 sqlite-db-truncate
-cancel-async-tasks
 filter-js-from-html
-build-cython-ext
-polyglot-c-py
-polyglot-rust-c
 query-optimize
 log-summary-date-ranges
 write-compressor

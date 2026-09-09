@@ -122,6 +122,7 @@ func (a *Agent) saveSessionPath(path, id string) (string, error) {
 	type wire struct {
 		Meta     SessionMeta   `json:"meta"`
 		Messages []llm.Message `json:"messages"`
+		RunState AgentRunState `json:"run_state,omitempty"`
 	}
 	msgs := make([]llm.Message, 0, len(a.History))
 	for _, m := range a.History {
@@ -140,6 +141,7 @@ func (a *Agent) saveSessionPath(path, id string) (string, error) {
 			Summary:   firstUserSnippet(a.History),
 		},
 		Messages: msgs,
+		RunState: a.RunState,
 	}
 	// preserve created_at if file exists
 	if data, err := os.ReadFile(path); err == nil {
@@ -180,6 +182,7 @@ func (a *Agent) LoadSession(id string) error {
 	}
 	var w struct {
 		Messages []llm.Message `json:"messages"`
+		RunState AgentRunState `json:"run_state"`
 	}
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
@@ -188,6 +191,7 @@ func (a *Agent) LoadSession(id string) error {
 		return fmt.Errorf("empty session")
 	}
 	a.History = w.Messages
+	a.RunState = restoredRunState(w.RunState, w.Messages)
 	return nil
 }
 
@@ -199,6 +203,7 @@ func (a *Agent) LoadSessionPath(path string) error {
 	}
 	var w struct {
 		Messages []llm.Message `json:"messages"`
+		RunState AgentRunState `json:"run_state"`
 	}
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
@@ -207,7 +212,25 @@ func (a *Agent) LoadSessionPath(path string) error {
 		return fmt.Errorf("empty session")
 	}
 	a.History = w.Messages
+	a.RunState = restoredRunState(w.RunState, w.Messages)
 	return nil
+}
+
+func restoredRunState(state AgentRunState, messages []llm.Message) AgentRunState {
+	if strings.TrimSpace(state.OriginalGoal) != "" {
+		return state
+	}
+	// Older sessions had no control state. Recover the goal from the latest
+	// user message without pretending that verification or progress occurred.
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == llm.RoleUser {
+			state.OriginalGoal = strings.TrimSpace(messages[i].Content)
+			state.Phase = PhasePlan
+			state.Verification = VerificationNotRun
+			return state
+		}
+	}
+	return state
 }
 
 // ListSessions returns recent session basenames.

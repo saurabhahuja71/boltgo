@@ -38,6 +38,21 @@ func TestClassifyExecutionFailures(t *testing.T) {
 	}
 }
 
+func TestRunTestsPreservesCommandFailure(t *testing.T) {
+	runner := runTests{DefaultCmd: "printf 'broken test\\n'; exit 1", Workspace: t.TempDir()}
+	out, err := runner.Run(context.Background(), `{}`)
+	if err == nil {
+		t.Fatalf("run_tests returned success for failing command: %s", out)
+	}
+	result := resultFromOutput(out, err)
+	if result.Category != FailureCommand {
+		t.Fatalf("result=%+v, want command_failed", result)
+	}
+	if !strings.Contains(result.Output, "broken test") {
+		t.Fatalf("result lost command output: %+v", result)
+	}
+}
+
 func TestExecuteCandidatesBoundsAndDeduplicates(t *testing.T) {
 	calls := 0
 	got := ExecuteCandidates(context.Background(), []ExecutionCandidate{

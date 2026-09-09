@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Harbor 0.22 invokes `docker compose` with Docker Compose's global option
+# ordering. This repository's `docker` command is a Podman shim whose
+# podman-compose provider expects the subcommand first and has no --wait.
+# Translate only the compose invocation used by the benchmark; delegate every
+# other Docker command to the system shim.
+if [[ "${1:-}" != "compose" ]]; then
+  exec /usr/bin/docker "$@"
+fi
+shift
+
+project_dir=""
+args=()
+compose_files=()
+while (($#)); do
+  case "$1" in
+    --project-name)
+      args+=(-p "$2")
+      shift 2
+      ;;
+    --project-directory)
+      project_dir="$2"
+      shift 2
+      ;;
+    -f)
+      source_file="$2"
+      qualified_file="$(mktemp --suffix=.harbor-compose.yaml)"
+      # Docker resolves org/image through Docker Hub by default. Podman keeps
+      # short-name resolution interactive, which cannot work in Harbor's
+      # headless run; qualify only the observed org/image form.
+      sed -E '/^[[:space:]]*image:[[:space:]]/ s#(image:[[:space:]]+)([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)#\1docker.io/\2#' \
+        "$source_file" > "$qualified_file"
+      compose_files+=("$qualified_file")
+      args+=(-f "$qualified_file")
+      shift 2
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+cleanup() {
+  for file in "${compose_files[@]}"; do
+    rm -f "$file"
+  done
+}
+trap cleanup EXIT
+
+if [[ -n "$project_dir" ]]; then
+  cd "$project_dir"
+fi
+
+for variable in PREBUILT_IMAGE_NAME EGRESS_CONTROL_SIDECAR_IMAGE_NAME; do
+  value="${!variable:-}"
+  if [[ "$value" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+ ]]; then
+    printf -v "$variable" 'docker.io/%s' "$value"
+    export "$variable"
+  fi
+done
+
+filtered=()
+for arg in "${args[@]}"; do
+  [[ "$arg" == "--wait" ]] && continue
+  filtered+=("$arg")
+done
+exec podman-compose "${filtered[@]}"
