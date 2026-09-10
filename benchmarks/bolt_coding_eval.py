@@ -158,15 +158,75 @@ def external_check(task: Task, workspace: Path) -> tuple[bool, str, float]:
     return ok, "external go test + task assertions", elapsed
 
 
+_RUN_STATE_FIELDS = {
+    "original_goal": "OriginalGoal",
+    "acceptance_criteria": "AcceptanceCriteria",
+    "completed_criteria": "CompletedCriteria",
+    "acceptance_criteria_state": "AcceptanceCriteriaState",
+    "plan": "Plan",
+    "current_step": "CurrentStep",
+    "phase": "Phase",
+    "tool_calls": "ToolCalls",
+    "observations": "Observations",
+    "failures": "Failures",
+    "verification_criteria": "VerificationCriteria",
+    "verification": "Verification",
+    "iterations": "Iterations",
+    "retries": "Retries",
+    "tool_calls_used": "ToolCallsUsed",
+}
+
+
+def _state_value(raw: dict, lower_name: str):
+    """Read a state field from either the current Go or legacy JSON spelling."""
+    if lower_name in raw:
+        return raw[lower_name]
+    return raw.get(_RUN_STATE_FIELDS[lower_name])
+
+
+def _normalize_state_items(items):
+    if not isinstance(items, list):
+        return items
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+        entry = dict(item)
+        for lower_name, go_name in {
+            "tool": "Tool",
+            "summary": "Summary",
+            "success": "Success",
+            "satisfied": "Satisfied",
+            "status": "Status",
+        }.items():
+            if lower_name not in entry and go_name in entry:
+                entry[lower_name] = entry[go_name]
+        normalized.append(entry)
+    return normalized
+
+
 def read_run_state(workspace: Path) -> dict:
+    """Return normalized state and explicitly mark unavailable state."""
     paths = list((workspace / ".bolt" / "sessions").glob("*.json"))
     if not paths:
-        return {}
+        return {"_state_available": False}
     try:
         data = json.loads(paths[0].read_text())
-        return data.get("run_state", {})
+        raw = data.get("run_state")
+        if not isinstance(raw, dict):
+            return {"_state_available": False}
+        state = {"_state_available": True}
+        for lower_name in _RUN_STATE_FIELDS:
+            value = _state_value(raw, lower_name)
+            if value is not None:
+                state[lower_name] = value
+        for field in ("acceptance_criteria_state", "observations", "verification_criteria"):
+            if field in state:
+                state[field] = _normalize_state_items(state[field])
+        return state
     except (OSError, json.JSONDecodeError):
-        return {}
+        return {"_state_available": False}
 
 
 def classify(state: dict, external_ok: bool, bolt_rc: int, provider_error: bool) -> str:
@@ -176,7 +236,7 @@ def classify(state: dict, external_ok: bool, bolt_rc: int, provider_error: bool)
         return "PASS"
     if state.get("phase") == "complete" and not external_ok:
         return "FAIL-BOLT"
-    if bolt_rc != 0 and not state:
+    if bolt_rc != 0 and not state.get("_state_available", False):
         return "FAIL-TOOL"
     return "FAIL-MODEL"
 
@@ -214,6 +274,7 @@ def evaluate(task: Task, args: argparse.Namespace, root: Path) -> dict:
             "task_id": task.id, "category": task.category, "model": args.model, "provider": args.provider,
             "success": ok and state.get("phase") == "complete", "classification": classify(state, ok, bolt_rc, provider_error),
             "elapsed_seconds": round(time.monotonic() - started, 3), "bolt_exit_code": bolt_rc,
+            "run_state_available": state.get("_state_available", False),
             "agent_iterations": state.get("iterations", 0), "tool_calls": state.get("tool_calls_used", 0),
             "retries": state.get("retries", 0), "replans": sum(1 for x in state.get("observations", []) if not x.get("success", True)),
             "verification_attempts": len(state.get("verification_criteria", [])),

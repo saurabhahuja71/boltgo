@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/saurabhahuja71/agenterm/internal/tools"
@@ -153,5 +154,116 @@ func TestAcceptanceCriteriaDetectImplementationAndRegressionTestRequests(t *test
 	criteria = acceptanceCriteriaForGoal("Change the greeting and update all affected tests")
 	if len(criteria) != 2 || criteria[0].Key != "implementation" || criteria[1].Key != "tests_added" {
 		t.Fatalf("criteria=%+v", criteria)
+	}
+}
+
+func TestAcceptanceCriteriaDetectsTask11Verification(t *testing.T) {
+	criteria := acceptanceCriteriaForGoal("First inspect the failing behavior in Average, then fix it so Average(-4, -6) returns -5. Run the relevant test and then go test ./...")
+	keys := criterionKeys(criteria)
+	if !keys["implementation"] || !keys["verification"] || keys["tests_added"] {
+		t.Fatalf("task 11 criteria=%+v", criteria)
+	}
+}
+
+func TestAcceptanceCriteriaDetectsVerificationVariants(t *testing.T) {
+	goals := []string{
+		"run the relevant test",
+		"run relevant test",
+		"run relevant tests",
+		"run the tests",
+		"run tests",
+		"execute the relevant test",
+		"execute relevant test",
+		"run go test ./...",
+		"then go test ./...",
+		"and then go test ./...",
+	}
+	for _, goal := range goals {
+		t.Run(goal, func(t *testing.T) {
+			if !criterionKeys(acceptanceCriteriaForGoal(goal))["verification"] {
+				t.Fatalf("verification criterion missing for %q", goal)
+			}
+		})
+	}
+}
+
+func TestAcceptanceCriteriaSeparatesTestCreationExecutionAndImplementation(t *testing.T) {
+	tests := []struct {
+		goal string
+		want map[string]bool
+	}{
+		{goal: "add a regression test", want: map[string]bool{"tests_added": true}},
+		{goal: "run the relevant test", want: map[string]bool{"verification": true}},
+		{goal: "implement the fix", want: map[string]bool{"implementation": true}},
+		{goal: "implement the fix, run the relevant test and then go test ./...", want: map[string]bool{"implementation": true, "verification": true}},
+		{goal: "update tests and run go test ./...", want: map[string]bool{"implementation": true, "tests_added": true, "verification": true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goal, func(t *testing.T) {
+			got := criterionKeys(acceptanceCriteriaForGoal(tt.goal))
+			for key, want := range tt.want {
+				if got[key] != want {
+					t.Fatalf("criteria=%+v, %s=%t want %t", got, key, got[key], want)
+				}
+			}
+			for _, key := range []string{"implementation", "tests_added", "verification"} {
+				if got[key] && !tt.want[key] {
+					t.Fatalf("criteria=%+v, unexpected %s criterion", got, key)
+				}
+			}
+		})
+	}
+}
+
+func criterionKeys(criteria []AcceptanceCriterion) map[string]bool {
+	keys := make(map[string]bool, len(criteria))
+	for _, criterion := range criteria {
+		keys[criterion.Key] = true
+	}
+	return keys
+}
+
+func TestTestMutationUsesUntruncatedTargetPath(t *testing.T) {
+	state := verificationState()
+	longContent := strings.Repeat("x", 300)
+	state.addObservation("write_file", `{"content":"`+longContent+`","path":"calc/pair_test.go"}`, tools.ExecutionResult{Output: "written", Category: tools.FailureSuccess})
+	if !state.AcceptanceCriteriaState[1].Satisfied {
+		t.Fatalf("long test-file path was not recognized: %+v", state.ToolCalls[0])
+	}
+}
+
+func TestTestMutationRecognizesShortTestFilePath(t *testing.T) {
+	state := verificationState()
+	state.addObservation("write_file", `{"path":"foo_test.go","content":"package foo"}`, tools.ExecutionResult{Output: "written", Category: tools.FailureSuccess})
+	if !state.AcceptanceCriteriaState[1].Satisfied {
+		t.Fatalf("short test-file path was not recognized: %+v", state.ToolCalls[0])
+	}
+}
+
+func TestTestMutationRecognizesLongStrReplaceTargetPath(t *testing.T) {
+	state := verificationState()
+	longReplacement := strings.Repeat("y", 300)
+	state.addObservation("str_replace", `{"new_string":"`+longReplacement+`","old_string":"old","path":"calc/calc_test.go"}`, tools.ExecutionResult{Output: "updated", Category: tools.FailureSuccess})
+	if !state.AcceptanceCriteriaState[1].Satisfied {
+		t.Fatalf("long str_replace test-file path was not recognized: %+v", state.ToolCalls[0])
+	}
+}
+
+func TestTestMutationRequiresTargetPath(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+	}{
+		{name: "non-test source", args: `{"content":"mentions _test.go","path":"calc/calc.go"}`},
+		{name: "test substring in content", args: `{"content":"test_helper and test.go","path":"calc/calc.go"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := verificationState()
+			state.addObservation("write_file", tt.args, tools.ExecutionResult{Output: "written", Category: tools.FailureSuccess})
+			if state.AcceptanceCriteriaState[1].Satisfied {
+				t.Fatalf("non-test target produced false positive: %+v", state.ToolCalls[0])
+			}
+		})
 	}
 }

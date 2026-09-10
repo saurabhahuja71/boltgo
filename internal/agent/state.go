@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -67,9 +68,10 @@ type VerificationCriterion struct {
 }
 
 type ToolCallRecord struct {
-	Name      string
-	Arguments string
-	Outcome   tools.FailureCategory
+	Name       string
+	Arguments  string
+	TargetPath string
+	Outcome    tools.FailureCategory
 }
 
 type Observation struct {
@@ -109,7 +111,11 @@ func (s *AgentRunState) beginIteration() {
 func (s *AgentRunState) addObservation(tool, args string, result tools.ExecutionResult) {
 	s.Phase = PhaseObserve
 	s.ToolCallsUsed++
-	s.ToolCalls = append(s.ToolCalls, ToolCallRecord{Name: tool, Arguments: compactStateText(args, 240), Outcome: result.Category})
+	record := ToolCallRecord{Name: tool, Arguments: compactStateText(args, 240), Outcome: result.Category}
+	if tool == "write_file" || tool == "str_replace" {
+		record.TargetPath = mutationTargetPath(args)
+	}
+	s.ToolCalls = append(s.ToolCalls, record)
 	s.Observations = append(s.Observations, Observation{Tool: tool, Summary: compactStateText(result.Output, 280), Success: result.Category == tools.FailureSuccess})
 	if result.Category != tools.FailureSuccess {
 		s.Failures = append(s.Failures, FailureRecord{Tool: tool, Category: result.Category, Retryable: result.Retryable, Summary: compactStateText(result.Output, 240)})
@@ -260,12 +266,25 @@ func (s *AgentRunState) hasTestMutation() bool {
 		if call.Name != "write_file" && call.Name != "str_replace" {
 			continue
 		}
-		low := strings.ToLower(call.Arguments)
-		if strings.Contains(low, "_test.go") || strings.Contains(low, "test_") || strings.Contains(low, "test.") {
+		if isTestPath(call.TargetPath) {
 			return true
 		}
 	}
 	return false
+}
+
+func mutationTargetPath(args string) string {
+	var in struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(args), &in); err != nil {
+		return ""
+	}
+	return in.Path
+}
+
+func isTestPath(path string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(path)), "_test.go")
 }
 
 func acceptanceCriteriaForGoal(goal string) []AcceptanceCriterion {
@@ -277,10 +296,27 @@ func acceptanceCriteriaForGoal(goal string) []AcceptanceCriterion {
 	if (strings.Contains(low, "add") && strings.Contains(low, "test")) || strings.Contains(low, "regression test") || (strings.Contains(low, "update") && strings.Contains(low, "test")) || strings.Contains(low, "tests are") {
 		criteria = append(criteria, AcceptanceCriterion{Key: "tests_added", Description: "requested tests added/updated"})
 	}
-	if strings.Contains(low, "run test") || strings.Contains(low, "run go test") || strings.Contains(low, "verify") || strings.Contains(low, "build") || strings.Contains(low, "vet") {
+	if goalRequestsVerification(low) {
 		criteria = append(criteria, AcceptanceCriterion{Key: "verification", Description: "requested verification passed"})
 	}
 	return criteria
+}
+
+func goalRequestsVerification(low string) bool {
+	low = strings.Join(strings.Fields(low), " ")
+	return strings.Contains(low, "run test") ||
+		strings.Contains(low, "run go test") ||
+		strings.Contains(low, "verify") ||
+		strings.Contains(low, "build") ||
+		strings.Contains(low, "vet") ||
+		strings.Contains(low, "run the relevant test") ||
+		strings.Contains(low, "run relevant test") ||
+		strings.Contains(low, "run relevant tests") ||
+		strings.Contains(low, "run the tests") ||
+		strings.Contains(low, "run tests") ||
+		strings.Contains(low, "execute the relevant test") ||
+		strings.Contains(low, "execute relevant test") ||
+		strings.Contains(low, "go test")
 }
 
 func goalRequestsImplementation(low string) bool {
