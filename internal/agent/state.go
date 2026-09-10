@@ -34,21 +34,25 @@ const (
 // AgentRunState is the compact, inspectable control state for one user turn.
 // It intentionally stores observations and decisions, not chain-of-thought.
 type AgentRunState struct {
-	OriginalGoal            string
-	AcceptanceCriteria      string
-	CompletedCriteria       string
-	AcceptanceCriteriaState []AcceptanceCriterion
-	Plan                    string
-	CurrentStep             string
-	Phase                   AgentPhase
-	ToolCalls               []ToolCallRecord
-	Observations            []Observation
-	Failures                []FailureRecord
-	VerificationCriteria    []VerificationCriterion
-	Verification            VerificationStatus
-	Iterations              int
-	Retries                 int
-	ToolCallsUsed           int
+	OriginalGoal                    string
+	AcceptanceCriteria              string
+	CompletedCriteria               string
+	AcceptanceCriteriaState         []AcceptanceCriterion
+	Plan                            string
+	CurrentStep                     string
+	Phase                           AgentPhase
+	ToolCalls                       []ToolCallRecord
+	Observations                    []Observation
+	Failures                        []FailureRecord
+	VerificationCriteria            []VerificationCriterion
+	ExplicitRequirements            []GoalRequirement
+	Verification                    VerificationStatus
+	Iterations                      int
+	Retries                         int
+	ToolCallsUsed                   int
+	PostflightVerificationCalls     int
+	PostflightVerificationBudget    int
+	PostflightVerificationActivated bool
 }
 
 type AcceptanceCriterion struct {
@@ -72,12 +76,14 @@ type ToolCallRecord struct {
 	Arguments  string
 	TargetPath string
 	Outcome    tools.FailureCategory
+	Source     string
 }
 
 type Observation struct {
 	Tool    string
 	Summary string
 	Success bool
+	Source  string
 }
 
 type FailureRecord struct {
@@ -97,6 +103,7 @@ func (s *AgentRunState) reset(goal string) {
 		Verification:       VerificationNotRun,
 	}
 	s.AcceptanceCriteriaState = acceptanceCriteriaForGoal(goal)
+	s.ExplicitRequirements = ExtractExplicitRequirements(goal)
 }
 
 func (s *AgentRunState) beginIteration() {
@@ -124,6 +131,33 @@ func (s *AgentRunState) addObservation(tool, args string, result tools.Execution
 	}
 	s.recordVerification(tool, args, result)
 	s.refreshAcceptanceCriteria()
+	s.CompletedCriteria = s.completedCriteria()
+}
+
+// addPostflightObservation records deterministic verification without charging
+// the model-action counter. It shares the same authoritative ledger and gates
+// as ordinary tool observations, but retains provenance for audit/reporting.
+func (s *AgentRunState) addPostflightObservation(tool, args string, result tools.ExecutionResult) {
+	s.Phase = PhaseObserve
+	record := ToolCallRecord{Name: tool, Arguments: compactStateText(args, 240), Outcome: result.Category, Source: "postflight_verifier"}
+	s.ToolCalls = append(s.ToolCalls, record)
+	s.Observations = append(s.Observations, Observation{Tool: tool, Summary: compactStateText(result.Output, 280), Success: result.Category == tools.FailureSuccess, Source: "postflight_verifier"})
+	if result.Category != tools.FailureSuccess {
+		s.Plan = fmt.Sprintf("postflight verification %s did not pass; completion remains blocked", result.Category)
+		s.Phase = PhaseReplan
+	}
+	s.recordVerification(tool, args, result)
+	s.refreshAcceptanceCriteria()
+	s.CompletedCriteria = s.completedCriteria()
+}
+
+// addNonExecutionObservation records a rejected or deduplicated model action
+// without pretending that a tool ran or creating an underlying tool failure.
+// It still consumes the same finite action budget through ToolCallsUsed.
+func (s *AgentRunState) addNonExecutionObservation(tool, summary string) {
+	s.Phase = PhaseReplan
+	s.ToolCallsUsed++
+	s.Observations = append(s.Observations, Observation{Tool: tool, Summary: compactStateText(summary, 280), Success: false})
 	s.CompletedCriteria = s.completedCriteria()
 }
 
@@ -253,6 +287,10 @@ func (s *AgentRunState) refreshAcceptanceCriteria() {
 			criterion.Satisfied = s.hasTestMutation()
 		case "verification":
 			criterion.Satisfied = s.hasSuccessfulVerificationEvidence()
+		case "verification:relevant_test":
+			criterion.Satisfied = s.hasSuccessfulRelevantTestEvidence()
+		case "verification:go_test":
+			criterion.Satisfied = s.hasSuccessfulFullGoTestEvidence()
 		}
 	}
 }
@@ -296,10 +334,32 @@ func acceptanceCriteriaForGoal(goal string) []AcceptanceCriterion {
 	if (strings.Contains(low, "add") && strings.Contains(low, "test")) || strings.Contains(low, "regression test") || (strings.Contains(low, "update") && strings.Contains(low, "test")) || strings.Contains(low, "tests are") {
 		criteria = append(criteria, AcceptanceCriterion{Key: "tests_added", Description: "requested tests added/updated"})
 	}
-	if goalRequestsVerification(low) {
+	relevantTest := goalRequestsRelevantTest(low)
+	fullGoTest := strings.Contains(strings.Join(strings.Fields(low), " "), "go test ./...")
+	if relevantTest && fullGoTest {
+		criteria = append(criteria,
+			AcceptanceCriterion{Key: "verification:relevant_test", Description: "relevant test passed"},
+			AcceptanceCriterion{Key: "verification:go_test", Description: "go test ./... passed"},
+		)
+	} else if fullGoTest {
+		criteria = append(criteria, AcceptanceCriterion{Key: "verification:go_test", Description: "go test ./... passed"})
+	} else if relevantTest {
+		criteria = append(criteria, AcceptanceCriterion{Key: "verification:relevant_test", Description: "relevant test passed"})
+	} else if goalRequestsVerification(low) {
 		criteria = append(criteria, AcceptanceCriterion{Key: "verification", Description: "requested verification passed"})
 	}
 	return criteria
+}
+
+func goalRequestsRelevantTest(low string) bool {
+	low = strings.Join(strings.Fields(low), " ")
+	return strings.Contains(low, "run the relevant test") ||
+		strings.Contains(low, "run relevant test") ||
+		strings.Contains(low, "run relevant tests") ||
+		strings.Contains(low, "run the tests") ||
+		strings.Contains(low, "run tests") ||
+		strings.Contains(low, "execute the relevant test") ||
+		strings.Contains(low, "execute relevant test")
 }
 
 func goalRequestsVerification(low string) bool {
@@ -337,6 +397,56 @@ func verificationCriterionKey(tool, args string) (string, bool) {
 		return tool + ":" + compactStateText(args, 360), true
 	}
 	return "", false
+}
+
+func (s *AgentRunState) hasSuccessfulRelevantTestEvidence() bool {
+	for _, criterion := range s.VerificationCriteria {
+		if criterion.Status == VerificationPassed && verificationCriterionIsRelevantTest(criterion) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *AgentRunState) hasSuccessfulFullGoTestEvidence() bool {
+	for _, criterion := range s.VerificationCriteria {
+		if criterion.Status == VerificationPassed && verificationCriterionIsFullGoTest(criterion) {
+			return true
+		}
+	}
+	return false
+}
+
+func verificationCriterionIsFullGoTest(criterion VerificationCriterion) bool {
+	command := verificationCommand(criterion.LastTool, criterion.Key)
+	if strings.Contains(command, "go test ./...") {
+		return true
+	}
+	// An empty run_tests command uses the configured auto command, which is
+	// go test ./... for Go workspaces.
+	return criterion.LastTool == "run_tests" &&
+		(command == "")
+}
+
+func verificationCriterionIsRelevantTest(criterion VerificationCriterion) bool {
+	if criterion.LastTool != "run_tests" && criterion.LastTool != "run_shell" {
+		return false
+	}
+	command := verificationCommand(criterion.LastTool, criterion.Key)
+	return command != "" && strings.Contains(command, "go test") && !strings.Contains(command, "go test ./...")
+}
+
+func verificationCommand(tool, key string) string {
+	if i := strings.IndexByte(key, ':'); i >= 0 {
+		key = key[i+1:]
+	}
+	var in struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal([]byte(key), &in) != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(in.Command))), " ")
 }
 
 func verificationCriterionDescription(tool, args string) string {

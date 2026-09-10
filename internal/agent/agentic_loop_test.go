@@ -52,6 +52,11 @@ func toolSSE(name, args string) string {
 	return fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"tool_calls\":[%s]}}]}\n\ndata: [DONE]\n\n", b)
 }
 
+func toolSSEMultiple(calls ...llm.ToolCall) string {
+	b, _ := json.Marshal(calls)
+	return fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"tool_calls\":%s}}]}\n\ndata: [DONE]\n\n", b)
+}
+
 func textSSE(text string) string {
 	b, _ := json.Marshal(text)
 	return fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":%s}}]}\n\ndata: [DONE]\n\n", b)
@@ -118,6 +123,71 @@ func TestAgentSimpleTaskPreservesGoalAndVerifies(t *testing.T) {
 	if !strings.Contains((*requests)[0].Messages[len((*requests)[0].Messages)-1].Content, "acceptance_criteria") ||
 		!strings.Contains((*requests)[0].Messages[len((*requests)[0].Messages)-1].Content, "inspect README.md and report") {
 		t.Fatalf("control state omitted goal/acceptance criteria: %+v", (*requests)[0].Messages[len((*requests)[0].Messages)-1])
+	}
+}
+
+func TestAgentStructuredToolProtocolChainsResultIntoNextCall(t *testing.T) {
+	reader := &scriptedTool{name: "read_file"}
+	search := &scriptedTool{name: "grep"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	reg.Register(search)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		switch n {
+		case 1:
+			return toolSSE("read_file", `{"path":"README.md"}`)
+		case 2:
+			return toolSSE("grep", `{"pattern":"calc","path":"README.md"}`)
+		default:
+			return textSSE("final response based on the tool results")
+		}
+	}, reg)
+	defer closeServer()
+
+	if err := ag.RunUserMessage(context.Background(), "inspect README.md and report", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.calls) != 1 || len(search.calls) != 1 || len(*requests) < 3 {
+		t.Fatalf("structured chain did not execute: read=%d grep=%d requests=%d", len(reader.calls), len(search.calls), len(*requests))
+	}
+	second := (*requests)[1]
+	seenReadResult := false
+	for _, msg := range second.Messages {
+		if msg.Role == llm.RoleTool && msg.ToolCallID == "call-1" && strings.Contains(msg.Content, "ok") && msg.Name == "read_file" {
+			seenReadResult = true
+		}
+	}
+	if !seenReadResult {
+		t.Fatalf("second request lost read tool-result association: %+v", second.Messages)
+	}
+	if ag.RunState.Verification != VerificationPassed {
+		t.Fatalf("final response did not pass verification: %+v", ag.RunState)
+	}
+}
+
+func TestAgentPreservesConfiguredOutputLimitAfterTools(t *testing.T) {
+	reader := &scriptedTool{name: "read_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return toolSSE("read_file", `{"path":"README.md"}`)
+		}
+		return textSSE("verified")
+	}, reg)
+	defer closeServer()
+	ag.Cfg.MaxTokens = 2048
+
+	if err := ag.RunUserMessage(context.Background(), "inspect README.md and report", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) < 2 {
+		t.Fatalf("requests=%d, want tool follow-up", len(*requests))
+	}
+	for i, req := range *requests {
+		if req.MaxTokens != 2048 {
+			t.Fatalf("request %d max_tokens=%d, want configured 2048", i, req.MaxTokens)
+		}
 	}
 }
 

@@ -22,21 +22,23 @@ import (
 var (
 	// Release builds override this with -X main.version. Keep local/source
 	// builds aligned with the current published Bolt baseline as well.
-	version        = "1.1.28"
-	upgradeTimeout = 10 * time.Minute
-	flagProvider   string
-	flagModel      string
-	flagBaseURL    string
-	flagAPIKey     string
-	flagConfig     string
-	flagNoMCP      bool
-	flagNoTools    bool
-	flagShell      bool
-	flagNoShell    bool
-	flagPing       bool
-	flagResume     bool
-	flagNoResume   bool
-	flagWorkspace  string
+	version           = "1.1.28"
+	upgradeTimeout    = 10 * time.Minute
+	flagProvider      string
+	flagModel         string
+	flagBaseURL       string
+	flagAPIKey        string
+	flagConfig        string
+	flagNoMCP         bool
+	flagNoTools       bool
+	flagShell         bool
+	flagNoShell       bool
+	flagPing          bool
+	flagResume        bool
+	flagNoResume      bool
+	flagWorkspace     string
+	flagGoalGraph     bool
+	flagCompatibility bool
 )
 
 func main() {
@@ -115,6 +117,8 @@ func main() {
 			return runHeadless(args[0])
 		},
 	}
+	execCmd.Flags().BoolVar(&flagGoalGraph, "goal-graph", false, "enable opt-in Goal Graph planning and scheduling")
+	execCmd.Flags().BoolVar(&flagCompatibility, "compatibility", false, "enable legacy-compatible execution with deterministic verification guidance")
 	root.AddCommand(execCmd)
 
 	if err := root.Execute(); err != nil {
@@ -193,6 +197,9 @@ func resumeRequested() bool {
 }
 
 func runHeadless(prompt string) error {
+	if flagGoalGraph && flagCompatibility {
+		return fmt.Errorf("--goal-graph and --compatibility are mutually exclusive")
+	}
 	if flagConfig != "" {
 		_ = os.Setenv("AGENTERM_CONFIG", flagConfig)
 	}
@@ -256,6 +263,26 @@ func runHeadless(prompt string) error {
 	}
 
 	ag := agent.New(eff, client, reg)
+	if flagCompatibility {
+		ag.EnableCompatibilityMode()
+		fmt.Fprintln(os.Stderr, "compatibility mode: enabled; legacy execution loop with deterministic verification guidance")
+	}
+	if flagGoalGraph {
+		proposer := agent.ConfiguredGoalGraphProposer{
+			Client: client, Model: eff.Model, Temperature: eff.Temperature, MaxTokens: eff.MaxTokens,
+		}
+		graph, activation, err := agent.ConstructGoalGraphWithFallback(context.Background(), prompt, proposer)
+		if err != nil {
+			return fmt.Errorf("goal graph activation failed: %w", err)
+		}
+		if err := ag.EnableGoalGraph(graph); err != nil {
+			return fmt.Errorf("enable goal graph: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "goal graph: enabled; source=%s; nodes=%d; required=%d; requirements=%s\n", activation.Source, len(graph.Nodes), len(graph.RequiredNodeIDs), strings.Join(activation.RequirementIDs, ","))
+		if activation.ProposalRejection != "" {
+			fmt.Fprintf(os.Stderr, "goal graph: rejected model proposal: %s\n", activation.ProposalRejection)
+		}
+	}
 	saveSession := true
 	sessionPath, err := agent.WorkspaceSessionPath(eff.Workspace, "latest")
 	if err != nil {

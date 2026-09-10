@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,6 +123,26 @@ func TestChatStreamAccumulatesSplitToolArgumentsBeforeReturning(t *testing.T) {
 	}
 }
 
+func TestChatStreamPreservesFinishReasonAndUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"id":"probe-1","index":0,"type":"function","function":{"name":"read_file","arguments":"{\"path\":\"README.md\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"choices":[],"usage":{"prompt_tokens":41,"completion_tokens":9,"total_tokens":50}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	message, err := (&Client{BaseURL: server.URL, HTTPClient: server.Client()}).ChatStream(context.Background(), ChatRequest{Model: "fixture"}, testStreamHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.FinishReason != "tool_calls" || message.Usage == nil || message.Usage.PromptTokens != 41 {
+		t.Fatalf("protocol metadata lost: finish=%q usage=%#v", message.FinishReason, message.Usage)
+	}
+	if len(message.ToolCalls) != 1 || message.ToolCalls[0].ID != "probe-1" || message.ToolCalls[0].Function.Arguments != `{"path":"README.md"}` {
+		t.Fatalf("structured call lost: %+v", message.ToolCalls)
+	}
+}
+
 type testStreamHandler struct{}
 
 func (testStreamHandler) OnToken(string)                {}
@@ -226,5 +247,46 @@ func TestChatPreservesNonStreamingMultipleToolCalls(t *testing.T) {
 	}
 	if len(message.ToolCalls) != 2 || message.ToolCalls[0].Function.Arguments != `{"path":"main.py"}` || message.ToolCalls[1].Function.Arguments != `{"path":"database.py"}` {
 		t.Fatalf("non-streaming calls were not preserved: %+v", message.ToolCalls)
+	}
+}
+
+func TestChatStreamDoesNotPersistMalformedToolCallType(t *testing.T) {
+	var requests [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if len(requests) == 1 {
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"A\",\"index\":0,\"type\":\"\\u0003ncli\\u0003\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]}}]}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client()}
+	first, err := client.ChatStream(context.Background(), ChatRequest{Model: "test"}, testStreamHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].Type != "function" {
+		t.Fatalf("malformed tool-call type survived response assembly: %+v", first.ToolCalls)
+	}
+	_, err = client.ChatStream(context.Background(), ChatRequest{Model: "test", Messages: []Message{first}}, testStreamHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(requests))
+	}
+	var sent ChatRequest
+	if err := json.Unmarshal(requests[1], &sent); err != nil {
+		t.Fatal(err)
+	}
+	if got := sent.Messages[0].ToolCalls[0].Type; got != "function" {
+		t.Fatalf("outgoing tool-call type=%q, want function", got)
 	}
 }

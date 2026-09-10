@@ -148,7 +148,7 @@ func TestUnrelatedSuccessDoesNotSatisfyMissingAcceptanceCriterion(t *testing.T) 
 
 func TestAcceptanceCriteriaDetectImplementationAndRegressionTestRequests(t *testing.T) {
 	criteria := acceptanceCriteriaForGoal("Fix IsEven and add a regression test, then run go test ./...")
-	if len(criteria) != 3 || criteria[0].Key != "implementation" || criteria[1].Key != "tests_added" || criteria[2].Key != "verification" {
+	if len(criteria) != 3 || criteria[0].Key != "implementation" || criteria[1].Key != "tests_added" || criteria[2].Key != "verification:go_test" {
 		t.Fatalf("criteria=%+v", criteria)
 	}
 	criteria = acceptanceCriteriaForGoal("Change the greeting and update all affected tests")
@@ -160,8 +160,70 @@ func TestAcceptanceCriteriaDetectImplementationAndRegressionTestRequests(t *test
 func TestAcceptanceCriteriaDetectsTask11Verification(t *testing.T) {
 	criteria := acceptanceCriteriaForGoal("First inspect the failing behavior in Average, then fix it so Average(-4, -6) returns -5. Run the relevant test and then go test ./...")
 	keys := criterionKeys(criteria)
-	if !keys["implementation"] || !keys["verification"] || keys["tests_added"] {
+	if !keys["implementation"] || !keys["verification:relevant_test"] || !keys["verification:go_test"] || keys["tests_added"] {
 		t.Fatalf("task 11 criteria=%+v", criteria)
+	}
+}
+
+func TestAcceptanceCriteriaCreatesIndependentTask11VerificationRequirements(t *testing.T) {
+	criteria := acceptanceCriteriaForGoal("run the relevant test and then go test ./...")
+	if len(criteria) != 2 || criteria[0].Key != "verification:relevant_test" || criteria[1].Key != "verification:go_test" {
+		t.Fatalf("criteria=%+v", criteria)
+	}
+}
+
+func TestAcceptanceCriteriaCreatesSingleVerificationRequirement(t *testing.T) {
+	tests := []struct {
+		goal string
+		key  string
+	}{
+		{goal: "run go test ./...", key: "verification:go_test"},
+		{goal: "run the relevant test", key: "verification:relevant_test"},
+	}
+	for _, tt := range tests {
+		goal, key := tt.goal, tt.key
+		criteria := acceptanceCriteriaForGoal(goal)
+		if len(criteria) != 1 || criteria[0].Key != key {
+			t.Fatalf("goal=%q criteria=%+v", goal, criteria)
+		}
+	}
+}
+
+func TestIndependentVerificationRequirementsBlockUntilBothPass(t *testing.T) {
+	state := AgentRunState{}
+	state.reset("implement the fix, run the relevant test and then go test ./...")
+	state.addObservation("read_file", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Output: "contents", Category: tools.FailureSuccess})
+	state.addObservation("run_tests", `{"command":"go test ./calc -run TestAverage"}`, passedTests())
+	state.Verification = VerificationPassed
+	if !state.AcceptanceCriteriaState[1].Satisfied || state.AcceptanceCriteriaState[2].Satisfied || state.canComplete() {
+		t.Fatalf("relevant test incorrectly satisfied full verification: %+v", state)
+	}
+	state.addObservation("run_tests", `{"command":"go test ./..."}`, passedTests())
+	state.Verification = VerificationPassed
+	if !state.AcceptanceCriteriaState[1].Satisfied || !state.AcceptanceCriteriaState[2].Satisfied || !state.canComplete() {
+		t.Fatalf("both verification requirements did not complete: %+v", state)
+	}
+}
+
+func TestIndependentVerificationRequirementsBlockAfterOnlyFullGoTest(t *testing.T) {
+	state := AgentRunState{}
+	state.reset("implement the fix, run the relevant test and then go test ./...")
+	state.addObservation("read_file", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Output: "contents", Category: tools.FailureSuccess})
+	state.addObservation("run_tests", `{"command":"go test ./..."}`, passedTests())
+	state.Verification = VerificationPassed
+	if state.AcceptanceCriteriaState[1].Satisfied || !state.AcceptanceCriteriaState[2].Satisfied || state.canComplete() {
+		t.Fatalf("full go test incorrectly satisfied relevant verification: %+v", state)
+	}
+}
+
+func TestIndependentVerificationRequirementsBlockAfterOnlyRelevantTest(t *testing.T) {
+	state := AgentRunState{}
+	state.reset("implement the fix, run the relevant test and then go test ./...")
+	state.addObservation("read_file", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Output: "contents", Category: tools.FailureSuccess})
+	state.addObservation("run_tests", `{"command":"go test ./calc -run TestAverage"}`, passedTests())
+	state.Verification = VerificationPassed
+	if !state.AcceptanceCriteriaState[1].Satisfied || state.AcceptanceCriteriaState[2].Satisfied || state.canComplete() {
+		t.Fatalf("relevant test incorrectly completed without full go test: %+v", state)
 	}
 }
 
@@ -180,7 +242,8 @@ func TestAcceptanceCriteriaDetectsVerificationVariants(t *testing.T) {
 	}
 	for _, goal := range goals {
 		t.Run(goal, func(t *testing.T) {
-			if !criterionKeys(acceptanceCriteriaForGoal(goal))["verification"] {
+			keys := criterionKeys(acceptanceCriteriaForGoal(goal))
+			if !keys["verification"] && !keys["verification:relevant_test"] && !keys["verification:go_test"] {
 				t.Fatalf("verification criterion missing for %q", goal)
 			}
 		})
@@ -193,10 +256,10 @@ func TestAcceptanceCriteriaSeparatesTestCreationExecutionAndImplementation(t *te
 		want map[string]bool
 	}{
 		{goal: "add a regression test", want: map[string]bool{"tests_added": true}},
-		{goal: "run the relevant test", want: map[string]bool{"verification": true}},
+		{goal: "run the relevant test", want: map[string]bool{"verification:relevant_test": true}},
 		{goal: "implement the fix", want: map[string]bool{"implementation": true}},
-		{goal: "implement the fix, run the relevant test and then go test ./...", want: map[string]bool{"implementation": true, "verification": true}},
-		{goal: "update tests and run go test ./...", want: map[string]bool{"implementation": true, "tests_added": true, "verification": true}},
+		{goal: "implement the fix, run the relevant test and then go test ./...", want: map[string]bool{"implementation": true, "verification:relevant_test": true, "verification:go_test": true}},
+		{goal: "update tests and run go test ./...", want: map[string]bool{"implementation": true, "tests_added": true, "verification:go_test": true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.goal, func(t *testing.T) {
@@ -206,7 +269,7 @@ func TestAcceptanceCriteriaSeparatesTestCreationExecutionAndImplementation(t *te
 					t.Fatalf("criteria=%+v, %s=%t want %t", got, key, got[key], want)
 				}
 			}
-			for _, key := range []string{"implementation", "tests_added", "verification"} {
+			for _, key := range []string{"implementation", "tests_added", "verification", "verification:relevant_test", "verification:go_test"} {
 				if got[key] && !tt.want[key] {
 					t.Fatalf("criteria=%+v, unexpected %s criterion", got, key)
 				}

@@ -102,6 +102,12 @@ func (r *Registry) RunDetailed(ctx context.Context, name, argsJSON string) Execu
 func resultFromOutput(out string, err error) ExecutionResult {
 	r := ExecutionResult{Output: out, Category: FailureSuccess}
 	if err != nil {
+		// Preserve the runner's underlying error when it returned no output.
+		// Otherwise filesystem failures reach the model only as an opaque
+		// category and cannot be diagnosed or corrected.
+		if strings.TrimSpace(r.Output) == "" {
+			r.Output = err.Error()
+		}
 		r.Category = classifyFailure(err.Error())
 		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
 			r.Retryable, r.Timeout = true, true
@@ -142,9 +148,11 @@ func classifyFailure(text string) FailureCategory {
 		return FailurePermissionDenied
 	case strings.Contains(low, "timeout"), strings.Contains(low, "deadline exceeded"):
 		return FailureTimeout
+	case strings.Contains(low, "no such file or directory"), strings.Contains(low, "cannot find the path"):
+		return FailureNotFound
 	case strings.Contains(low, "no such host"), strings.Contains(low, "connection refused"), strings.Contains(low, "network is unreachable"), strings.Contains(low, "temporary failure"):
 		return FailureNetwork
-	case strings.Contains(low, "required"), strings.Contains(low, "invalid url"), strings.Contains(low, "must start with"):
+	case strings.Contains(low, "required"), strings.Contains(low, "invalid"), strings.Contains(low, "invalid url"), strings.Contains(low, "must start with"):
 		return FailureInvalidInput
 	case strings.Contains(low, "exit status"), strings.Contains(low, "command failed"):
 		return FailureCommand

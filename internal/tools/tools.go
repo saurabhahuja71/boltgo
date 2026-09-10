@@ -87,7 +87,9 @@ func (l listDir) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Path string `json:"path"`
 	}
-	_ = json.Unmarshal([]byte(argsJSON), &in)
+	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil {
+		return "", fmt.Errorf("invalid list_dir arguments: %w", err)
+	}
 	if in.Path == "" {
 		in.Path = "."
 	}

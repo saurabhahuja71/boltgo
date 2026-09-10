@@ -56,12 +56,13 @@ const (
 )
 
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	Usage      *Usage     `json:"-"`
+	Role         Role       `json:"role"`
+	Content      string     `json:"content,omitempty"`
+	Name         string     `json:"name,omitempty"`
+	ToolCallID   string     `json:"tool_call_id,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	Usage        *Usage     `json:"-"`
+	FinishReason string     `json:"-"`
 }
 
 // Usage is provider-reported token accounting. Providers that do not expose
@@ -312,7 +313,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 			return Message{}, fmt.Errorf("empty choices")
 		}
 		msg := full.Choices[0].Message
+		canonicalizeToolCallTypes(msg.ToolCalls)
 		msg.Usage = full.Usage
+		msg.FinishReason = full.Choices[0].FinishReason
 		if h != nil && msg.Content != "" {
 			h.OnToken(msg.Content)
 		}
@@ -366,6 +369,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 			msg.Usage = chunk.Usage
 		}
 		ch0 := chunk.Choices[0]
+		if ch0.FinishReason != nil {
+			msg.FinishReason = *ch0.FinishReason
+		}
 		delta := ch0.Delta
 		// Full message stuffed into SSE (proxy bug / non-stream JSON over event-stream).
 		if ch0.Message != nil && delta.Content == "" && len(delta.ToolCalls) == 0 {
@@ -413,6 +419,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		// stable order by index
 		for i, key := range toolOrder {
 			if tc := toolAcc[key]; tc != nil {
+				if tc.Type != "function" {
+					tc.Type = "function"
+				}
 				if tc.ID == "" {
 					tc.ID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
 				}
@@ -424,6 +433,18 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		}
 	}
 	return msg, nil
+}
+
+// canonicalizeToolCallTypes prevents malformed provider response metadata from
+// being persisted and echoed in the next OpenAI-compatible request. The only
+// tool-call discriminator supported by the Chat Completions wire format is
+// "function"; the call ID, function name, and assembled arguments are kept.
+func canonicalizeToolCallTypes(calls []ToolCall) {
+	for i := range calls {
+		if calls[i].Type != "function" {
+			calls[i].Type = "function"
+		}
+	}
 }
 
 func toolCallIndex(tc *ToolCall, fallback int) int {
@@ -546,7 +567,9 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (Message, error) {
 		return Message{}, fmt.Errorf("empty choices")
 	}
 	msg := full.Choices[0].Message
+	canonicalizeToolCallTypes(msg.ToolCalls)
 	msg.Usage = full.Usage
+	msg.FinishReason = full.Choices[0].FinishReason
 	return msg, nil
 }
 

@@ -37,6 +37,30 @@ type Event struct {
 	Usage      *llm.Usage
 }
 
+type GoalProgressClass string
+
+const (
+	GoalProgressAuthoritative GoalProgressClass = "authoritative_progress"
+	GoalProgressScope         GoalProgressClass = "scope_rejection"
+	GoalProgressExecution     GoalProgressClass = "real_execution_failure"
+	GoalProgressRepeated      GoalProgressClass = "repeated_equivalent_action"
+	GoalProgressNone          GoalProgressClass = "no_progress"
+	GoalProgressRouted        GoalProgressClass = "routed_action"
+)
+
+// GoalProgressEvent is in-memory operational telemetry. It is deliberately
+// not part of AgentRunState or the persisted session format.
+type GoalProgressEvent struct {
+	Class          GoalProgressClass
+	Tool           string
+	Summary        string
+	FromNode       string
+	ToNode         string
+	Executed       bool
+	NewProgress    bool
+	BudgetConsumed bool
+}
+
 // Agent runs the multi-turn tool loop against an OpenAI-compatible model.
 type Agent struct {
 	Cfg    config.Config
@@ -54,13 +78,45 @@ type Agent struct {
 	MaxRetries int
 	// RunState is the compact control state for the active user turn.
 	RunState AgentRunState
+	// Scheduler is an opt-in, in-memory Goal Graph coordinator. It is nil for
+	// the legacy single-loop path and is intentionally not part of RunState.
+	Scheduler *GoalGraphScheduler
+	// CompatibilityMode enables deterministic requirement and verification
+	// guidance around the established legacy loop. It has no graph semantics.
+	CompatibilityMode bool
 	// PlanMode: Grok-like plan first — no tools; model only outlines steps.
 	PlanMode    bool
 	Permissions *permissions.Manager
 	// GitHubFallback is injectable for deterministic tests; production uses the
 	// default lazy gh capability probe when it is zero-valued.
-	GitHubFallback tools.GitHubFallbackDeps
+	GitHubFallback                   tools.GitHubFallbackDeps
+	GoalProgress                     []GoalProgressEvent
+	lastActionKey                    string
+	progressRevision                 uint64
+	lastActionRevision               uint64
+	lastActionClass                  GoalProgressClass
+	compatibilityVerificationReserve int
+	compatibilityClosureActive       bool
+	compatibilityClosureTurnUsed     bool
+	compatibilityMalformedToolMarkup bool
 }
+
+// EnableGoalGraph enables single-agent graph coordination for subsequent user
+// turns. It does not execute a graph or change the persisted run-state schema.
+func (a *Agent) EnableGoalGraph(graph GoalGraph) error {
+	scheduler, err := NewGoalGraphScheduler(graph)
+	if err != nil {
+		return err
+	}
+	a.Scheduler = scheduler
+	return nil
+}
+
+func (a *Agent) DisableGoalGraph() { a.Scheduler = nil }
+
+func (a *Agent) EnableCompatibilityMode() { a.CompatibilityMode = true }
+
+func (a *Agent) DisableCompatibilityMode() { a.CompatibilityMode = false }
 
 func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 	e := cfg.Effective()
@@ -181,7 +237,32 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	}
 	a.CompactHistory()
 	a.RunState.reset(user)
+	a.GoalProgress = nil
+	a.lastActionKey = ""
+	a.progressRevision = 0
+	a.lastActionRevision = 0
+	a.lastActionClass = ""
+	a.compatibilityVerificationReserve = 0
+	a.compatibilityClosureActive = false
+	a.compatibilityClosureTurnUsed = false
+	a.compatibilityMalformedToolMarkup = false
 	verificationRequested := false
+	if a.Scheduler != nil {
+		if _, ok, err := a.startGoalGraphNode(); err != nil {
+			return err
+		} else if !ok {
+			a.RunState.Phase = PhaseBlocked
+			emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
+			emit(Event{Kind: EventError, Text: "goal graph has no executable required node"})
+			if a.runCompatibilityPostflight(ctx, emit) {
+				emit(Event{Kind: EventDone})
+				return nil
+			}
+			emit(Event{Kind: EventDone})
+			return nil
+		}
+		emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
+	}
 
 	// @path mentions → attach file/dir context
 	payload, attached := expandMentions(user)
@@ -255,6 +336,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	if maxRetries <= 0 {
 		maxRetries = 3
 	}
+	if a.CompatibilityMode {
+		a.compatibilityVerificationReserve = a.compatibilityReserve(maxToolCalls)
+	}
 
 	toolsUsed := 0
 	for round := 0; round < maxRounds; round++ {
@@ -265,10 +349,31 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		}
 		a.RunState.beginIteration()
 		if a.RunState.Iterations > maxIterations {
+			if a.runCompatibilityPostflight(ctx, emit) {
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			a.RunState.Phase = PhaseBlocked
 			emit(Event{Kind: EventError, Text: "agent iteration limit reached; stopping safely"})
 			emit(Event{Kind: EventDone})
 			return nil
+		}
+		if a.Scheduler != nil && a.Scheduler.CurrentNodeID == "" && !a.Scheduler.RequiredComplete() {
+			if a.RunState.Retries >= maxRetries {
+				a.RunState.Phase = PhaseBlocked
+				emit(Event{Kind: EventError, Text: "goal graph retry limit reached; completion blocked"})
+				emit(Event{Kind: EventDone})
+				return nil
+			}
+			if _, started, err := a.startGoalGraphNode(); err != nil {
+				return err
+			} else if !started {
+				a.RunState.Phase = PhaseBlocked
+				emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
+				emit(Event{Kind: EventError, Text: "goal graph has no executable required node"})
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 		}
 		emit(Event{Kind: EventStatus, Text: stateStatus(a.RunState.Phase)})
 
@@ -276,6 +381,12 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		msgs := a.History
 		control := llm.Message{Role: llm.RoleUser, Content: a.RunState.controlContext()}
 		msgs = append(append([]llm.Message{}, msgs...), control)
+		if a.Scheduler != nil {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: a.goalGraphOperationalContext(maxIterations, maxToolCalls, maxRetries)})
+		}
+		if a.CompatibilityMode {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: a.compatibilityOperationalContext()})
+		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
 				Role:    llm.RoleUser,
@@ -299,13 +410,11 @@ Do not answer with only a markdown plan or shell snippets.`,
 			Temperature: a.Cfg.Temperature,
 			MaxTokens:   a.Cfg.MaxTokens,
 		}
-		// After tools: cooler sampling + shorter completion → less rambling / fake lists.
+		// After tools: cooler sampling reduces rambling while preserving the
+		// configured completion budget for accurate provider-side telemetry.
 		if toolsUsed > 0 {
 			if req.Temperature <= 0 || req.Temperature > 0.3 {
 				req.Temperature = 0.2
-			}
-			if req.MaxTokens == 0 || req.MaxTokens > 600 {
-				req.MaxTokens = 600
 			}
 		}
 
@@ -314,12 +423,39 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if isActionRequest(user) {
 			toolCap = 10
 		}
+		if a.CompatibilityMode && !a.compatibilityClosureActive &&
+			(toolsUsed >= toolCap || round >= toolCap) &&
+			a.compatibilityClosureEligible() && a.RunState.Retries < maxRetries &&
+			toolsUsed < maxToolCalls && round+1 < maxRounds {
+			a.beginCompatibilityClosure(emit)
+		}
+		retryLimit := maxRetries
 		roundTools := toolSchemas
-		if round > 0 && a.Cfg.EnableTools && a.Tools != nil && toolsUsed < toolCap && round < toolCap {
+		if a.CompatibilityMode && a.compatibilityClosureActive {
+			if a.compatibilityClosureTurnUsed {
+				if a.compatibilityCanComplete() {
+					a.RunState.Phase = PhaseComplete
+					emit(Event{Kind: EventStatus, Text: "compatibility mode: authoritative requirements and verification gates satisfied"})
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				if a.runCompatibilityPostflight(ctx, emit) {
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				a.finishCompatibilityClosure(emit)
+				return nil
+			} else {
+				a.compatibilityClosureTurnUsed = true
+			}
+			roundTools = compatibilityVerificationTools(toolSchemas)
+		} else if round > 0 && a.Cfg.EnableTools && a.Tools != nil && toolsUsed < toolCap && round < toolCap {
 			roundTools = a.Tools.LLMTools()
 		}
-		if toolsUsed >= toolCap || toolsUsed >= maxToolCalls || a.RunState.Retries >= maxRetries || round >= toolCap {
-			roundTools = nil // force plain-text answer
+		if toolsUsed >= toolCap || toolsUsed >= maxToolCalls || a.RunState.Retries >= retryLimit || round >= toolCap {
+			if !a.compatibilityClosureActive {
+				roundTools = nil // force plain-text answer
+			}
 			emit(Event{Kind: EventStatus, Text: "final answer (no more tools)"})
 		}
 		if len(roundTools) > 0 {
@@ -374,11 +510,44 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 		}
 		unsupportedToolMarkup := hasUnsupportedToolMarkup(msg.Content)
+		if unsupportedToolMarkup {
+			a.compatibilityMalformedToolMarkup = true
+		}
 
 		// Persist assistant turn (without the ephemeral after-tools system nudge)
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
+			if a.CompatibilityMode && a.compatibilityClosureActive {
+				if a.compatibilityCanComplete() {
+					a.RunState.Phase = PhaseComplete
+					emit(Event{Kind: EventStatus, Text: "compatibility mode: authoritative requirements and verification gates satisfied"})
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				if a.runCompatibilityPostflight(ctx, emit) {
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				a.finishCompatibilityClosure(emit)
+				return nil
+			}
+			if a.CompatibilityMode && !a.compatibilityClosureActive && a.compatibilityClosureEligible() && round+1 < maxRounds && toolsUsed < maxToolCalls {
+				a.beginCompatibilityClosure(emit)
+				continue
+			}
+			if a.compatibilityCanComplete() {
+				a.RunState.Phase = PhaseComplete
+				emit(Event{Kind: EventStatus, Text: "compatibility mode: authoritative requirements and verification gates satisfied"})
+				if strings.TrimSpace(msg.Content) != "" {
+					emit(Event{Kind: EventToken, Text: msg.Content})
+				}
+				emit(Event{Kind: EventDone})
+				return nil
+			}
+			if a.Scheduler != nil {
+				a.recordGoalProgress(GoalProgressNone, "model response contained no executable action", "", false, false)
+			}
 			if unsupportedToolMarkup && len(roundTools) > 0 {
 				emit(Event{Kind: EventStatus, Text: "unsupported tool-call format; expected structured tool calls"})
 				if toolsUsed == 0 && round == 0 {
@@ -458,9 +627,20 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 				if a.RunState.canVerify() {
 					a.RunState.Verification = VerificationPassed
-					if a.RunState.canComplete() {
+					if a.RunState.canComplete() && (a.Scheduler == nil || a.Scheduler.RequiredComplete()) {
 						a.RunState.Phase = PhaseComplete
 						emit(Event{Kind: EventStatus, Text: stateStatus(PhaseComplete)})
+					} else if a.Scheduler != nil {
+						if _, started, err := a.startGoalGraphNode(); err != nil {
+							return err
+						} else if started {
+							emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
+							verificationRequested = false
+							continue
+						}
+						a.RunState.Phase = PhaseBlocked
+						emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
+						emit(Event{Kind: EventError, Text: "goal graph incomplete; completion blocked"})
 					} else {
 						a.RunState.Phase = PhaseBlocked
 						emit(Event{Kind: EventError, Text: "acceptance criteria incomplete; completion blocked"})
@@ -471,6 +651,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 					emit(Event{Kind: EventStatus, Text: stateStatus(PhaseBlocked)})
 				}
 			}
+			if a.runCompatibilityPostflight(ctx, emit) {
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			emit(Event{Kind: EventDone})
 			return nil
 		}
@@ -478,6 +662,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 		// A provider may emit a stale/ignored tool call even when the current
 		// request advertised no tools because a bound was reached.
 		if len(roundTools) == 0 {
+			if a.runCompatibilityPostflight(ctx, emit) {
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			a.RunState.Phase = PhaseBlocked
 			emit(Event{Kind: EventError, Text: "tool call rejected: bounded autonomy limit reached"})
 			emit(Event{Kind: EventDone})
@@ -515,44 +703,116 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			name := tc.Function.Name
 			args := tc.Function.Arguments
-			level, capability := permissions.LevelForTool(name, args)
-			request := permissions.Request{Tool: name, Capability: capability, Level: level, Arguments: args}
-			decision, prompt := a.Permissions.Check(request)
-			if prompt {
-				response := make(chan permissions.Decision, 1)
-				emit(Event{Kind: EventPermission, Tool: name, Text: args, Permission: &request, Decision: response})
-				select {
-				case decision = <-response:
-				case <-ctx.Done():
-					decision = permissions.Deny
-				}
-				decision = a.Permissions.Commit(request, decision)
-			}
-			emit(Event{Kind: EventToolStart, Tool: name, Text: args})
-			emit(Event{Kind: EventStatus, Text: fmt.Sprintf("running %s…", name)})
 			var result tools.ExecutionResult
-			if decision == permissions.Deny {
-				result = tools.ExecutionResult{Output: "error: permission denied", Category: tools.FailurePermissionDenied, PermissionDenied: true}
+			actionKey := ""
+			repeatedAction := false
+			if a.Scheduler != nil {
+				// Providers may return several calls in one assistant message. A
+				// successful call can satisfy the active node, so advance the
+				// scheduler before evaluating the next call's scope. This keeps
+				// dependency enforcement intact while allowing a valid mutation
+				// followed by its now-eligible test in the same response.
+				if a.Scheduler.CurrentNodeID == "" && !a.Scheduler.RequiredComplete() {
+					if _, _, err := a.startGoalGraphNode(); err != nil {
+						emit(Event{Kind: EventError, Text: "goal graph could not select next node: " + err.Error()})
+					}
+				}
+				fromNode := a.Scheduler.CurrentNodeID
+				if routedNode, routed, err := a.Scheduler.RouteAction(name, args); err != nil {
+					emit(Event{Kind: EventError, Text: "goal graph routing failed: " + err.Error()})
+				} else if routed {
+					a.GoalProgress = append(a.GoalProgress, GoalProgressEvent{
+						Class: GoalProgressRouted, Tool: name, Summary: fmt.Sprintf("routed legal action from %s to ready node %s", fromNode, routedNode),
+						FromNode: fromNode, ToNode: routedNode, Executed: false, BudgetConsumed: false,
+					})
+					emit(Event{Kind: EventStatus, Text: fmt.Sprintf("goal graph routed action %s: %s -> %s", name, fromNode, routedNode)})
+				}
+				actionKey = goalActionKey(a.Scheduler.CurrentNodeID, name, args)
+				repeatedAction = a.isRepeatedGoalAction(actionKey)
+			}
+			scopeRejected := a.Scheduler != nil && !a.Scheduler.AllowsTool(name, args)
+			compatibilityRejected := a.CompatibilityMode && a.compatibilityClosureActive && !compatibilityVerificationAction(name, args)
+			if repeatedAction {
+				result = tools.ExecutionResult{Output: fmt.Sprintf("goal_graph_repeated_action: %s was already attempted without new evidence; choose a different legal action", name), Category: tools.FailureUnsupported}
+				a.RunState.addNonExecutionObservation(name, result.Output)
+				a.recordGoalProgress(GoalProgressRepeated, result.Output, name, false, false)
+				a.lastActionKey = actionKey
+				a.lastActionRevision = a.progressRevision
+				a.lastActionClass = GoalProgressRepeated
+			} else if scopeRejected || compatibilityRejected {
+				// Keep the rejection in the normal tool-result conversation, but
+				// do not dispatch it through permissions or the tool registry.
+				feedback := "compatibility verification closure permits only run_tests or an existing legal test command; no tool was executed"
+				if scopeRejected {
+					feedback = a.Scheduler.ScopeFeedback(name, args)
+				}
+				result = tools.ExecutionResult{
+					Output:   feedback,
+					Category: tools.FailureUnsupported,
+				}
+				a.RunState.addNonExecutionObservation(name, result.Output)
+				a.recordGoalProgress(GoalProgressScope, result.Output, name, false, false)
+				a.lastActionKey = actionKey
+				a.lastActionRevision = a.progressRevision
+				a.lastActionClass = GoalProgressScope
 			} else {
-				result = a.Tools.RunDetailed(ctx, name, args)
-				if name == "fetch" && result.Category == tools.FailureNotFound {
-					resource := tools.ClassifyResourceURL(toolURL(args))
-					if resource.Type == tools.ResourceGitHubActionsRun || resource.Type == tools.ResourceGitHubActionsJob {
-						emit(Event{Kind: EventStatus, Text: "fetch failed · HTTP 404 · trying GitHub Actions fallback"})
-						fallbackDeps := a.GitHubFallback
-						if fallbackDeps.Capabilities == nil && fallbackDeps.RunCommand == nil {
-							fallbackDeps = tools.DefaultGitHubFallbackDeps()
+				level, capability := permissions.LevelForTool(name, args)
+				request := permissions.Request{Tool: name, Capability: capability, Level: level, Arguments: args}
+				decision, prompt := a.Permissions.Check(request)
+				if prompt {
+					response := make(chan permissions.Decision, 1)
+					emit(Event{Kind: EventPermission, Tool: name, Text: args, Permission: &request, Decision: response})
+					select {
+					case decision = <-response:
+					case <-ctx.Done():
+						decision = permissions.Deny
+					}
+					decision = a.Permissions.Commit(request, decision)
+				}
+				if decision == permissions.Deny {
+					result = tools.ExecutionResult{Output: "error: permission denied", Category: tools.FailurePermissionDenied, PermissionDenied: true}
+				} else {
+					result = a.Tools.RunDetailed(ctx, name, args)
+					if name == "fetch" && result.Category == tools.FailureNotFound {
+						resource := tools.ClassifyResourceURL(toolURL(args))
+						if resource.Type == tools.ResourceGitHubActionsRun || resource.Type == tools.ResourceGitHubActionsJob {
+							emit(Event{Kind: EventStatus, Text: "fetch failed · HTTP 404 · trying GitHub Actions fallback"})
+							fallbackDeps := a.GitHubFallback
+							if fallbackDeps.Capabilities == nil && fallbackDeps.RunCommand == nil {
+								fallbackDeps = tools.DefaultGitHubFallbackDeps()
+							}
+							fallback := tools.ResolveGitHubActionsFallback(ctx, resource, fallbackDeps)
+							fallback.Output = fmt.Sprintf("initial fetch failed (HTTP 404)\n\n%s", fallback.Output)
+							fallback.Attempts = append([]tools.ExecutionAttempt{{Operation: "fetch", Category: result.Category, HTTPStatus: result.HTTPStatus}}, fallback.Attempts...)
+							result = fallback
 						}
-						fallback := tools.ResolveGitHubActionsFallback(ctx, resource, fallbackDeps)
-						fallback.Output = fmt.Sprintf("initial fetch failed (HTTP 404)\n\n%s", fallback.Output)
-						fallback.Attempts = append([]tools.ExecutionAttempt{{Operation: "fetch", Category: result.Category, HTTPStatus: result.HTTPStatus}}, fallback.Attempts...)
-						result = fallback
 					}
 				}
 			}
+			emit(Event{Kind: EventToolStart, Tool: name, Text: args})
+			if scopeRejected || repeatedAction {
+				emit(Event{Kind: EventStatus, Text: fmt.Sprintf("%s: %s", result.Category, compactStateText(result.Output, 220))})
+			} else {
+				emit(Event{Kind: EventStatus, Text: fmt.Sprintf("running %s…", name)})
+			}
 			a.RunState.CurrentStep = name
-			a.RunState.addObservation(name, args, result)
-			if result.Category != tools.FailureSuccess {
+			if !scopeRejected && !repeatedAction {
+				before := a.goalGraphSnapshot()
+				a.RunState.addObservation(name, args, result)
+				if a.Scheduler != nil {
+					a.projectGoalGraphEvidence(name, args, result)
+					after := a.goalGraphSnapshot()
+					if after.NodeID != before.NodeID || after.Status != before.Status {
+						emit(Event{Kind: EventStatus, Text: fmt.Sprintf("goal graph automatic transition: %s/%s -> %s/%s", before.NodeID, before.Status, after.NodeID, after.Status)})
+					}
+				}
+				progress := a.classifyGoalAction(name, result, before)
+				a.recordGoalProgress(progress, result.Output, name, true, progress == GoalProgressAuthoritative)
+				a.lastActionKey = actionKey
+				a.lastActionRevision = a.progressRevision
+				a.lastActionClass = progress
+			}
+			if result.Category != tools.FailureSuccess && !scopeRejected && !repeatedAction {
 				a.RunState.Retries++
 				emit(Event{Kind: EventStatus, Text: stateStatus(a.RunState.Phase)})
 			}
@@ -569,6 +829,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 			toolsUsed++
 		}
 		// loop: model continues with tool results
+	}
+	if a.compatibilityCanComplete() {
+		a.RunState.Phase = PhaseComplete
+		emit(Event{Kind: EventStatus, Text: "compatibility mode: authoritative requirements and verification gates satisfied"})
+		emit(Event{Kind: EventDone})
+		return nil
+	}
+	if a.runCompatibilityPostflight(ctx, emit) {
+		emit(Event{Kind: EventDone})
+		return nil
 	}
 	a.RunState.Phase = PhaseBlocked
 	emit(Event{Kind: EventError, Text: "max tool rounds reached"})

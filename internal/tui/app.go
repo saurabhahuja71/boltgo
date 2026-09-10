@@ -886,10 +886,19 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
-	if strings.HasPrefix(text, "/") {
+	if strings.HasPrefix(text, "/") && !looksLikeAbsolutePathPrompt(text) {
 		return m.handleSlash(text)
 	}
 	return m.startTurn(text)
+}
+
+// Absolute paths such as /scratch/project/.github are valid user prompts,
+// not slash commands. Keep short slash commands (including unknown-command
+// diagnostics) unchanged; a nested path is unambiguous enough to route to
+// the agent without consulting the filesystem.
+func looksLikeAbsolutePathPrompt(text string) bool {
+	fields := strings.Fields(text)
+	return len(fields) == 1 && filepath.IsAbs(fields[0]) && strings.Contains(strings.TrimPrefix(fields[0], string(filepath.Separator)), string(filepath.Separator))
 }
 
 func isStopCommand(text string) bool {
