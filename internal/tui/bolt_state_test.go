@@ -394,6 +394,9 @@ func TestTodoDisabledUsesFullWidthWithoutPanel(t *testing.T) {
 	if l.todoWidth != 0 || l.conversationWidth != 160 || m.vp.Width != 160 {
 		t.Fatalf("disabled todo reserved width: layout=%+v viewport=%d", l, m.vp.Width)
 	}
+	if got := m.messageWidth(); got != 160 {
+		t.Fatalf("disabled todo content width=%d, want full viewport width 160", got)
+	}
 	view := m.View()
 	if strings.Contains(view, "No todos") || strings.Contains(view, "Todos (") {
 		t.Fatalf("disabled todo panel was rendered: %q", view)

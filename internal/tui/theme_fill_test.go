@@ -60,12 +60,13 @@ func TestContentMaxWidthCapsReadableConversation(t *testing.T) {
 		t.Fatalf("narrow-ish contentMaxWidth=%d want 90", got)
 	}
 	m := testModel(t)
+	m.todosOpen = true
 	m.width, m.height = 180, 40
 	m.relayout()
 	if m.messageWidth() > 130 {
 		t.Fatalf("messageWidth=%d exceeds readable cap", m.messageWidth())
 	}
-	if m.vp.Width != 180 {
+	if m.vp.Width != 150 {
 		t.Fatalf("viewport should use remaining conversation width, got width=%d", m.vp.Width)
 	}
 }
@@ -225,7 +226,7 @@ func TestLightThemePaintsFooterCanvas(t *testing.T) {
 func TestMessageWidthUsesReadableCapNotFullViewport(t *testing.T) {
 	m := testModel(t)
 	m.width, m.height = 200, 40
-	m.todosOpen = false
+	m.todosOpen = true
 	m.relayout()
 	m.lines = []chatLine{{role: "user", text: strings.Repeat("word ", 80)}}
 	m.refreshViewport()

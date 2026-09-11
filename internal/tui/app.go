@@ -147,6 +147,9 @@ func (m model) conversationWidth(width int) int {
 }
 
 func (m model) messageWidth() int {
+	if !m.todoOnSide(m.width) {
+		return max(20, m.vp.Width)
+	}
 	return contentMaxWidth(m.vp.Width)
 }
 
@@ -2588,7 +2591,7 @@ func (m *model) refreshViewport() {
 	if col < 20 {
 		col = 80
 	}
-	width := contentMaxWidth(col)
+	width := m.messageWidth()
 	for i := range m.lines {
 		ln := &m.lines[i]
 		switch ln.role {
