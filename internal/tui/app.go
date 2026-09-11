@@ -129,8 +129,18 @@ func todoPanelHeight() int {
 	return strings.Count(todoText(), "\n") + 3
 }
 
+// todoWidthFor is the single layout decision for the optional Todo column.
+// Disabled Todo must contribute zero width everywhere, not only when its
+// panel is rendered.
+func (m model) todoWidthFor(width int) int {
+	if !m.todosOpen {
+		return 0
+	}
+	return todoSideWidth(width)
+}
+
 func (m model) conversationWidth(width int) int {
-	if side := todoSideWidth(width); m.todosOpen && side > 0 {
+	if side := m.todoWidthFor(width); side > 0 {
 		return max(20, width-side-1)
 	}
 	return max(20, width)
@@ -141,7 +151,7 @@ func (m model) messageWidth() int {
 }
 
 func (m model) todoOnSide(width int) bool {
-	return m.todosOpen && todoSideWidth(width) > 0
+	return m.todoWidthFor(width) > 0
 }
 
 func inputHeightFor(ta textarea.Model, width int) int {
@@ -173,9 +183,7 @@ func (m model) layoutFor(width, height int) tuiLayout {
 		todoWidth: 0,
 	}
 	l.inputHeight = inputHeightFor(m.ta, max(1, width-2))
-	if m.todosOpen && todoSideWidth(width) > 0 {
-		l.todoWidth = todoSideWidth(width)
-	}
+	l.todoWidth = m.todoWidthFor(width)
 	l.conversationWidth = max(1, width-l.todoWidth)
 	fixed := l.headerHeight + l.statusHeight + l.inputHeight + l.workspaceHeight + l.footerHeight
 	fixed += m.optionalPanelHeight(width)

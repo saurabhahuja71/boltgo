@@ -385,6 +385,21 @@ func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
 	}
 }
 
+func TestTodoDisabledUsesFullWidthWithoutPanel(t *testing.T) {
+	m := testModel(t)
+	m.todosOpen = false
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
+	m = updated.(model)
+	l := m.layoutFor(160, 36)
+	if l.todoWidth != 0 || l.conversationWidth != 160 || m.vp.Width != 160 {
+		t.Fatalf("disabled todo reserved width: layout=%+v viewport=%d", l, m.vp.Width)
+	}
+	view := m.View()
+	if strings.Contains(view, "No todos") || strings.Contains(view, "Todos (") {
+		t.Fatalf("disabled todo panel was rendered: %q", view)
+	}
+}
+
 func TestResponsiveLayoutAtSupportedTerminalSizes(t *testing.T) {
 	for _, tc := range []struct {
 		width, height, todo, conversation int
@@ -582,6 +597,30 @@ func TestTodoToggleRelayoutsConversationWithoutChangingFixedFooter(t *testing.T)
 	}
 	if !containsText(m.View(), "Bolt ·") || !containsText(m.View(), "Message…") {
 		t.Fatal("todo toggle displaced fixed footer/input")
+	}
+}
+
+func TestTodoToggleAndResizeDoNotLeaveReservedWidth(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	m = updated.(model)
+	if m.vp.Width != 130 {
+		t.Fatalf("enabled todo width=%d, want 130", m.vp.Width)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	m = updated.(model)
+	if m.vp.Width != 160 || m.layoutFor(160, 36).todoWidth != 0 {
+		t.Fatalf("disabled todo left stale width: viewport=%d layout=%+v", m.vp.Width, m.layoutFor(160, 36))
+	}
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 36})
+	m = updated.(model)
+	if m.vp.Width != 100 || m.layoutFor(100, 36).todoWidth != 0 {
+		t.Fatalf("resize while disabled left reserved width: viewport=%d layout=%+v", m.vp.Width, m.layoutFor(100, 36))
+	}
+	if strings.Contains(m.View(), "No todos") {
+		t.Fatal("disabled todo panel remained visible after resize")
 	}
 }
 
