@@ -204,6 +204,28 @@ func TestUpgradeDoesNotReplaceWhenAlreadyCurrent(t *testing.T) {
 	}
 }
 
+func TestUpgradeReportsReleaseStillBuilding(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"v1.1.1","assets":[]}`)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "bolt")
+	if err := os.WriteFile(executable, []byte("keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Client{APIBaseURL: server.URL, Repository: "test/boltgo"}).Upgrade(context.Background(), executable, "1.1.0", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "binaries are not available yet") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, _ := os.ReadFile(executable)
+	if string(got) != "keep" {
+		t.Fatalf("binary changed while release was unavailable: %q", got)
+	}
+}
+
 func TestUpgradeLeavesBinaryUnchangedOnChecksumFailure(t *testing.T) {
 	t.Parallel()
 	binaryName := fmt.Sprintf("bolt-%s-%s", runtime.GOOS, runtime.GOARCH)

@@ -136,6 +136,9 @@ func (c Client) Upgrade(ctx context.Context, executable, currentVersion string, 
 	osName, arch := runtime.GOOS, runtime.GOARCH
 	asset, checksum, err := selectAssets(release.Assets, osName, arch)
 	if err != nil {
+		if len(release.Assets) == 0 {
+			return result, fmt.Errorf("latest release %s is published but its binaries are not available yet; the release workflow may still be running, so retry later", release.TagName)
+		}
 		return result, err
 	}
 	result.AssetName = asset.Name
