@@ -19,7 +19,7 @@ func TestListDirPathMatrix(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, ".github", "workflows", "ci.yml"), []byte("name: ci\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := DefaultBuiltinsOpts(BuiltinOpts{Workspace: workspace})
+	r := DefaultBuiltinsOpts(BuiltinOpts{EnableShell: true, Workspace: workspace})
 	tests := []struct {
 		name string
 		path string
@@ -59,5 +59,28 @@ func TestListDirRejectsMalformedArgumentsInsteadOfDefaultingToWorkspace(t *testi
 	result := r.RunDetailed(context.Background(), "list_dir", "/tmp/not-json")
 	if result.Category != FailureInvalidInput || !strings.Contains(result.Output, "invalid list_dir arguments") {
 		t.Fatalf("malformed list_dir = %+v, want invalid-input diagnostic", result)
+	}
+}
+
+func TestAllowModeDoesNotBypassWorkspaceScope(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := DefaultBuiltinsOpts(BuiltinOpts{EnableShell: true, Workspace: workspace})
+	args, _ := json.Marshal(map[string]string{"path": secret})
+	result := r.RunDetailed(context.Background(), "read_file", string(args))
+	if result.Category != FailurePermissionDenied && !strings.Contains(result.Output, "outside the active workspace") {
+		t.Fatalf("absolute read escaped scope: %+v", result)
+	}
+	result = r.RunDetailed(context.Background(), "list_dir", `{"path":"`+outside+`"}`)
+	if !strings.Contains(result.Output, "outside the active workspace") {
+		t.Fatalf("absolute list escaped scope: %+v", result)
+	}
+	result = r.RunDetailed(context.Background(), "run_shell", `{"command":"cat `+secret+`"}`)
+	if !strings.Contains(result.Output, "outside the active workspace") {
+		t.Fatalf("shell absolute path escaped scope: %+v", result)
 	}
 }

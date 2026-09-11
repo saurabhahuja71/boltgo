@@ -8,6 +8,10 @@ import (
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/saurabhahuja71/agenterm/internal/agent"
+	"github.com/saurabhahuja71/agenterm/internal/config"
+	"github.com/saurabhahuja71/agenterm/internal/llm"
+	"github.com/saurabhahuja71/agenterm/internal/tools"
 )
 
 var ansiSeq = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -34,6 +38,15 @@ func lightModel(t *testing.T, width, height int) model {
 	}
 	m.refreshViewport()
 	return m
+}
+
+func TestDefaultThemeIsLight(t *testing.T) {
+	t.Setenv("AGENTERM_THEME", "")
+	cfg := config.Default()
+	ag := agent.New(cfg, llm.New("http://127.0.0.1:1", "test"), tools.DefaultBuiltins(false))
+	if got := New(Deps{Title: "Bolt", Agent: ag}).themeName; got != "light" {
+		t.Fatalf("default theme=%q, want light", got)
+	}
 }
 
 func TestContentMaxWidthCapsReadableConversation(t *testing.T) {

@@ -29,6 +29,7 @@ const (
 	FailureInvalidInput     FailureCategory = "invalid_input"
 	FailureUnsupported      FailureCategory = "unsupported"
 	FailureCommand          FailureCategory = "command_failed"
+	FailureEnvironment      FailureCategory = "environment_failure"
 	FailureUnknown          FailureCategory = "unknown"
 )
 
@@ -108,7 +109,12 @@ func resultFromOutput(out string, err error) ExecutionResult {
 		if strings.TrimSpace(r.Output) == "" {
 			r.Output = err.Error()
 		}
-		r.Category = classifyFailure(err.Error())
+		var environmentErr interface{ EnvironmentFailure() }
+		if errors.As(err, &environmentErr) {
+			r.Category = FailureEnvironment
+		} else {
+			r.Category = classifyFailure(err.Error())
+		}
 		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
 			r.Retryable, r.Timeout = true, true
 		}

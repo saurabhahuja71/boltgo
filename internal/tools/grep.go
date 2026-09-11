@@ -57,7 +57,11 @@ func (g grepTool) Run(ctx context.Context, argsJSON string) (string, error) {
 	if in.Path == "" {
 		in.Path = "."
 	}
-	in.Path = resolveWorkspacePath(g.Workspace, in.Path)
+	path, err := resolveWorkspacePathChecked(g.Workspace, in.Path)
+	if err != nil {
+		return "", err
+	}
+	in.Path = path
 	if in.MaxResults <= 0 {
 		in.MaxResults = 40
 	}

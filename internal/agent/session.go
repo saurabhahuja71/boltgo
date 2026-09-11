@@ -13,11 +13,26 @@ import (
 
 // SessionMeta is stored next to transcript JSON.
 type SessionMeta struct {
-	ID        string    `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Model     string    `json:"model"`
-	Summary   string    `json:"summary,omitempty"`
+	ID               string              `json:"id"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+	Model            string              `json:"model"`
+	Summary          string              `json:"summary,omitempty"`
+	InferenceProfile string              `json:"inference_profile,omitempty"`
+	InferenceOptions llm.SamplingOptions `json:"inference_options,omitempty"`
+	Mode             string              `json:"mode,omitempty"`
+	Workspace        string              `json:"workspace,omitempty"`
+	PermissionMode   string              `json:"permission_mode,omitempty"`
+	ChangedFiles     []string            `json:"changed_files,omitempty"`
+	Commands         []string            `json:"commands,omitempty"`
+	Verification     string              `json:"verification,omitempty"`
+	OpenFailures     []string            `json:"open_failures,omitempty"`
+	NextAction       string              `json:"next_action,omitempty"`
+	ProviderState    string              `json:"provider_state,omitempty"`
+	Interrupted      bool                `json:"interrupted,omitempty"`
+	UnknownAction    string              `json:"unknown_action,omitempty"`
+	PendingApprovals []string            `json:"pending_approvals,omitempty"`
+	PendingRequests  []string            `json:"pending_requests,omitempty"`
 }
 
 // SessionsDir returns ~/.agenterm/sessions
@@ -134,11 +149,26 @@ func (a *Agent) saveSessionPath(path, id string) (string, error) {
 	}
 	w := wire{
 		Meta: SessionMeta{
-			ID:        id,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-			Model:     a.Cfg.Model,
-			Summary:   firstUserSnippet(a.History),
+			ID:               id,
+			CreatedAt:        time.Now(),
+			UpdatedAt:        time.Now(),
+			Model:            a.Cfg.Model,
+			Summary:          a.FactualSummary(),
+			InferenceProfile: a.InferenceProfile,
+			InferenceOptions: a.InferenceOptions,
+			Mode:             a.ModeName(),
+			Workspace:        a.Cfg.Workspace,
+			PermissionMode:   a.Cfg.PermissionMode,
+			ChangedFiles:     a.ChangedFiles(),
+			Commands:         a.CommandsRun(),
+			Verification:     verificationSummary(a.RunState),
+			OpenFailures:     a.OpenFailures(),
+			NextAction:       a.NextAction(),
+			ProviderState:    dailyProviderState(a.ProviderState),
+			Interrupted:      a.RunState.Interrupted,
+			UnknownAction:    a.RunState.ToolInProgress,
+			PendingApprovals: append([]string(nil), a.PendingApprovals...),
+			PendingRequests:  append([]string(nil), a.PendingRequests...),
 		},
 		Messages: msgs,
 		RunState: a.RunState,
@@ -181,6 +211,7 @@ func (a *Agent) LoadSession(id string) error {
 		return err
 	}
 	var w struct {
+		Meta     SessionMeta   `json:"meta"`
 		Messages []llm.Message `json:"messages"`
 		RunState AgentRunState `json:"run_state"`
 	}
@@ -192,6 +223,7 @@ func (a *Agent) LoadSession(id string) error {
 	}
 	a.History = w.Messages
 	a.RunState = restoredRunState(w.RunState, w.Messages)
+	a.restoreSessionFacts(w.Meta)
 	return nil
 }
 
@@ -202,6 +234,7 @@ func (a *Agent) LoadSessionPath(path string) error {
 		return err
 	}
 	var w struct {
+		Meta     SessionMeta   `json:"meta"`
 		Messages []llm.Message `json:"messages"`
 		RunState AgentRunState `json:"run_state"`
 	}
@@ -213,7 +246,32 @@ func (a *Agent) LoadSessionPath(path string) error {
 	}
 	a.History = w.Messages
 	a.RunState = restoredRunState(w.RunState, w.Messages)
+	a.restoreSessionFacts(w.Meta)
 	return nil
+}
+
+func (a *Agent) restoreSessionFacts(meta SessionMeta) {
+	a.PendingApprovals = append([]string(nil), meta.PendingApprovals...)
+	a.PendingRequests = append([]string(nil), meta.PendingRequests...)
+	if !a.DailyMode {
+		return
+	}
+	// A process cannot know whether an in-flight provider request dispatched a
+	// tool. Resume must therefore treat it as interrupted and require inspection
+	// before any repeat. The persisted tool marker is intentionally retained.
+	if a.RunState.ProviderTurnInProgress {
+		a.RunState.ProviderTurnInProgress = false
+		a.RunState.Interrupted = true
+		a.RunState.Phase = PhaseBlocked
+	}
+	if a.RunState.ToolInProgress != "" {
+		a.RunState.UnknownToolOutcome = true
+		a.RunState.Interrupted = true
+		a.RunState.Phase = PhaseBlocked
+	}
+	a.ProviderState = llm.ProviderResumed
+	a.RunState.ProviderState = string(llm.ProviderResumed)
+	a.SessionLoaded = true
 }
 
 func restoredRunState(state AgentRunState, messages []llm.Message) AgentRunState {

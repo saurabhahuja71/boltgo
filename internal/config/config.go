@@ -42,6 +42,8 @@ type Config struct {
 
 	// MaxTokens completion budget (0 = provider default).
 	MaxTokens int `toml:"max_tokens"`
+	// InferenceProfile is opt-in; empty preserves the generic provider payload.
+	InferenceProfile string `toml:"inference_profile"`
 
 	// EnableTools allows function/tool calling when the model supports it.
 	EnableTools bool `toml:"enable_tools"`

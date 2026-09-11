@@ -23,6 +23,7 @@ import (
 
 func testModel(t *testing.T) model {
 	t.Helper()
+	t.Setenv("AGENTERM_THEME", "dark")
 	cfg := config.Default()
 	cfg.PermissionMode = "ask"
 	ag := agent.New(cfg, llm.New("http://127.0.0.1:1", "test"), tools.DefaultBuiltins(false))
@@ -53,6 +54,28 @@ func TestBoltShortcutsAndFooterState(t *testing.T) {
 		if !containsText(view, want) {
 			t.Fatalf("status/footer missing %q: %s", want, view)
 		}
+	}
+}
+
+func TestDailyViewShowsModeProfileStageAndCheckpoint(t *testing.T) {
+	cfg := config.Default()
+	cfg.InferenceProfile = "local-coding-reproducible"
+	a := agent.New(cfg, llm.New("http://127.0.0.1:1", "test"), tools.DefaultBuiltins(false))
+	a.SetInferenceProfile("local-coding-reproducible", llm.SamplingOptions{})
+	a.EnableDailyMode()
+	a.RunState = agent.AgentRunState{OriginalGoal: "inspect the repository", Phase: agent.PhasePlan, Verification: agent.VerificationNotRun}
+	m := New(Deps{Title: "Bolt", Summary: "daily", Agent: a})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m = updated.(model)
+	view := m.View()
+	for _, want := range []string{"Daily", "profile: local-coding-reprodu", "stage:", "changed"} {
+		if !containsText(view, want) {
+			t.Fatalf("daily view missing %q: %s", want, view)
+		}
+	}
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventStatus, Text: a.DailyCheckpoint()})
+	if !containsText(m.View(), "daily checkpoint:") {
+		t.Fatal("daily checkpoint was not surfaced in the transcript")
 	}
 }
 
@@ -1036,6 +1059,71 @@ func TestSlashSessionsUseWorkspaceStorage(t *testing.T) {
 	if len(updated.(model).deps.Agent.History) < 2 {
 		t.Fatal("workspace session was not loaded")
 	}
+}
+
+func workspaceModel(t *testing.T) (model, string, string) {
+	t.Helper()
+	active, candidate := t.TempDir(), t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = active
+	cfg.PermissionMode = "allow"
+	ag := agent.New(cfg, llm.New("http://127.0.0.1:1", "test"), tools.DefaultBuiltinsOpts(tools.BuiltinOpts{Workspace: active}))
+	return New(Deps{Title: "Bolt", Summary: "test", Agent: ag, Workspace: active, SessionPath: filepath.Join(active, ".bolt", "sessions", "latest.json")}), active, candidate
+}
+
+func TestWorkspaceSwitchRequiresExplicitApprovalAndIsolatesSession(t *testing.T) {
+	m, active, candidate := workspaceModel(t)
+	m.deps.Agent.PendingRequests = []string{"old request"}
+	m.deps.Agent.PendingApprovals = []string{"old approval"}
+	m.deps.Agent.History = append(m.deps.Agent.History, llm.Message{Role: llm.RoleUser, Content: "old workspace work"})
+	updated, _ := m.handleSubmit("/workspace " + candidate)
+	m = updated.(model)
+	if m.pendingWorkspace == nil || m.busy || !strings.Contains(transcriptText(m), "outside the active workspace") {
+		t.Fatalf("switch was not held for approval: pending=%v busy=%v", m.pendingWorkspace != nil, m.busy)
+	}
+	updated, _ = m.handleWorkspaceSwitchKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m = *updated.(*model)
+	if m.deps.Workspace != candidate || m.deps.Agent.Cfg.Workspace != candidate {
+		t.Fatalf("workspace did not switch: deps=%q cfg=%q", m.deps.Workspace, m.deps.Agent.Cfg.Workspace)
+	}
+	if len(m.deps.Agent.PendingRequests) != 0 || len(m.deps.Agent.PendingApprovals) != 0 || len(m.deps.Agent.History) != 1 {
+		t.Fatalf("old workspace state leaked: requests=%v approvals=%v history=%d", m.deps.Agent.PendingRequests, m.deps.Agent.PendingApprovals, len(m.deps.Agent.History))
+	}
+	oldSession := filepath.Join(active, ".bolt", "sessions", "latest.json")
+	if _, err := os.Stat(oldSession); err != nil {
+		t.Fatalf("old workspace handoff missing: %v", err)
+	}
+	if !strings.Contains(transcriptText(m), candidate) || !strings.Contains(transcriptText(m), "no pending actions") {
+		t.Fatal("switch checkpoint missing new root or isolation statement")
+	}
+}
+
+func TestWorkspaceSwitchDeniedLeavesOriginalWorkspace(t *testing.T) {
+	m, active, candidate := workspaceModel(t)
+	updated, _ := m.handleSubmit("/workspace " + candidate)
+	m = updated.(model)
+	updated, _ = m.handleWorkspaceSwitchKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	m = *updated.(*model)
+	if m.deps.Workspace != active || m.deps.Agent.Cfg.Workspace != active || m.pendingWorkspace != nil {
+		t.Fatalf("denied switch changed workspace: deps=%q cfg=%q pending=%v", m.deps.Workspace, m.deps.Agent.Cfg.Workspace, m.pendingWorkspace != nil)
+	}
+}
+
+func TestBareWorkspaceRequestDoesNotScanOrStartModelTurn(t *testing.T) {
+	m, _, _ := workspaceModel(t)
+	updated, _ := m.handleSubmit("inspect another project covered_call_bot")
+	m = updated.(model)
+	if m.busy || m.pendingWorkspace != nil || !strings.Contains(transcriptText(m), "/workspace /absolute/path/to/project") {
+		t.Fatal("bare sibling request did not stop for explicit path selection")
+	}
+}
+
+func transcriptText(m model) string {
+	parts := make([]string, 0, len(m.lines))
+	for _, line := range m.lines {
+		parts = append(parts, line.text)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func modelWithHTTPServer(t *testing.T, handler http.Handler) (model, *httptest.Server) {

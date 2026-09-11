@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -67,6 +68,19 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+// WithWorkspace rebuilds workspace-bound built-ins while preserving any
+// externally registered tools (for example MCP tools). It is used only after
+// an explicit user-approved workspace switch.
+func (r *Registry) WithWorkspace(opts BuiltinOpts) *Registry {
+	next := DefaultBuiltinsOpts(opts)
+	for name, runner := range r.runners {
+		if _, builtin := next.runners[name]; !builtin {
+			next.runners[name] = runner
+		}
+	}
+	return next
+}
+
 // --- built-in tools ---
 
 type listDir struct{ Workspace string }
@@ -93,7 +107,11 @@ func (l listDir) Run(_ context.Context, argsJSON string) (string, error) {
 	if in.Path == "" {
 		in.Path = "."
 	}
-	entries, err := os.ReadDir(resolveWorkspacePath(l.Workspace, in.Path))
+	path, err := resolveWorkspacePathChecked(l.Workspace, in.Path)
+	if err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		return "", err
 	}
@@ -181,7 +199,10 @@ func (w writeFile) Run(_ context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("path required")
 	}
 	// Snapshot for /undo
-	path := resolveWorkspacePath(w.Workspace, in.Path)
+	path, err := resolveWorkspacePathChecked(w.Workspace, in.Path)
+	if err != nil {
+		return "", err
+	}
 	prev, err := os.ReadFile(path)
 	created := err != nil
 	if created {
@@ -494,6 +515,9 @@ func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	if reason := shellCommandBlocked(cmdStr); reason != "" {
 		return "error: " + reason, nil
 	}
+	if reason := shellWorkspaceBlocked(cmdStr, sh.Workspace); reason != "" {
+		return "error: " + reason, nil
+	}
 	// Short timeout + kill whole process group (xargs/curl children included).
 	const shellTimeout = 25 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, shellTimeout)
@@ -562,6 +586,26 @@ func shellCommandBlocked(cmd string) string {
 	}
 	if len(cmd) > 4000 {
 		return "blocked: command too long"
+	}
+	return ""
+}
+
+var shellAbsolutePath = regexp.MustCompile(`(?:^|[\s"'=])(/[^\s"';&|()]+)`)
+
+func shellWorkspaceBlocked(cmd, workspace string) string {
+	if strings.Contains(cmd, "../") || strings.Contains(cmd, `..\`) {
+		return "blocked path traversal outside the active workspace; use /workspace /absolute/path to switch explicitly"
+	}
+	for _, match := range shellAbsolutePath.FindAllStringSubmatch(cmd, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		candidate := strings.TrimRight(match[1], ".,!?;:)]}")
+		if err := enforceWorkspacePath(workspace, candidate); err != nil {
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				return err.Error()
+			}
+		}
 	}
 	return ""
 }
@@ -693,7 +737,10 @@ func (f findFiles) Run(_ context.Context, argsJSON string) (string, error) {
 	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || strings.TrimSpace(in.Name) == "" {
 		return "", fmt.Errorf("name required")
 	}
-	root := resolveWorkspacePath(f.Workspace, in.Root)
+	root, err := resolveWorkspacePathChecked(f.Workspace, in.Root)
+	if err != nil {
+		return "", err
+	}
 	if root == "" {
 		root = "."
 	}
@@ -746,6 +793,9 @@ func resolveExistingFileIn(p, workspace string) (string, error) {
 		return "", fmt.Errorf("path required")
 	}
 	base := resolveWorkspacePath(workspace, p)
+	if err := enforceWorkspacePath(workspace, base); err != nil {
+		return "", err
+	}
 	candidates := []string{base}
 	// Models invent "repo/..." prefixes
 	for _, prefix := range []string{"repo/", "repos/", "./repo/"} {
@@ -765,6 +815,9 @@ func resolveExistingFileIn(p, workspace string) (string, error) {
 	seen := map[string]struct{}{}
 	for _, c := range candidates {
 		c = filepath.Clean(c)
+		if err := enforceWorkspacePath(workspace, c); err != nil {
+			return "", err
+		}
 		if _, ok := seen[c]; ok {
 			continue
 		}
@@ -818,6 +871,63 @@ func resolveWorkspacePath(workspace, path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Join(workspace, path)
+}
+
+func resolveWorkspacePathChecked(workspace, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		path = "."
+	}
+	resolved := resolveWorkspacePath(workspace, path)
+	if err := enforceWorkspacePath(workspace, resolved); err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// enforceWorkspacePath prevents absolute tool arguments and symlinked paths
+// from escaping the active workspace. Permission ALLOW controls tool use; it
+// never changes this filesystem boundary.
+func enforceWorkspacePath(workspace, target string) error {
+	root := workspace
+	if strings.TrimSpace(root) == "" {
+		root, _ = os.Getwd()
+	}
+	root, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return fmt.Errorf("resolve active workspace: %w", err)
+	}
+	target, err = filepath.Abs(filepath.Clean(target))
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path %s is outside the active workspace; use /workspace /absolute/path to switch explicitly", target)
+	}
+	resolvedRoot := root
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		resolvedRoot = real
+	}
+	existing := target
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		existing = parent
+	}
+	resolvedExisting, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return fmt.Errorf("resolve path %s: %w", target, err)
+	}
+	rel, err = filepath.Rel(resolvedRoot, resolvedExisting)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path %s resolves outside the active workspace; use /workspace /absolute/path to switch explicitly", target)
+	}
+	return nil
 }
 
 // BuiltinOpts configures optional tools.

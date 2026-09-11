@@ -25,7 +25,9 @@ func TestLauncherPresetsShareOneRuntime(t *testing.T) {
 
 func TestResumeRequestedPrecedence(t *testing.T) {
 	oldResume, oldNoResume := flagResume, flagNoResume
-	t.Cleanup(func() { flagResume, flagNoResume = oldResume, oldNoResume })
+	oldArg := os.Args[0]
+	t.Cleanup(func() { flagResume, flagNoResume, os.Args[0] = oldResume, oldNoResume, oldArg })
+	os.Args[0] = "bolt"
 	flagResume, flagNoResume = false, false
 	t.Setenv("BOLT_RESUME", "1")
 	if !resumeRequested() {
@@ -40,5 +42,20 @@ func TestResumeRequestedPrecedence(t *testing.T) {
 	t.Setenv("BOLT_RESUME", "0")
 	if !resumeRequested() {
 		t.Fatal("--resume should override BOLT_RESUME=0")
+	}
+}
+
+func TestBoltS3StartsFreshUnlessExplicitResume(t *testing.T) {
+	oldResume, oldNoResume, oldArg := flagResume, flagNoResume, os.Args[0]
+	t.Cleanup(func() { flagResume, flagNoResume, os.Args[0] = oldResume, oldNoResume, oldArg })
+	os.Args[0] = "bolt-s3"
+	flagResume, flagNoResume = false, false
+	t.Setenv("BOLT_RESUME", "1")
+	if resumeRequested() {
+		t.Fatal("bolt-s3 must ignore implicit BOLT_RESUME")
+	}
+	flagResume = true
+	if !resumeRequested() {
+		t.Fatal("explicit --resume must still resume bolt-s3")
 	}
 }

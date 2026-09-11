@@ -24,6 +24,7 @@ import (
 	"github.com/saurabhahuja71/agenterm/internal/permissions"
 	"github.com/saurabhahuja71/agenterm/internal/todos"
 	"github.com/saurabhahuja71/agenterm/internal/tools"
+	workspacepath "github.com/saurabhahuja71/agenterm/internal/workspace"
 )
 
 // OSC / color-query replies that leak into stdin when libraries probe the TTY
@@ -194,6 +195,9 @@ func (m model) optionalPanelHeight(width int) int {
 	if m.pendingApproval != nil {
 		height += lipgloss.Height(styleBox.Width(max(10, width)).Render(approvalText(m.pendingApproval)))
 	}
+	if m.pendingWorkspace != nil {
+		height += lipgloss.Height(styleBox.Width(max(10, width)).Render(workspaceApprovalText(m.pendingWorkspace)))
+	}
 	if m.modelPick != nil {
 		height += lipgloss.Height(m.modelPickerView(width + 2))
 	}
@@ -224,6 +228,7 @@ type Deps struct {
 	// failed explicit resume disables this so fresh history cannot overwrite a
 	// missing or corrupt requested session.
 	SaveSession bool
+	Mode        string
 }
 
 type chatLine struct {
@@ -287,12 +292,18 @@ type model struct {
 	themeName        string
 	pendingApproval  *permissions.Request
 	approvalDecision chan permissions.Decision
+	pendingWorkspace *workspaceSwitchRequest
 	tokenUsage       *llm.Usage
 	// pendingRequests contains canonical, unrendered user input in FIFO order.
 	pendingRequests      []string
 	worktree             worktreeSummary
 	worktreeGeneration   uint64
 	worktreeRefreshAgain bool
+}
+
+type workspaceSwitchRequest struct {
+	path   string
+	reason string
 }
 
 // paintInterval is the minimum time between streaming viewport rebuilds.
@@ -356,7 +367,7 @@ func (m *model) syncLayout() bool {
 func New(deps Deps) model {
 	theme := strings.ToLower(strings.TrimSpace(os.Getenv("AGENTERM_THEME")))
 	if theme != "dark" && theme != "black" && theme != "light" {
-		theme = "dark"
+		theme = "light"
 	}
 	applyTheme(theme)
 	ta := textarea.New()
@@ -377,8 +388,8 @@ func New(deps Deps) model {
 	ta.ShowLineNumbers = false
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
-	applyTheme("dark")
-	applyTextareaTheme(&ta, "dark")
+	applyTheme(theme)
+	applyTextareaTheme(&ta, theme)
 	// Enter sends. Shift+Enter and Alt+Enter insert a newline.
 	ta.KeyMap.InsertNewline.SetEnabled(true)
 	ta.KeyMap.InsertNewline.SetKeys("shift+enter", "alt+enter")
@@ -627,6 +638,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if m.pendingWorkspace != nil {
+			return m.handleWorkspaceSwitchKey(msg)
+		}
 		if m.pendingApproval != nil && isApprovalDecisionKey(msg) {
 			return m.handleApprovalKey(msg)
 		}
@@ -684,6 +698,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.commandsOpen = !m.commandsOpen
 			m.relayout()
 			return m, nil
+		case "ctrl+s":
+			return m.handleSlash("/save")
 		case "ctrl+b":
 			switch m.themeName {
 			case "dark":
@@ -846,6 +862,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancel = nil
 		// Auto-save rolling session after each turn (best-effort).
 		if m.deps.SaveSession && m.deps.SessionPath != "" {
+			m.deps.Agent.PendingRequests = append([]string(nil), m.pendingRequests...)
 			_, _ = m.deps.Agent.SaveSessionPath(m.deps.SessionPath)
 		}
 		m.refreshViewport()
@@ -879,6 +896,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
+	trimmed := strings.TrimSpace(text)
+	lowerTrimmed := strings.ToLower(trimmed)
+	if lowerTrimmed == "/workspace" || strings.HasPrefix(lowerTrimmed, "/workspace ") {
+		return m.handleWorkspaceCommand(text)
+	}
+	if handled, result := m.handleExplicitWorkspaceRequest(text); handled {
+		return result, nil
+	}
 	if m.busy && !isStopCommand(text) {
 		m.pendingRequests = append(m.pendingRequests, text)
 		m.lines = append(m.lines, chatLine{role: "queued", text: text})
@@ -890,6 +915,134 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 		return m.handleSlash(text)
 	}
 	return m.startTurn(text)
+}
+
+func (m model) activeWorkspace() string {
+	if strings.TrimSpace(m.deps.Workspace) != "" {
+		return m.deps.Workspace
+	}
+	return mustCwd()
+}
+
+func (m model) handleWorkspaceCommand(text string) (tea.Model, tea.Cmd) {
+	arg := strings.TrimSpace(strings.TrimSpace(text)[len("/workspace"):])
+	if arg == "" {
+		m.lines = append(m.lines, chatLine{role: "system", text: "usage: /workspace /absolute/path\nWorkspace switching requires an explicit absolute path; Bolt will not infer or scan sibling folders."})
+		return m, nil
+	}
+	path, err := workspacepath.Resolve(arg)
+	if err != nil {
+		m.lines = append(m.lines, chatLine{role: "error", text: "workspace: " + err.Error()})
+		return m, nil
+	}
+	if !workspacepath.Outside(m.activeWorkspace(), path) {
+		m.lines = append(m.lines, chatLine{role: "system", text: "workspace is already " + path})
+		return m, nil
+	}
+	return m.offerWorkspaceSwitch(path, "explicit /workspace command")
+}
+
+func (m model) handleExplicitWorkspaceRequest(text string) (bool, tea.Model) {
+	lower := strings.ToLower(text)
+	workspaceWords := strings.Contains(lower, "another project") || strings.Contains(lower, "different project") || strings.Contains(lower, "sibling") || strings.Contains(lower, "outside the active workspace") || strings.Contains(lower, "another folder") || strings.Contains(lower, "another directory")
+	if !workspaceWords {
+		return false, m
+	}
+	for _, field := range strings.Fields(text) {
+		candidate := strings.TrimRight(field, ".,!?;:)]}\"")
+		if !filepath.IsAbs(candidate) {
+			continue
+		}
+		path, err := workspacepath.Resolve(candidate)
+		if err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: "workspace request: " + err.Error()})
+			return true, m
+		}
+		if workspacepath.Outside(m.activeWorkspace(), path) {
+			updated, _ := m.offerWorkspaceSwitch(path, "user-requested external project")
+			return true, updated
+		}
+	}
+	m.lines = append(m.lines, chatLine{role: "system", text: "I cannot infer or scan a sibling folder from a bare name. Provide its exact path: /workspace /absolute/path/to/project. Tool permission does not grant workspace access."})
+	return true, m
+}
+
+func (m model) offerWorkspaceSwitch(path, reason string) (tea.Model, tea.Cmd) {
+	if m.busy {
+		m.lines = append(m.lines, chatLine{role: "error", text: "finish or stop the active turn before switching workspaces; no action was started"})
+		return m, nil
+	}
+	m.pendingWorkspace = &workspaceSwitchRequest{path: path, reason: reason}
+	m.status = "workspace approval required"
+	m.lines = append(m.lines, chatLine{role: "system", text: "This folder is outside the active workspace; tool permission does not grant workspace access.\nCandidate: " + path + "\nSwitching changes the project root for this session. Approve only if this is the intended project."})
+	m.relayout()
+	m.refreshViewport()
+	return m, nil
+}
+
+func (m *model) handleWorkspaceSwitchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "1", "y", "enter":
+		return m.applyWorkspaceSwitch()
+	case "4", "n", "esc":
+		m.pendingWorkspace = nil
+		m.status = "ready"
+		m.lines = append(m.lines, chatLine{role: "system", text: "workspace switch denied; active workspace unchanged"})
+		m.relayout()
+		m.refreshViewport()
+	}
+	return m, nil
+}
+
+func (m *model) applyWorkspaceSwitch() (tea.Model, tea.Cmd) {
+	request := m.pendingWorkspace
+	if request == nil {
+		return m, nil
+	}
+	old := m.activeWorkspace()
+	oldSession, err := agent.WorkspaceSessionPath(old, "latest")
+	if err == nil {
+		if _, err = m.deps.Agent.SaveSessionPath(oldSession); err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: "workspace switch stopped: could not save old workspace handoff: " + err.Error()})
+			return m, nil
+		}
+	}
+	newPath, err := workspacepath.Resolve(request.path)
+	if err != nil {
+		m.pendingWorkspace = nil
+		m.lines = append(m.lines, chatLine{role: "error", text: "workspace switch stopped: " + err.Error()})
+		m.relayout()
+		return m, nil
+	}
+	reg := m.deps.Agent.Tools.WithWorkspace(tools.BuiltinOpts{
+		EnableShell: m.deps.Agent.Cfg.EnableShell,
+		TestCommand: m.deps.Agent.Cfg.TestCommand,
+		Workspace:   newPath,
+	})
+	m.deps.Agent.SwitchWorkspace(newPath, reg)
+	m.deps.Workspace = newPath
+	m.deps.SessionPath, err = agent.WorkspaceSessionPath(newPath, "latest")
+	if err != nil {
+		m.lines = append(m.lines, chatLine{role: "error", text: "workspace switch stopped: " + err.Error()})
+		return m, nil
+	}
+	m.deps.SaveSession = true
+	if m.deps.Agent.DailyMode {
+		path := m.deps.SessionPath
+		m.deps.Agent.SetDailyPersistence(func() error {
+			_, saveErr := m.deps.Agent.SaveSessionPath(path)
+			return saveErr
+		})
+	}
+	m.pendingRequests = nil
+	m.pendingWorkspace = nil
+	m.status = "workspace switched"
+	m.lines = append(m.lines, chatLine{role: "system", text: "workspace switched to " + newPath + "\nOld workspace handoff saved at " + oldSession + "\nNew workspace session starts fresh; no pending actions or approvals were carried over."})
+	m.worktreeGeneration++
+	m.worktree = worktreeSummary{RefreshInProgress: true}
+	m.relayout()
+	m.refreshViewport()
+	return m, worktreeRefreshCmd(newPath, m.worktreeGeneration)
 }
 
 // Absolute paths such as /scratch/project/.github are valid user prompts,
@@ -948,6 +1101,72 @@ func (m model) startTurn(text string) (tea.Model, tea.Cmd) {
 	}()
 
 	return m, tea.Batch(waitNext(ch), busyTick(), m.scheduleWorktreeRefresh())
+}
+
+func (m model) startDailyVerification() (tea.Model, tea.Cmd) {
+	m.lines = append(m.lines, chatLine{role: "system", text: "verification requested (read-only; no model turn)"})
+	m.ensureStream().Reset()
+	m.turnAssistant = -1
+	m.busy = true
+	m.turnFailed = false
+	m.gotToken = false
+	m.waitSecs = 0
+	m.busySince = time.Now()
+	m.status = "verifying…"
+	m.followBottom = true
+	m.vp.GotoBottom()
+	m.upsertThinkingPlaceholder()
+	m.refreshViewport()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	ch := make(chan agent.Event, 8192)
+	m.events = ch
+	m.paintPending = false
+	ag := m.deps.Agent
+	go func() {
+		_ = ag.RunDailyVerification(ctx, func(ev agent.Event) {
+			select {
+			case ch <- ev:
+			case <-ctx.Done():
+			default:
+				select {
+				case ch <- ev:
+				case <-ctx.Done():
+				}
+			}
+		})
+		ch <- agent.Event{Kind: agent.EventDone}
+		close(ch)
+	}()
+	return m, tea.Batch(waitNext(ch), busyTick(), m.scheduleWorktreeRefresh())
+}
+
+func (m model) startDailyReconnect() (tea.Model, tea.Cmd) {
+	if !m.deps.Agent.DailyMode {
+		m.lines = append(m.lines, chatLine{role: "error", text: "/reconnect is available in daily mode only"})
+		return m, nil
+	}
+	m.busy = true
+	m.turnFailed = false
+	m.status = "reconnecting…"
+	m.lines = append(m.lines, chatLine{role: "system", text: "checking provider readiness (no model turn; no tool replay)"})
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	ch := make(chan agent.Event, 128)
+	m.events = ch
+	ag := m.deps.Agent
+	go func() {
+		_ = ag.DailyReconnect(ctx, func(ev agent.Event) {
+			select {
+			case ch <- ev:
+			case <-ctx.Done():
+			}
+		})
+		ch <- agent.Event{Kind: agent.EventDone}
+		close(ch)
+	}()
+	return m, tea.Batch(waitNext(ch), busyTick())
 }
 
 func (m model) startNextQueued() (tea.Model, tea.Cmd) {
@@ -1112,12 +1331,23 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		return m, tea.Batch(m.schedulePaint(true), m.scheduleWorktreeRefresh())
 
 	case agent.EventStatus:
+		checkpointAdded := false
 		if ev.Text != "" {
 			m.status = ev.Text
+			if m.deps.Agent.DailyMode && strings.HasPrefix(ev.Text, "daily checkpoint:") {
+				m.lines = append(m.lines, chatLine{role: "system", text: ev.Text})
+				checkpointAdded = true
+			} else if m.deps.Agent.DailyMode && strings.HasPrefix(ev.Text, "daily handoff:") {
+				m.lines = append(m.lines, chatLine{role: "error", text: ev.Text})
+				checkpointAdded = true
+			}
 		}
 		// Status only: update thinking line if visible; skip full paint when streaming.
 		if m.showingThinkingOnly() {
 			m.upsertThinkingPlaceholder()
+			return m, m.schedulePaint(true)
+		}
+		if checkpointAdded {
 			return m, m.schedulePaint(true)
 		}
 		return m, nil
@@ -1130,6 +1360,9 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		m.clearThinkingPlaceholder()
 		m.flushStreamAsLine()
 		m.lines = append(m.lines, chatLine{role: "error", text: ev.Text})
+		if m.deps.Agent.DailyMode {
+			m.lines = append(m.lines, chatLine{role: "error", text: m.deps.Agent.DailyHandoff(ev.Text)})
+		}
 		m.status = "error"
 		if !isCancellationText(ev.Text) {
 			m.turnFailed = true
@@ -1152,6 +1385,9 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 			m.status = "error"
 		} else {
 			m.status = "finalizing…"
+		}
+		if m.deps.Agent.DailyMode {
+			m.lines = append(m.lines, chatLine{role: "system", text: m.deps.Agent.DailyCheckpoint()})
 		}
 		return m, m.schedulePaint(true)
 	}
@@ -1179,7 +1415,10 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.deps.Agent.Reset()
 		m.lines = []chatLine{{role: "system", text: "history cleared"}}
 	case "/status":
-		st := m.deps.Summary + "\nstatus: " + m.status
+		st := m.deps.Summary + "\nmode: " + m.deps.Agent.ModeName() + "\nstatus: " + m.status
+		if m.deps.Agent.DailyMode {
+			st += "\n" + m.deps.Agent.FactualSummary()
+		}
 		workspace := m.deps.Workspace
 		if workspace == "" {
 			workspace = mustCwd()
@@ -1189,6 +1428,26 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			st += "\ngit:\n" + b
 		}
 		m.lines = append(m.lines, chatLine{role: "system", text: st})
+	case "/provider", "/provider-status":
+		m.lines = append(m.lines, chatLine{role: "system", text: m.deps.Agent.DailyProviderStatus()})
+	case "/reconnect":
+		if m.busy {
+			m.lines = append(m.lines, chatLine{role: "error", text: "busy — wait or Esc cancel first"})
+		} else {
+			return m.startDailyReconnect()
+		}
+	case "/checkpoint":
+		m.lines = append(m.lines, chatLine{role: "system", text: m.deps.Agent.DailyCheckpoint()})
+	case "/resume":
+		path := m.sessionPath("latest")
+		if path == "" {
+			m.lines = append(m.lines, chatLine{role: "error", text: "invalid workspace session path"})
+		} else if err := m.deps.Agent.LoadSessionPath(path); err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: "resume: " + err.Error()})
+		} else {
+			m.pendingRequests = append([]string(nil), m.deps.Agent.PendingRequests...)
+			m.lines = append(m.lines, chatLine{role: "system", text: "resumed factual session; provider turn is fresh and ambiguous actions will not be replayed"})
+		}
 	case "/model", "/models":
 		mod, cmd := m.handleModelCmd(parts)
 		return mod, cmd
@@ -1221,6 +1480,10 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		if m.busy {
 			m.lines = append(m.lines, chatLine{role: "error", text: "busy — wait or Esc cancel first"})
 			m.refreshViewport()
+			return m, nil
+		}
+		if m.deps.Agent.DailyMode && (m.deps.Agent.RunState.UnknownToolOutcome || m.deps.Agent.RunState.Interrupted) {
+			m.lines = append(m.lines, chatLine{role: "error", text: "daily session has an interrupted or unknown action; inspect the workspace or give an explicit direction before retrying"})
 			return m, nil
 		}
 		prev := m.deps.Agent.PopLastExchange()
@@ -1278,14 +1541,33 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		} else if err := m.deps.Agent.LoadSessionPath(path); err != nil {
 			m.lines = append(m.lines, chatLine{role: "error", text: err.Error()})
 		} else {
+			m.pendingRequests = append([]string(nil), m.deps.Agent.PendingRequests...)
 			m.lines = []chatLine{
 				{role: "system", text: "loaded session " + parts[1]},
-				{role: "system", text: m.deps.Summary},
+				{role: "system", text: m.deps.Agent.DailyCheckpoint()},
 			}
 		}
 	case "/compact":
 		m.deps.Agent.CompactHistory()
 		m.lines = append(m.lines, chatLine{role: "system", text: "compacted old tool payloads in history"})
+	case "/inspect":
+		workspace := m.deps.Workspace
+		if workspace == "" {
+			workspace = mustCwd()
+		}
+		git := "no git changes reported"
+		if out, err := runGitStatusShort(workspace); err == nil && strings.TrimSpace(out) != "" {
+			git = out
+		}
+		m.lines = append(m.lines, chatLine{role: "system", text: "changed files:\n" + strings.Join(m.deps.Agent.ChangedFiles(), "\n") + "\n\ngit:\n" + git})
+	case "/verify":
+		if !m.deps.Agent.DailyMode {
+			m.lines = append(m.lines, chatLine{role: "error", text: "/verify is available in daily mode only"})
+		} else if m.busy {
+			m.lines = append(m.lines, chatLine{role: "error", text: "busy — wait or Esc cancel first"})
+		} else {
+			return m.startDailyVerification()
+		}
 	case "/plan":
 		if len(parts) < 2 {
 			state := "off"
@@ -1404,6 +1686,12 @@ Commands:
   /help              This help
   /clear             Clear conversation
   /status            Provider · model · URL · workspace path · git
+	  /workspace <path>  Request an explicit absolute workspace switch
+	  /provider          Daily provider state and factual session status
+	  /reconnect         Bounded readiness check; never replays a tool
+	  /checkpoint        Show the last factual checkpoint
+	  /inspect           Show authoritative changed files and git diff summary
+	  /verify            Run outstanding read-only verification in Daily mode
   /model             Interactive picker (Tab · Enter · Esc)
   /model <name>      Switch model by name
   /tools on|off      Toggle function tools
@@ -1417,6 +1705,7 @@ Commands:
   /save [id]         Save session
   /sessions          List sessions
   /load <id>         Resume session
+	  /resume            Resume workspace latest session
   /compact           Shrink tool history
   /quit              Exit
 
@@ -1428,7 +1717,8 @@ Keys:
   Enter           Send
   Shift+Enter     Newline in prompt
   Esc / /stop     Cancel in-flight reply
-  Ctrl+C          Cancel if busy; quit when idle
+		Ctrl+C          Cancel if busy; quit when idle
+		Ctrl+S          Save session
   Ctrl+L          Toggle mouse mode
   Ctrl+Y          Toggle vision state
   Ctrl+T          Toggle todos
@@ -2440,6 +2730,13 @@ func approvalText(r *permissions.Request) string {
 	return fmt.Sprintf("Approval required\nTool: %s\nAction: %s\nLevel: %s\n\n1 Allow once  2 Allow session  3 Allow permanently  4 Deny", r.Tool, r.Arguments, strings.ToUpper(string(r.Level)))
 }
 
+func workspaceApprovalText(r *workspaceSwitchRequest) string {
+	if r == nil {
+		return "Workspace switch approval required"
+	}
+	return fmt.Sprintf("Workspace switch approval required\nCandidate: %s\nReason: %s\n\n1 Switch workspace  4 Deny", r.path, r.reason)
+}
+
 func todoText() string {
 	items := todos.Global.Items()
 	if len(items) == 0 {
@@ -2772,13 +3069,13 @@ func (m model) View() string {
 	}
 	// One subtle status line — no filled bar.
 	statusText := fmt.Sprintf("Bolt · %s · %s · %s · %s · %s · %s",
-		strings.ToUpper(string(m.permissionMode)),
-		m.mouseMode,
-		vision,
-		modelName,
-		tokens,
-		status,
-	)
+		strings.ToUpper(string(m.permissionMode)), m.mouseMode, vision, modelName, tokens, status)
+	if m.deps.Agent.DailyMode {
+		statusText = fmt.Sprintf("Bolt · %s · %s · %s · %s · %s · %s · %s · %s · %s",
+			strings.ToUpper(string(m.permissionMode)), m.deps.Agent.ModeName(), dailyStageDisplay(m.deps.Agent),
+			profileDisplay(m.deps.Agent.InferenceProfile), modelName,
+			fmt.Sprintf("%d changed", len(m.deps.Agent.ChangedFiles())), m.mouseMode, tokens, status)
+	}
 	if summary := compactWorktreeSummary(m.worktree, w); summary != "" {
 		statusText = summary + " · " + statusText
 	}
@@ -2804,6 +3101,9 @@ func (m model) View() string {
 	if m.pendingApproval != nil {
 		parts = append(parts, styleBox.Width(dialogW).Render(approvalText(m.pendingApproval)))
 	}
+	if m.pendingWorkspace != nil {
+		parts = append(parts, styleBox.Width(dialogW).Render(workspaceApprovalText(m.pendingWorkspace)))
+	}
 	if m.commandsOpen {
 		parts = append(parts, styleBox.Width(dialogW).Render(commandsText()))
 	}
@@ -2815,6 +3115,20 @@ func (m model) View() string {
 	// Paint the complete frame so changing themes also changes the unused
 	// terminal canvas, not only the characters that happen to be present.
 	return paintSurface(styleRoot, w, l.height, frame)
+}
+
+func profileDisplay(profile string) string {
+	if strings.TrimSpace(profile) == "" {
+		return "profile: generic"
+	}
+	return "profile: " + profile
+}
+
+func dailyStageDisplay(a *agent.Agent) string {
+	if !a.DailyMode {
+		return "stage: —"
+	}
+	return "stage: " + string(a.DailyStageForDisplay())
 }
 
 func wrap(s string, width int) string {

@@ -63,7 +63,11 @@ func (r repoMap) Run(_ context.Context, argsJSON string) (string, error) {
 		in.MaxEntries = 500
 	}
 
-	root = filepath.Clean(resolveWorkspacePath(r.Workspace, root))
+	root, err := resolveWorkspacePathChecked(r.Workspace, root)
+	if err != nil {
+		return "", err
+	}
+	root = filepath.Clean(root)
 	st, err := os.Stat(root)
 	if err != nil {
 		return "", err

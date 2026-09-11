@@ -43,6 +43,75 @@ func TestCompatibilityClaimsCannotSatisfyRequirements(t *testing.T) {
 	}
 }
 
+func TestCompatibilityTerminalProjectionCompletesTask14Shape(t *testing.T) {
+	a := &Agent{CompatibilityMode: true}
+	a.RunState.reset("Refactor Add to use a private add helper, add a test, and run go test ./...")
+	a.RunState.addObservation("str_replace", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "updated"})
+	a.RunState.addObservation("str_replace", `{"path":"calc/calc_test.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "updated"})
+	a.RunState.addObservation("run_tests", `{}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "ok"})
+	if a.RunState.Verification != VerificationNotRun {
+		t.Fatalf("test setup unexpectedly projected verification: %s", a.RunState.Verification)
+	}
+	if !a.compatibilityTerminalComplete(func(Event) {}) || a.RunState.Phase != PhaseComplete || a.RunState.Verification != VerificationPassed {
+		t.Fatalf("terminal projection did not complete authoritative task: %+v", a.RunState)
+	}
+}
+
+func TestCompatibilityTerminalProjectionCompletesTask17Shape(t *testing.T) {
+	a := &Agent{CompatibilityMode: true}
+	a.RunState.reset("implement NormalizePair in a new file, add unit tests for both orderings, and run go test ./... successfully")
+	a.RunState.addObservation("write_file", `{"path":"calc/normalize.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "wrote"})
+	a.RunState.addObservation("write_file", `{"path":"calc/normalize_test.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "wrote"})
+	a.RunState.addObservation("run_tests", `{}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "ok"})
+	if !a.compatibilityTerminalComplete(func(Event) {}) || a.RunState.Phase != PhaseComplete {
+		t.Fatalf("task17-shaped evidence did not project completion: %+v", a.RunState)
+	}
+}
+
+func TestCompatibilityTerminalProjectionPreservesIncompleteAndFailedWork(t *testing.T) {
+	cases := []struct {
+		name  string
+		goal  string
+		setup func(*Agent)
+	}{
+		{name: "missing test creation", goal: "fix calc.go, add tests, and run go test ./...", setup: func(a *Agent) {
+			a.RunState.addObservation("str_replace", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "updated"})
+			a.RunState.addObservation("run_tests", `{}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "ok"})
+		}},
+		{name: "unresolved unrelated failure", goal: "add Version, add version_test.go, update README.md, and run go test ./...", setup: func(a *Agent) {
+			a.RunState.addObservation("str_replace", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "updated"})
+			a.RunState.addObservation("write_file", `{"path":"calc/version_test.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "wrote"})
+			a.RunState.addObservation("str_replace", `{"path":"README.md"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "updated"})
+			a.RunState.addObservation("run_tests", `{}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "ok"})
+			a.RunState.addObservation("complete_todo", `{}`, tools.ExecutionResult{Category: tools.FailureUnknown, Output: "todo not found"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Agent{CompatibilityMode: true}
+			a.RunState.reset(tc.goal)
+			tc.setup(a)
+			if a.compatibilityTerminalComplete(func(Event) {}) || a.RunState.Phase == PhaseComplete {
+				t.Fatalf("unsafe terminal projection completed: %+v", a.RunState)
+			}
+		})
+	}
+}
+
+func TestCompatibilityTerminalProjectionDoesNotStartPostflightWithAuthoritativeVerification(t *testing.T) {
+	checker := &scriptedTool{name: "run_tests"}
+	reg := tools.NewRegistry()
+	reg.Register(checker)
+	a := &Agent{CompatibilityMode: true, Tools: reg, Permissions: permissions.New(permissions.ModeAllow, t.TempDir()+"/permissions.json")}
+	a.RunState.reset("refactor Add, add a test, and run go test ./...")
+	a.RunState.addObservation("str_replace", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "updated"})
+	a.RunState.addObservation("str_replace", `{"path":"calc/calc_test.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "updated"})
+	a.RunState.addObservation("run_tests", `{}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "ok"})
+	if a.runCompatibilityPostflight(context.Background(), func(Event) {}) || len(checker.calls) != 0 {
+		t.Fatalf("postflight ran despite authoritative verification: calls=%d state=%+v", len(checker.calls), a.RunState)
+	}
+}
+
 func TestCompatibilityRelevantAndFullVerificationStayIndependent(t *testing.T) {
 	a := &Agent{CompatibilityMode: true}
 	a.RunState.reset("fix calc.go, run the relevant test, and go test ./...")

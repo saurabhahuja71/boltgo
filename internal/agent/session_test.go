@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/saurabhahuja71/agenterm/internal/config"
 	"github.com/saurabhahuja71/agenterm/internal/llm"
+	"github.com/saurabhahuja71/agenterm/internal/tools"
 )
 
 func TestExplicitSessionPathRoundTrip(t *testing.T) {
@@ -21,6 +25,41 @@ func TestExplicitSessionPathRoundTrip(t *testing.T) {
 	if len(got.History) != 2 || got.History[1].Content != "new" {
 		t.Fatalf("history = %#v", got.History)
 	}
+}
+
+func TestDailySessionPersistsFactualResumeSummary(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, ".bolt", "sessions", "latest.json")
+	want := &Agent{Cfg: configForTest(workspace), InferenceProfile: "local-coding-reproducible", History: []llm.Message{{Role: llm.RoleSystem, Content: "system"}}}
+	want.EnableDailyMode()
+	want.RunState.reset("implement and run go test ./...")
+	want.RunState.addObservation("write_file", `{"path":"calc.go"}`, tools.ExecutionResult{Category: tools.FailureSuccess, Output: "wrote"})
+	want.RunState.addObservation("run_tests", `{"command":"go test ./..."}`, tools.ExecutionResult{Category: tools.FailureCommand, Output: "FAIL: TestCalc"})
+	if _, err := want.SaveSessionPath(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Meta SessionMeta `json:"meta"`
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Meta.Mode != "Daily" || saved.Meta.Workspace != workspace || len(saved.Meta.ChangedFiles) != 1 || len(saved.Meta.OpenFailures) != 1 {
+		t.Fatalf("daily metadata incomplete: %+v", saved.Meta)
+	}
+	if !strings.Contains(saved.Meta.Summary, "command_failed") || saved.Meta.NextAction == "" {
+		t.Fatalf("summary is not factual/resumable: %+v", saved.Meta)
+	}
+}
+
+func configForTest(workspace string) config.Config {
+	cfg := config.Default()
+	cfg.Workspace = workspace
+	return cfg
 }
 
 func TestSessionRoundTripPreservesAgentRunState(t *testing.T) {
@@ -101,5 +140,30 @@ func TestWorkspaceSessionPathRejectsSymlinkedStore(t *testing.T) {
 	}
 	if _, err := WorkspaceSessionPath(workspace, "latest"); err == nil {
 		t.Fatal("expected symlinked session store rejection")
+	}
+}
+
+func TestDailyResumeMarksInFlightActionUnknownAndPreservesQueue(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, ".bolt", "sessions", "latest.json")
+	want := &Agent{Cfg: configForTest(workspace), History: []llm.Message{{Role: llm.RoleSystem, Content: "system"}}, PendingRequests: []string{"verify"}, PendingApprovals: []string{"write_file {\"path\":\"x\"}"}}
+	want.EnableDailyMode()
+	want.RunState.reset("edit x")
+	want.RunState.ProviderTurnInProgress = true
+	want.RunState.ToolInProgress = "write_file"
+	want.RunState.ToolArguments = `{"path":"x"}`
+	if _, err := want.SaveSessionPath(path); err != nil {
+		t.Fatal(err)
+	}
+	got := &Agent{Cfg: configForTest(workspace)}
+	got.EnableDailyMode()
+	if err := got.LoadSessionPath(path); err != nil {
+		t.Fatal(err)
+	}
+	if !got.SessionLoaded || !got.RunState.Interrupted || !got.RunState.UnknownToolOutcome || got.RunState.ProviderTurnInProgress {
+		t.Fatalf("resume state lost safety boundary: %+v loaded=%v", got.RunState, got.SessionLoaded)
+	}
+	if len(got.PendingRequests) != 1 || len(got.PendingApprovals) != 1 {
+		t.Fatalf("queued facts lost: requests=%v approvals=%v", got.PendingRequests, got.PendingApprovals)
 	}
 }

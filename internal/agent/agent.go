@@ -84,6 +84,17 @@ type Agent struct {
 	// CompatibilityMode enables deterministic requirement and verification
 	// guidance around the established legacy loop. It has no graph semantics.
 	CompatibilityMode bool
+	DailyMode         bool
+	DailyStage        DailyStage
+	InferenceProfile  string
+	InferenceOptions  llm.SamplingOptions
+	// PersistDaily is installed by CLI/TUI and writes only the workspace
+	// session. It is called at daily durability boundaries.
+	PersistDaily     func() error
+	ProviderState    llm.ProviderState
+	PendingRequests  []string
+	PendingApprovals []string
+	SessionLoaded    bool
 	// PlanMode: Grok-like plan first — no tools; model only outlines steps.
 	PlanMode    bool
 	Permissions *permissions.Manager
@@ -118,30 +129,80 @@ func (a *Agent) EnableCompatibilityMode() { a.CompatibilityMode = true }
 
 func (a *Agent) DisableCompatibilityMode() { a.CompatibilityMode = false }
 
+// SetInferenceProfile applies an explicitly validated provider profile. A
+// zero-value profile preserves the generic request path.
+func (a *Agent) SetInferenceProfile(name string, options llm.SamplingOptions) {
+	a.InferenceProfile = name
+	a.InferenceOptions = options
+}
+
+func (a *Agent) SetDailyPersistence(save func() error) { a.PersistDaily = save }
+
+func (a *Agent) DailyProviderStatus() string {
+	if !a.DailyMode {
+		return "provider status is available in daily mode only"
+	}
+	return "provider: " + dailyProviderState(a.ProviderState) + "\n" + a.FactualSummary()
+}
+
+func (a *Agent) persistDaily() {
+	if !a.DailyMode || a.PersistDaily == nil {
+		return
+	}
+	_ = a.PersistDaily()
+}
+
 func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 	e := cfg.Effective()
-	hist := []llm.Message{}
-	sys := strings.TrimSpace(e.SystemPrompt)
-	extra := workspaceHint(e.Workspace)
-	if rules := loadProjectRules(e.Workspace); rules != "" {
-		extra = extra + "\n\n" + rules
-	}
-	if sys != "" {
-		sys = sys + "\n\n" + extra
-		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: sys})
-	} else {
-		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: extra})
-	}
 	return &Agent{
 		Cfg:           e,
 		Client:        client,
 		Tools:         reg,
-		History:       hist,
+		History:       initialHistory(e),
 		MaxToolRounds: 8,
 		MaxIterations: 16,
 		MaxToolCalls:  24,
 		MaxRetries:    4,
 		Permissions:   permissions.New(permissions.Mode(e.PermissionMode), permissions.DefaultStorePath()),
+	}
+}
+
+func initialHistory(cfg config.Config) []llm.Message {
+	sys := strings.TrimSpace(cfg.SystemPrompt)
+	extra := workspaceHint(cfg.Workspace)
+	if rules := loadProjectRules(cfg.Workspace); rules != "" {
+		extra = extra + "\n\n" + rules
+	}
+	if sys != "" {
+		sys += "\n\n" + extra
+	}
+	return []llm.Message{{Role: llm.RoleSystem, Content: sysOrExtra(sys, extra)}}
+}
+
+func sysOrExtra(sys, extra string) string {
+	if strings.TrimSpace(sys) != "" {
+		return sys
+	}
+	return extra
+}
+
+// SwitchWorkspace starts a distinct workspace-scoped conversation. It keeps
+// provider, mode, limits, and permission policy, but discards the old
+// workspace's history, run state, approvals, and queued requests. Callers must
+// persist the old workspace before invoking this method.
+func (a *Agent) SwitchWorkspace(workspace string, reg *tools.Registry) {
+	a.Cfg.Workspace = workspace
+	a.Tools = reg
+	a.History = initialHistory(a.Cfg)
+	a.RunState = AgentRunState{}
+	a.Scheduler = nil
+	a.PlanMode = false
+	a.PendingApprovals = nil
+	a.PendingRequests = nil
+	a.SessionLoaded = false
+	a.ProviderState = llm.ProviderUnavailable
+	if a.DailyMode {
+		a.DailyStage = DailyInspect
 	}
 }
 
@@ -236,7 +297,19 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		a.Permissions = permissions.New(permissions.ModeAllow, permissions.DefaultStorePath())
 	}
 	a.CompactHistory()
-	a.RunState.reset(user)
+	if a.DailyMode && a.SessionLoaded {
+		// A resumed session is factual context, not a new task. Preserve its
+		// observations and unknown-action guard while allowing a fresh provider
+		// turn after reconstruction.
+		a.RunState.ProviderTurnInProgress = false
+		a.RunState.Interrupted = false
+		if a.RunState.Phase == PhaseBlocked {
+			a.RunState.Phase = PhasePlan
+		}
+		a.SessionLoaded = false
+	} else {
+		a.RunState.reset(user)
+	}
 	a.GoalProgress = nil
 	a.lastActionKey = ""
 	a.progressRevision = 0
@@ -246,6 +319,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	a.compatibilityClosureActive = false
 	a.compatibilityClosureTurnUsed = false
 	a.compatibilityMalformedToolMarkup = false
+	if a.DailyMode {
+		emit(Event{Kind: EventStatus, Text: "daily stage: inspect and plan; source mutations require approval"})
+	}
 	verificationRequested := false
 	if a.Scheduler != nil {
 		if _, ok, err := a.startGoalGraphNode(); err != nil {
@@ -349,6 +425,10 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		}
 		a.RunState.beginIteration()
 		if a.RunState.Iterations > maxIterations {
+			if a.compatibilityTerminalComplete(emit) {
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			if a.runCompatibilityPostflight(ctx, emit) {
 				emit(Event{Kind: EventDone})
 				return nil
@@ -378,7 +458,10 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: stateStatus(a.RunState.Phase)})
 
 		// Build request messages; after tools, add a non-persisted brief-answer nudge.
-		msgs := a.History
+		// The persisted history remains complete, but a model-facing request must
+		// fit the provider context window. This matters especially for S3, whose
+		// GPT-OSS context is smaller than the durable session can become.
+		msgs := a.modelHistoryForRequest()
 		control := llm.Message{Role: llm.RoleUser, Content: a.RunState.controlContext()}
 		msgs = append(append([]llm.Message{}, msgs...), control)
 		if a.Scheduler != nil {
@@ -410,9 +493,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 			Temperature: a.Cfg.Temperature,
 			MaxTokens:   a.Cfg.MaxTokens,
 		}
+		if a.InferenceProfile != "" {
+			req.Sampling = &a.InferenceOptions
+		}
 		// After tools: cooler sampling reduces rambling while preserving the
 		// configured completion budget for accurate provider-side telemetry.
-		if toolsUsed > 0 {
+		if toolsUsed > 0 && a.InferenceProfile == "" {
 			if req.Temperature <= 0 || req.Temperature > 0.3 {
 				req.Temperature = 0.2
 			}
@@ -470,8 +556,14 @@ Do not answer with only a markdown plan or shell snippets.`,
 		}
 
 		emit(Event{Kind: EventStatus, Text: fmt.Sprintf("calling %s (round %d)…", a.Cfg.Model, round+1)})
-		handler := &streamBridge{emit: emit, quiet: verificationRequested}
-		msg, err := a.Client.ChatStream(ctx, req, handler)
+		var msg llm.Message
+		var err error
+		if a.DailyMode {
+			msg, err = a.dailyChatStream(ctx, req, emit, verificationRequested)
+		} else {
+			handler := &streamBridge{emit: emit, quiet: verificationRequested}
+			msg, err = a.Client.ChatStream(ctx, req, handler)
+		}
 		if err != nil {
 			a.RunState.Phase = PhaseBlocked
 			if ctx.Err() != nil {
@@ -553,6 +645,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 				if toolsUsed == 0 && round == 0 {
 					a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "[agenterm] Your previous tool request used unsupported markup. Use the provided API tools and emit a structured tool call; do not print <function=...> or </tool_call>."})
 					continue
+				}
+				if a.compatibilityTerminalComplete(emit) {
+					emit(Event{Kind: EventDone})
+					return nil
 				}
 				a.RunState.Phase = PhaseBlocked
 				emit(Event{Kind: EventError, Text: "unsupported tool-call format; stopping safely"})
@@ -662,6 +758,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 		// A provider may emit a stale/ignored tool call even when the current
 		// request advertised no tools because a bound was reached.
 		if len(roundTools) == 0 {
+			if a.compatibilityTerminalComplete(emit) {
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			if a.runCompatibilityPostflight(ctx, emit) {
 				emit(Event{Kind: EventDone})
 				return nil
@@ -703,6 +803,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			name := tc.Function.Name
 			args := tc.Function.Arguments
+			if a.DailyMode {
+				a.RunState.ToolInProgress = name
+				a.RunState.ToolArguments = args
+				a.RunState.UnknownToolOutcome = true
+				a.persistDaily()
+			}
 			var result tools.ExecutionResult
 			actionKey := ""
 			repeatedAction := false
@@ -758,8 +864,15 @@ Do not answer with only a markdown plan or shell snippets.`,
 			} else {
 				level, capability := permissions.LevelForTool(name, args)
 				request := permissions.Request{Tool: name, Capability: capability, Level: level, Arguments: args}
+				if a.DailyMode && (name == "write_file" || name == "str_replace" || name == "git") {
+					emit(Event{Kind: EventStatus, Text: "daily checkpoint: proposed " + name + " " + compactStateText(args, 220)})
+				}
 				decision, prompt := a.Permissions.Check(request)
 				if prompt {
+					if a.DailyMode {
+						a.PendingApprovals = []string{name + " " + args}
+						a.persistDaily()
+					}
 					response := make(chan permissions.Decision, 1)
 					emit(Event{Kind: EventPermission, Tool: name, Text: args, Permission: &request, Decision: response})
 					select {
@@ -768,6 +881,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 						decision = permissions.Deny
 					}
 					decision = a.Permissions.Commit(request, decision)
+					if a.DailyMode {
+						a.PendingApprovals = nil
+						a.persistDaily()
+					}
 				}
 				if decision == permissions.Deny {
 					result = tools.ExecutionResult{Output: "error: permission denied", Category: tools.FailurePermissionDenied, PermissionDenied: true}
@@ -812,9 +929,18 @@ Do not answer with only a markdown plan or shell snippets.`,
 				a.lastActionRevision = a.progressRevision
 				a.lastActionClass = progress
 			}
+			if a.DailyMode {
+				a.RunState.UnknownToolOutcome = false
+				a.RunState.ToolInProgress = ""
+				a.RunState.ToolArguments = ""
+				a.persistDaily()
+			}
 			if result.Category != tools.FailureSuccess && !scopeRejected && !repeatedAction {
 				a.RunState.Retries++
 				emit(Event{Kind: EventStatus, Text: stateStatus(a.RunState.Phase)})
+			}
+			if a.DailyMode && (name == "write_file" || name == "str_replace" || name == "git" || name == "run_tests" || name == "run_shell") {
+				emit(Event{Kind: EventStatus, Text: a.DailyCheckpoint()})
 			}
 			out := result.Output
 			// Cap what the model sees so it does not re-dump huge listings into chat.
@@ -833,6 +959,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 	if a.compatibilityCanComplete() {
 		a.RunState.Phase = PhaseComplete
 		emit(Event{Kind: EventStatus, Text: "compatibility mode: authoritative requirements and verification gates satisfied"})
+		emit(Event{Kind: EventDone})
+		return nil
+	}
+	if a.compatibilityTerminalComplete(emit) {
 		emit(Event{Kind: EventDone})
 		return nil
 	}
@@ -1035,6 +1165,82 @@ func capToolResult(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n…[truncated for model; do not invent the rest]…"
+}
+
+const modelHistoryBudget = 18_000
+
+// modelHistoryForRequest returns a bounded view of the conversation. Session
+// persistence and the in-memory factual history remain lossless; only the
+// provider payload is compacted. The current user turn and its tool exchanges
+// are kept, while older raw conversation is represented by authoritative state.
+func (a *Agent) modelHistoryForRequest() []llm.Message {
+	history := a.History
+	if len(history) == 0 {
+		return nil
+	}
+	if messageChars(history) <= modelHistoryBudget {
+		return append([]llm.Message(nil), history...)
+	}
+
+	system := history[0]
+	latestUser := -1
+	for i := len(history) - 1; i >= 1; i-- {
+		if history[i].Role == llm.RoleUser {
+			latestUser = i
+			break
+		}
+	}
+	if latestUser < 0 {
+		return []llm.Message{system}
+	}
+
+	current := cloneAndCapMessages(history[latestUser:], modelHistoryBudget/2)
+	remaining := modelHistoryBudget - len(system.Content) - messageChars(current)
+	result := []llm.Message{system}
+	if remaining > 0 {
+		result = append(result, llm.Message{
+			Role:    llm.RoleUser,
+			Content: "[agenterm] Earlier conversation was compacted for the provider context window. Use the authoritative workspace observations and the current request; do not claim details that are not present below.\n" + capToolResult(a.FactualSummary(), min(remaining, 3_000)),
+		})
+	}
+	result = append(result, current...)
+	return result
+}
+
+func messageChars(messages []llm.Message) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Content) + len(message.Name) + len(message.ToolCallID)
+		for _, call := range message.ToolCalls {
+			total += len(call.ID) + len(call.Type) + len(call.Function.Name) + len(call.Function.Arguments)
+		}
+	}
+	return total
+}
+
+func cloneAndCapMessages(messages []llm.Message, budget int) []llm.Message {
+	result := make([]llm.Message, 0, len(messages))
+	used := 0
+	for _, message := range messages {
+		copyMessage := message
+		copyMessage.Content = capToolResult(copyMessage.Content, 3_000)
+		cost := messageChars([]llm.Message{copyMessage})
+		if used+cost > budget && len(result) > 0 {
+			// Keep the most recent exchange complete; an omitted old tool result is
+			// safer than sending an orphaned tool message to the provider.
+			continue
+		}
+		result = append(result, copyMessage)
+		used += cost
+	}
+	return result
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func toolURL(argsJSON string) string {

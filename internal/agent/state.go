@@ -53,6 +53,15 @@ type AgentRunState struct {
 	PostflightVerificationCalls     int
 	PostflightVerificationBudget    int
 	PostflightVerificationActivated bool
+	// ProviderTurnInProgress is persisted before a daily request. If it is
+	// still set on resume, the prior request was interrupted and is never
+	// replayed automatically.
+	ProviderTurnInProgress bool
+	Interrupted            bool
+	ProviderState          string
+	ToolInProgress         string
+	ToolArguments          string
+	UnknownToolOutcome     bool
 }
 
 type AcceptanceCriterion struct {
@@ -459,6 +468,12 @@ func verificationCriterionDescription(tool, args string) string {
 func (s *AgentRunState) controlContext() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[agenterm control state — private]\ngoal: %s\nacceptance_criteria: %s\ncompleted_criteria: %s\nphase: %s\niterations: %d\ntool_calls: %d\nverification: %s\n", s.OriginalGoal, s.AcceptanceCriteria, s.CompletedCriteria, s.Phase, s.Iterations, s.ToolCallsUsed, s.Verification)
+	if s.Interrupted {
+		b.WriteString("provider_turn: interrupted; reconstruct from observations before taking any new action.\n")
+	}
+	if s.UnknownToolOutcome {
+		fmt.Fprintf(&b, "unknown_action: %s %s; do not repeat it; inspect the workspace or wait for explicit user direction.\n", s.ToolInProgress, compactStateText(s.ToolArguments, 180))
+	}
 	if s.Plan != "" {
 		fmt.Fprintf(&b, "plan: %s\n", compactStateText(s.Plan, 360))
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,23 +23,25 @@ import (
 var (
 	// Release builds override this with -X main.version. Keep local/source
 	// builds aligned with the current published Bolt baseline as well.
-	version           = "1.1.28"
-	upgradeTimeout    = 10 * time.Minute
-	flagProvider      string
-	flagModel         string
-	flagBaseURL       string
-	flagAPIKey        string
-	flagConfig        string
-	flagNoMCP         bool
-	flagNoTools       bool
-	flagShell         bool
-	flagNoShell       bool
-	flagPing          bool
-	flagResume        bool
-	flagNoResume      bool
-	flagWorkspace     string
-	flagGoalGraph     bool
-	flagCompatibility bool
+	version              = "1.1.28"
+	upgradeTimeout       = 10 * time.Minute
+	flagProvider         string
+	flagModel            string
+	flagBaseURL          string
+	flagAPIKey           string
+	flagConfig           string
+	flagNoMCP            bool
+	flagNoTools          bool
+	flagShell            bool
+	flagNoShell          bool
+	flagPing             bool
+	flagResume           bool
+	flagNoResume         bool
+	flagWorkspace        string
+	flagGoalGraph        bool
+	flagCompatibility    bool
+	flagDaily            bool
+	flagInferenceProfile string
 )
 
 func main() {
@@ -64,7 +67,9 @@ func main() {
 	root.PersistentFlags().BoolVar(&flagPing, "ping", false, "check LLM endpoint and exit")
 	root.PersistentFlags().BoolVar(&flagResume, "resume", false, "explicitly resume the workspace session")
 	root.PersistentFlags().BoolVar(&flagNoResume, "no-resume", false, "explicitly start a fresh conversation")
+	root.PersistentFlags().StringVar(&flagInferenceProfile, "inference-profile", "", "opt-in inference profile (e.g. local-coding-reproducible)")
 	root.PersistentFlags().StringVarP(&flagWorkspace, "workspace", "p", "", "user workspace for all filesystem and shell tools (default: current directory)")
+	root.PersistentFlags().BoolVar(&flagDaily, "daily", false, "opt in to supervised daily coding mode")
 
 	var initForce bool
 	initCmd := &cobra.Command{
@@ -192,11 +197,20 @@ func resumeRequested() bool {
 	if flagNoResume {
 		return false
 	}
+	// S3 is the remote/shared model launcher. Do not accidentally replay a
+	// prior workspace conversation because a shell or wrapper exported the
+	// generic BOLT_RESUME setting. An explicit --resume still opts in.
+	if launcherName() == "bolt-s3" {
+		return false
+	}
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("BOLT_RESUME")))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
 func runHeadless(prompt string) error {
+	if flagDaily && flagGoalGraph {
+		return fmt.Errorf("--daily and --goal-graph are mutually exclusive; daily mode uses compatibility execution")
+	}
 	if flagGoalGraph && flagCompatibility {
 		return fmt.Errorf("--goal-graph and --compatibility are mutually exclusive")
 	}
@@ -234,13 +248,33 @@ func runHeadless(prompt string) error {
 	if flagNoTools {
 		cfg.EnableTools = false
 	}
+	if flagInferenceProfile != "" {
+		cfg.InferenceProfile = flagInferenceProfile
+	}
+	if flagDaily {
+		flagCompatibility = true
+		if isOllamaConfig(cfg.Effective()) {
+			cfg.InferenceProfile = "local-coding-reproducible"
+		}
+	}
 	if flagResume && flagNoResume {
 		return fmt.Errorf("--resume and --no-resume are mutually exclusive")
 	}
 	eff := cfg.Effective()
+	sampling, err := llm.ResolveSamplingProfile(eff.InferenceProfile)
+	if err != nil {
+		return err
+	}
+	if err := llm.ValidateSamplingProfile(context.Background(), eff.BaseURL, eff.Model, eff.InferenceProfile); err != nil {
+		return err
+	}
+	if eff.InferenceProfile != "" {
+		profileJSON, _ := json.Marshal(sampling)
+		fmt.Fprintf(os.Stderr, "inference profile: %s options=%s\n", eff.InferenceProfile, profileJSON)
+	}
 	// Bolt's headless exec mode has no approval surface; preserve boltpy's
 	// explicit exec behavior while the interactive TUI remains ASK by default.
-	if os.Getenv("BOLT_PERMISSION_MODE") == "" {
+	if os.Getenv("BOLT_PERMISSION_MODE") == "" && !flagDaily {
 		eff.PermissionMode = "allow"
 	}
 	client := llm.New(eff.BaseURL, eff.APIKey)
@@ -263,6 +297,11 @@ func runHeadless(prompt string) error {
 	}
 
 	ag := agent.New(eff, client, reg)
+	ag.SetInferenceProfile(eff.InferenceProfile, sampling)
+	if flagDaily {
+		ag.EnableDailyMode()
+		fmt.Fprintf(os.Stderr, "daily mode: enabled; stage=inspect; permission=%s; workspace=%s\n", eff.PermissionMode, eff.Workspace)
+	}
 	if flagCompatibility {
 		ag.EnableCompatibilityMode()
 		fmt.Fprintln(os.Stderr, "compatibility mode: enabled; legacy execution loop with deterministic verification guidance")
@@ -296,6 +335,12 @@ func runHeadless(prompt string) error {
 			fmt.Fprintf(os.Stderr, "resumed session %s\n", sessionPath)
 		}
 	}
+	if flagDaily && saveSession {
+		ag.SetDailyPersistence(func() error {
+			_, err := ag.SaveSessionPath(sessionPath)
+			return err
+		})
+	}
 	ctx := context.Background()
 	err = ag.RunUserMessage(ctx, prompt, func(event agent.Event) {
 		switch event.Kind {
@@ -311,16 +356,22 @@ func runHeadless(prompt string) error {
 			fmt.Fprintf(os.Stderr, "[%s]\n", event.Text)
 		case agent.EventError:
 			fmt.Fprintf(os.Stderr, "\n[error] %s\n", event.Text)
+			if flagDaily {
+				if handoff := ag.DailyHandoff(event.Text); handoff != "" {
+					fmt.Fprintf(os.Stderr, "\n[%s]\n", handoff)
+				}
+			}
 		case agent.EventPermission:
 			if event.Decision != nil {
 				event.Decision <- permissions.Deny
 			}
 		}
 	})
-	if err == nil {
-		if saveSession {
-			_, _ = ag.SaveSessionPath(sessionPath)
-		}
+	if flagDaily {
+		fmt.Fprintf(os.Stderr, "\n[%s]\n", ag.FactualSummary())
+	}
+	if saveSession {
+		_, _ = ag.SaveSessionPath(sessionPath)
 	}
 	return err
 }
@@ -362,11 +413,28 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if flagNoTools {
 		cfg.EnableTools = false
 	}
+	if flagInferenceProfile != "" {
+		cfg.InferenceProfile = flagInferenceProfile
+	}
+	if flagDaily && isOllamaConfig(cfg.Effective()) {
+		cfg.InferenceProfile = "local-coding-reproducible"
+	}
 	if flagResume && flagNoResume {
 		return fmt.Errorf("--resume and --no-resume are mutually exclusive")
 	}
 
 	eff := cfg.Effective()
+	sampling, err := llm.ResolveSamplingProfile(eff.InferenceProfile)
+	if err != nil {
+		return err
+	}
+	if err := llm.ValidateSamplingProfile(context.Background(), eff.BaseURL, eff.Model, eff.InferenceProfile); err != nil {
+		return err
+	}
+	if eff.InferenceProfile != "" {
+		profileJSON, _ := json.Marshal(sampling)
+		fmt.Fprintf(os.Stderr, "inference profile: %s options=%s\n", eff.InferenceProfile, profileJSON)
+	}
 	// CLI flags win over env/config for shell.
 	if flagShell {
 		eff.EnableShell = true
@@ -406,6 +474,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	ag := agent.New(eff, client, reg)
+	ag.SetInferenceProfile(eff.InferenceProfile, sampling)
+	if flagDaily {
+		ag.EnableDailyMode()
+	}
 
 	// Bolt sessions are opt-in: a normal launch is always a genuinely fresh history.
 	resume := resumeRequested()
@@ -422,6 +494,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "  resumed session %s\n", sessionPath)
 		}
 	}
+	if flagDaily && saveSession {
+		ag.SetDailyPersistence(func() error {
+			_, err := ag.SaveSessionPath(sessionPath)
+			return err
+		})
+	}
 
 	return tui.Run(tui.Deps{
 		Title:       "Bolt",
@@ -430,5 +508,13 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		Workspace:   eff.Workspace,
 		SessionPath: sessionPath,
 		SaveSession: saveSession,
+		Mode:        ag.ModeName(),
 	})
+}
+
+func isOllamaConfig(cfg config.Config) bool {
+	provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	base := strings.ToLower(strings.TrimSpace(cfg.BaseURL))
+	return strings.Contains(provider, "ollama") || strings.Contains(base, "ollama") ||
+		strings.Contains(base, ":11434") || strings.Contains(base, ":11435")
 }

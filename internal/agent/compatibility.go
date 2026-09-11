@@ -144,6 +144,19 @@ func (a *Agent) hasUnresolvedCompatibilityFailure() bool {
 	return len(a.RunState.Failures) > 0 && !a.RunState.lastObservationSuccess()
 }
 
+// compatibilityTerminalComplete performs the final compatibility projection
+// before a bounded terminal failure. It deliberately delegates to the
+// existing authoritative compatibility gate; it does not add evidence or
+// alter either canVerify or canComplete.
+func (a *Agent) compatibilityTerminalComplete(emit func(Event)) bool {
+	if !a.CompatibilityMode || a.Scheduler != nil || !a.compatibilityCanComplete() {
+		return false
+	}
+	a.RunState.Phase = PhaseComplete
+	emit(Event{Kind: EventStatus, Text: "compatibility mode: authoritative requirements and verification gates satisfied"})
+	return true
+}
+
 // runCompatibilityPostflight is a terminal read-only verification pass. It is
 // not a model turn and does not increment the normal model-action counter.
 func (a *Agent) runCompatibilityPostflight(ctx context.Context, emit func(Event)) bool {

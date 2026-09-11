@@ -205,11 +205,38 @@ type ChatRequest struct {
 	Tools    []Tool    `json:"tools,omitempty"`
 	// ToolChoice: "auto" | "none" | or {"type":"function","function":{"name":"..."}}
 	// Omit when empty. Helps Ollama/OpenAI skip tools for pure chat.
-	ToolChoice    any            `json:"tool_choice,omitempty"`
-	Temperature   float64        `json:"temperature,omitempty"`
-	MaxTokens     int            `json:"max_tokens,omitempty"`
-	Stream        bool           `json:"stream"`
-	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+	ToolChoice    any              `json:"tool_choice,omitempty"`
+	Temperature   float64          `json:"temperature,omitempty"`
+	MaxTokens     int              `json:"max_tokens,omitempty"`
+	Sampling      *SamplingOptions `json:"-"`
+	Stream        bool             `json:"stream"`
+	StreamOptions *StreamOptions   `json:"stream_options,omitempty"`
+}
+
+// MarshalJSON overlays explicit profile controls without changing the
+// historical request when Sampling is nil.
+func (r ChatRequest) MarshalJSON() ([]byte, error) {
+	type plain ChatRequest
+	base, err := json.Marshal(plain(r))
+	if err != nil || r.Sampling == nil {
+		return base, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(base, &fields); err != nil {
+		return nil, err
+	}
+	profile, err := json.Marshal(r.Sampling)
+	if err != nil {
+		return nil, err
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(profile, &options); err != nil {
+		return nil, err
+	}
+	for key, value := range options {
+		fields[key] = value
+	}
+	return json.Marshal(fields)
 }
 
 type StreamOptions struct {
