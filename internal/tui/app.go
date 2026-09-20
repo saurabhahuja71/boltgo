@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -206,6 +207,9 @@ func (m model) optionalPanelHeight(width int) int {
 	if m.pendingApproval != nil {
 		height += lipgloss.Height(styleBox.Width(max(10, width)).Render(approvalText(m.pendingApproval)))
 	}
+	if m.pendingQuestion != nil {
+		height += lipgloss.Height(styleBox.Width(max(10, width)).Render(interactiveQuestionText(m.pendingQuestion)))
+	}
 	if m.pendingWorkspace != nil {
 		height += lipgloss.Height(styleBox.Width(max(10, width)).Render(workspaceApprovalText(m.pendingWorkspace)))
 	}
@@ -308,6 +312,8 @@ type model struct {
 	tokenUsage       *llm.Usage
 	// pendingRequests contains canonical, unrendered user input in FIFO order.
 	pendingRequests      []string
+	pendingQuestion      *interactiveQuestion
+	questionAnswer       string
 	worktree             worktreeSummary
 	worktreeGeneration   uint64
 	worktreeRefreshAgain bool
@@ -324,6 +330,14 @@ const (
 type workspaceSwitchRequest struct {
 	path   string
 	reason string
+}
+
+// interactiveQuestion is separate from the normal chat queue. A question can
+// be answered while the provider is still closing its response; in that case
+// questionAnswer is handed directly to the next turn after cancellation.
+type interactiveQuestion struct {
+	text       string
+	customMode bool
 }
 
 // paintInterval is the minimum time between streaming viewport rebuilds.
@@ -406,6 +420,10 @@ func New(deps Deps) model {
 	ta.CharLimit = 0
 	ta.SetHeight(3)
 	ta.ShowLineNumbers = false
+	// Keep the insertion point visible even when the input is empty or the
+	// terminal's blink timing is unreliable. Arrow keys, Home/End, Backspace,
+	// and Delete remain textarea-native, so earlier words stay editable.
+	ta.Cursor.SetMode(cursor.CursorStatic)
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	applyTheme(theme)
@@ -662,8 +680,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingWorkspace != nil {
 			return m.handleWorkspaceSwitchKey(msg)
 		}
+		if m.pendingQuestion != nil && m.pendingQuestion.customMode && msg.String() == "esc" {
+			m.pendingQuestion = nil
+			m.ta.Placeholder = "Message…"
+			m.ta.Reset()
+			m.status = "ready"
+			m.relayout()
+			m.refreshViewport()
+			return m, nil
+		}
 		if m.pendingApproval != nil && isApprovalDecisionKey(msg) {
 			return m.handleApprovalKey(msg)
+		}
+		if m.pendingQuestion != nil && !m.pendingQuestion.customMode && isQuestionDecisionKey(msg) {
+			return m.handleQuestionKey(msg)
 		}
 		// Chat scroll keys — handle before the textarea so large answers are reachable.
 		if m.handleChatScrollKey(msg) {
@@ -895,6 +925,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, _ = m.deps.Agent.SaveSessionPath(m.deps.SessionPath)
 		}
 		m.refreshViewport()
+		if m.questionAnswer != "" {
+			answer := m.questionAnswer
+			m.questionAnswer = ""
+			return m.startTurn(answer)
+		}
 		if len(m.pendingRequests) > 0 {
 			return m.startNextQueued()
 		}
@@ -927,6 +962,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	trimmed := strings.TrimSpace(text)
 	lowerTrimmed := strings.ToLower(trimmed)
+	if m.pendingQuestion != nil {
+		return m.handleQuestionSubmit(trimmed)
+	}
 	if lowerTrimmed == "/workspace" || strings.HasPrefix(lowerTrimmed, "/workspace ") {
 		return m.handleWorkspaceCommand(text)
 	}
@@ -944,6 +982,100 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 		return m.handleSlash(text)
 	}
 	return m.startTurn(text)
+}
+
+func isQuestionDecisionKey(msg tea.KeyMsg) bool {
+	switch strings.ToLower(msg.String()) {
+	case "1", "2", "3", "y", "n", "enter", "esc":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m model) handleQuestionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "1", "y":
+		return m.handleQuestionSubmit("yes")
+	case "2", "n":
+		return m.handleQuestionSubmit("no")
+	case "3":
+		m.pendingQuestion.customMode = true
+		m.ta.Placeholder = "Custom answer…"
+		m.ta.Focus()
+		m.status = "custom answer · Enter submit · Esc cancel"
+		m.relayout()
+		m.refreshViewport()
+	case "esc":
+		m.pendingQuestion = nil
+		m.status = "ready"
+		m.relayout()
+		m.refreshViewport()
+	}
+	return m, nil
+}
+
+func (m model) handleQuestionSubmit(text string) (tea.Model, tea.Cmd) {
+	if m.pendingQuestion == nil {
+		return m, nil
+	}
+	answer := strings.TrimSpace(text)
+	if answer == "" {
+		return m, nil
+	}
+	if answer == "yes" || answer == "y" {
+		answer = "yes"
+	} else if answer == "no" || answer == "n" {
+		answer = "no"
+	}
+	m.pendingQuestion = nil
+	m.ta.Placeholder = "Message…"
+	m.ta.Reset()
+	m.relayout()
+	if m.busy {
+		// This is an answer to the active turn, not a later chat request. Stop
+		// the provider now and start the continuation as soon as its channel
+		// closes; never expose it as a normal queued request.
+		m.questionAnswer = answer
+		m.lines = append(m.lines, chatLine{role: "user", text: answer})
+		if m.cancel != nil {
+			m.cancel()
+		}
+		m.status = "submitting answer…"
+		m.refreshViewport()
+		return m, nil
+	}
+	return m.startTurn(answer)
+}
+
+func (m *model) detectInteractiveQuestion() {
+	if m.pendingQuestion != nil || m.turnFailed || m.stream == nil {
+		return
+	}
+	text := strings.TrimSpace(m.stream.String())
+	if !looksLikeInteractiveQuestion(text) {
+		return
+	}
+	m.pendingQuestion = &interactiveQuestion{text: text}
+	m.status = "answer required · 1 yes · 2 no · 3 custom"
+	m.relayout()
+}
+
+func looksLikeInteractiveQuestion(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" || !strings.HasSuffix(text, "?") {
+		return false
+	}
+	low := strings.ToLower(text)
+	for _, phrase := range []string{
+		"would you like", "do you want", "should i", "shall i", "can i", "could i",
+		"may i", "proceed", "continue", "please confirm", "what would you",
+	} {
+		if strings.Contains(low, phrase) {
+			return true
+		}
+	}
+	return len([]rune(text)) <= 180
 }
 
 func (m model) activeWorkspace() string {
@@ -1323,6 +1455,7 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 			m.upsertThinkingPlaceholder()
 		}
 		m.status = fmt.Sprintf("streaming… %s", spinnerFrame())
+		m.detectInteractiveQuestion()
 		return m, m.schedulePaint(false)
 
 	case agent.EventToolStart:
@@ -1399,6 +1532,7 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		return m, m.schedulePaint(true)
 
 	case agent.EventDone:
+		m.detectInteractiveQuestion()
 		m.pendingApproval = nil
 		m.approvalDecision = nil
 		m.clearThinkingPlaceholder()
@@ -2760,6 +2894,17 @@ func approvalText(r *permissions.Request) string {
 	return fmt.Sprintf("Approval required\nTool: %s\nAction: %s\nLevel: %s\n\n1 Allow once  2 Allow session  3 Allow permanently  4 Deny", r.Tool, r.Arguments, strings.ToUpper(string(r.Level)))
 }
 
+func interactiveQuestionText(q *interactiveQuestion) string {
+	if q == nil {
+		return "Agent needs your input"
+	}
+	choices := "1 Yes  2 No  3 Custom answer"
+	if q.customMode {
+		choices = "Custom answer · type below and press Enter · Esc cancel"
+	}
+	return "Agent needs your input\n\n" + q.text + "\n\n" + choices
+}
+
 func workspaceApprovalText(r *workspaceSwitchRequest) string {
 	if r == nil {
 		return "Workspace switch approval required"
@@ -2887,7 +3032,9 @@ func applyTextareaTheme(ta *textarea.Model, name string) {
 	base := lipgloss.NewStyle().Foreground(fg).Background(bg)
 	muted := lipgloss.NewStyle().Foreground(colorMuted).Background(bg)
 	prompt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Background(bg)
-	cursor := lipgloss.NewStyle().Foreground(colorAccent).Background(bg)
+	// A contrasting block cursor remains visible at end-of-input (where the
+	// cursor is rendered over a space) as well as over existing text.
+	cursor := lipgloss.NewStyle().Foreground(bg).Background(colorAccent)
 	for _, style := range []*textarea.Style{&ta.FocusedStyle, &ta.BlurredStyle} {
 		style.Base = base
 		style.CursorLine = lipgloss.NewStyle().Background(bg)
@@ -3126,10 +3273,12 @@ func (m model) View() string {
 	// Prompt-like input: no rounded/boxed frame.
 	input := trimANSIHorizontalPadding(m.ta.View())
 	parts := []string{styleHeader.Render(truncateCells(m.deps.Title+" · "+m.deps.Summary+" · /help", w)), body}
-	parts = append(parts, statusLine)
 	dialogW := max(10, w)
 	if m.pendingApproval != nil {
 		parts = append(parts, styleBox.Width(dialogW).Render(approvalText(m.pendingApproval)))
+	}
+	if m.pendingQuestion != nil {
+		parts = append(parts, styleBox.Width(dialogW).Render(interactiveQuestionText(m.pendingQuestion)))
 	}
 	if m.pendingWorkspace != nil {
 		parts = append(parts, styleBox.Width(dialogW).Render(workspaceApprovalText(m.pendingWorkspace)))
@@ -3140,7 +3289,10 @@ func (m model) View() string {
 	if m.modelPick != nil {
 		parts = append(parts, m.modelPickerView(dialogW+2))
 	}
-	parts = append(parts, cwdLine, input, help)
+	// Keep the live connection/model status as the final terminal row. This
+	// makes provider connectivity and token state visible without competing
+	// with the editable prompt or getting lost above a modal panel.
+	parts = append(parts, cwdLine, input, help, statusLine)
 	frame := fitFrameHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), l.height)
 	// Paint the complete frame so changing themes also changes the unused
 	// terminal canvas, not only the characters that happen to be present.

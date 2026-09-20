@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -138,6 +139,43 @@ func TestApprovalEventRendersChoicesAndRoutesDecision(t *testing.T) {
 	got := <-response
 	if got != permissions.AllowSession || result.(*model).pendingApproval != nil {
 		t.Fatalf("approval result=%q", got)
+	}
+}
+
+func TestInteractiveQuestionRendersChoicesAndDoesNotQueueAnswer(t *testing.T) {
+	m := testModel(t)
+	m.busy = true
+	cancelled := false
+	m.cancel = func() { cancelled = true }
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: "Cleanup requires force-removing untagged images. Proceed?"})
+	view := m.View()
+	for _, want := range []string{"Agent needs your input", "1 Yes", "2 No", "3 Custom answer"} {
+		if !containsText(view, want) {
+			t.Fatalf("question UI missing %q: %s", want, view)
+		}
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m = updated.(model)
+	if !cancelled || m.questionAnswer != "yes" || len(m.pendingRequests) != 0 || m.pendingQuestion != nil {
+		t.Fatalf("question answer was not handled immediately: cancelled=%v answer=%q queue=%#v question=%v", cancelled, m.questionAnswer, m.pendingRequests, m.pendingQuestion)
+	}
+}
+
+func TestInteractiveQuestionCustomAnswerMode(t *testing.T) {
+	m := testModel(t)
+	m.busy = false
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: "Which cleanup policy should I use?"})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	m = updated.(model)
+	if m.pendingQuestion == nil || !m.pendingQuestion.customMode || m.ta.Placeholder != "Custom answer…" {
+		t.Fatal("custom answer mode was not opened")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("keep only tagged images")})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.pendingQuestion != nil || m.pendingRequests != nil {
+		t.Fatalf("custom answer was not submitted: question=%v queue=%#v", m.pendingQuestion, m.pendingRequests)
 	}
 }
 
@@ -1020,6 +1058,21 @@ func TestInputUsesOnePromptMarker(t *testing.T) {
 	m.ta.Reset()
 	if got := strings.Count(m.ta.View(), "›"); got != 1 {
 		t.Fatalf("reset input rendered %d prompt markers, want 1", got)
+	}
+}
+
+func TestInputUsesVisibleStaticCursor(t *testing.T) {
+	m := testModel(t)
+	if got := m.ta.Cursor.Mode(); got != cursor.CursorStatic {
+		t.Fatalf("cursor mode=%v, want static", got)
+	}
+	m.ta.SetValue("edit these words")
+	m.ta.CursorStart()
+	if m.ta.Value() != "edit these words" {
+		t.Fatal("textarea value changed while moving the cursor")
+	}
+	if !strings.Contains(m.ta.View(), "edit") {
+		t.Fatal("textarea did not render populated editable input")
 	}
 }
 

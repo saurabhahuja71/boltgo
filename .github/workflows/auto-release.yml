@@ -1,0 +1,84 @@
+name: Automatic master release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.25.x"
+
+concurrency:
+  group: automatic-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish the next release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Compute next patch release
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest="$(git tag --list 'v[0-9]*' --sort=-version:refname | head -n1)"
+          if [[ -z "$latest" ]]; then
+            latest="v0.0.0"
+          fi
+          version="${latest#v}"
+          IFS=. read -r major minor patch <<< "$version"
+          next="v${major}.${minor}.$((patch + 1))"
+          while git rev-parse -q --verify "refs/tags/$next" >/dev/null; do
+            patch=$((patch + 1))
+            next="v${major}.${minor}.${patch}"
+          done
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+          echo "version=${next#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          build() {
+            local goos=$1 goarch=$2 ext=""
+            [[ "$goos" == windows ]] && ext=".exe"
+            local out="dist/agenterm-${goos}-${goarch}${ext}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath \
+              -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" \
+              -o "$out" ./cmd/agenterm
+            (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
+          }
+          build linux amd64
+          build linux arm64
+          build darwin amd64
+          build darwin arm64
+          build windows amd64
+
+      - name: Tag and publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+          gh release create "$TAG" dist/* \
+            --title "agenterm $TAG" \
+            --generate-notes

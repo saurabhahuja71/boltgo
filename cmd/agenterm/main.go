@@ -23,7 +23,7 @@ import (
 var (
 	// Release builds override this with -X main.version. Keep local/source
 	// builds aligned with the current published Bolt baseline as well.
-	version              = "1.1.28"
+	version              = "1.1.38"
 	upgradeTimeout       = 10 * time.Minute
 	flagProvider         string
 	flagModel            string
