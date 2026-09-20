@@ -31,7 +31,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Compute next patch release
+      - name: Compute next minor release
         id: version
         shell: bash
         run: |
@@ -42,10 +42,10 @@ jobs:
           fi
           version="${latest#v}"
           IFS=. read -r major minor patch <<< "$version"
-          next="v${major}.${minor}.$((patch + 1))"
+          next="v${major}.$((minor + 1)).0"
           while git rev-parse -q --verify "refs/tags/$next" >/dev/null; do
-            patch=$((patch + 1))
-            next="v${major}.${minor}.${patch}"
+            minor=$((minor + 1))
+            next="v${major}.${minor}.0"
           done
           echo "tag=$next" >> "$GITHUB_OUTPUT"
           echo "version=${next#v}" >> "$GITHUB_OUTPUT"
