@@ -11,6 +11,16 @@ import (
 	"testing"
 )
 
+func TestChatRequestMarshalsChatTemplateKwargs(t *testing.T) {
+	b, err := json.Marshal(ChatRequest{Model: "qwen3", ChatTemplateKwargs: map[string]any{"enable_thinking": false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) == "" || !strings.Contains(string(b), `"chat_template_kwargs":{"enable_thinking":false}`) {
+		t.Fatalf("request omitted chat template kwargs: %s", b)
+	}
+}
+
 func TestListModelsDistinguishesUnsupportedFromProviderFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

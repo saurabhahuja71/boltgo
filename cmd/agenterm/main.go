@@ -171,7 +171,7 @@ func applyLauncherPreset(cfg *config.Config, launcher string) {
 		cfg.Model = envOr("BOLT_S1_MODEL", "qwen3-coder:latest")
 	case "bolt-s2":
 		cfg.Provider = "custom"
-		cfg.BaseURL = envOr("BOLT_S2_BASE_URL", envOr("SGLANG_HOST", "http://127.0.0.1:30002")+"/v1")
+		cfg.BaseURL = envOr("BOLT_S2_BASE_URL", sglangLocalURL("SGLANG2_LOCAL_PORT", "30002"))
 		cfg.APIKey = envOr("BOLT_S2_API_KEY", "sglang")
 		cfg.Model = envOr("BOLT_S2_MODEL", envOr("SGLANG_DEFAULT_MODEL", "Darwin-9B-Opus"))
 		cfg.PermissionMode = "allow"
@@ -181,7 +181,12 @@ func applyLauncherPreset(cfg *config.Config, launcher string) {
 		cfg.APIKey = envOr("BOLT_S3_API_KEY", "sglang")
 		cfg.Model = envOr("BOLT_S3_MODEL", envOr("SGLANG3_MODEL", "/sglang-data/models/gpt-oss-120b"))
 		cfg.PermissionMode = "allow"
+		cfg.DisableThinking = true
 	}
+}
+
+func sglangLocalURL(portKey, fallbackPort string) string {
+	return "http://127.0.0.1:" + envOr(portKey, fallbackPort) + "/v1"
 }
 
 func envOr(key, fallback string) string {

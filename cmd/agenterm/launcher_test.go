@@ -23,6 +23,22 @@ func TestLauncherPresetsShareOneRuntime(t *testing.T) {
 	}
 }
 
+func TestLauncherPresetsUseDedicatedSGLangSettings(t *testing.T) {
+	t.Setenv("SGLANG_HOST", "http://127.0.0.1:30000")
+	t.Setenv("SGLANG2_LOCAL_PORT", "30002")
+	cfg := config.Default()
+	applyLauncherPreset(&cfg, "bolt-s2")
+	if cfg.BaseURL != "http://127.0.0.1:30002/v1" {
+		t.Fatalf("bolt-s2 BaseURL = %q, want dedicated local port", cfg.BaseURL)
+	}
+
+	cfg = config.Default()
+	applyLauncherPreset(&cfg, "bolt-s3")
+	if !cfg.DisableThinking {
+		t.Fatal("bolt-s3 must disable Qwen3 thinking-only responses")
+	}
+}
+
 func TestResumeRequestedPrecedence(t *testing.T) {
 	oldResume, oldNoResume := flagResume, flagNoResume
 	oldArg := os.Args[0]

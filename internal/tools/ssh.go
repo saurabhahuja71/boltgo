@@ -16,7 +16,7 @@ type sshExecute struct{}
 
 func (sshExecute) Name() string { return "ssh_execute" }
 func (sshExecute) Description() string {
-	return "Execute a literal command on an SSH config alias (for example podman8 or podman9). Before using this, prefer run_shell for kubectl, watch, logs, and other commands that should run in the current shell; ssh_execute checks the current hostname and kubectl context and runs locally when the target is already local."
+	return "Execute a literal command on an SSH config alias (for example podman8 or podman9). Docker/Podman image-list commands are run with non-interactive sudo so the result is from root storage. Before using this, prefer run_shell for kubectl, watch, logs, and other commands that should run in the current shell; ssh_execute checks the current hostname and kubectl context and runs locally when the target is already local."
 }
 func (sshExecute) Schema() map[string]any {
 	return map[string]any{"type": "object", "required": []string{"host", "command"}, "additionalProperties": false, "properties": map[string]any{
@@ -40,6 +40,7 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 	if in.Timeout <= 0 {
 		in.Timeout = 30
 	}
+	in.Command = rootContainerImageCommand(in.Command)
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(in.Timeout*float64(time.Second)))
 	defer cancel()
 	config := os.Getenv("SSH_CONFIG_PATH")
@@ -72,6 +73,22 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 		return string(out), fmt.Errorf("ssh failed: %w", err)
 	}
 	return string(out), nil
+}
+
+// rootContainerImageCommand makes the common image-inventory request
+// deterministic on hosts where the SSH account is an unprivileged user and
+// Podman/Docker is configured with root-owned storage. It leaves all other
+// commands untouched.
+func rootContainerImageCommand(command string) string {
+	trimmed := strings.TrimSpace(command)
+	fields := strings.Fields(trimmed)
+	if len(fields) < 2 || (fields[0] != "docker" && fields[0] != "podman") || fields[1] != "images" {
+		return command
+	}
+	if fields[0] == "sudo" || strings.HasPrefix(trimmed, "sudo ") {
+		return command
+	}
+	return "sudo -n " + trimmed
 }
 
 type executionContext struct {

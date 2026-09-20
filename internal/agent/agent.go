@@ -497,6 +497,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 			Temperature: a.Cfg.Temperature,
 			MaxTokens:   a.Cfg.MaxTokens,
 		}
+		if a.Cfg.DisableThinking {
+			req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+		}
 		if a.InferenceProfile != "" {
 			req.Sampling = &a.InferenceOptions
 		}

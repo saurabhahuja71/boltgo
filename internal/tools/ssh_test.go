@@ -28,3 +28,18 @@ func TestNormalizeHostAndAuthenticationFailure(t *testing.T) {
 		t.Fatal("timeout is not an authentication failure")
 	}
 }
+
+func TestRootContainerImageCommand(t *testing.T) {
+	for _, tt := range []struct {
+		in, want string
+	}{
+		{"docker images", "sudo -n docker images"},
+		{"podman images -a", "sudo -n podman images -a"},
+		{"sudo docker images", "sudo docker images"},
+		{"docker ps", "docker ps"},
+	} {
+		if got := rootContainerImageCommand(tt.in); got != tt.want {
+			t.Fatalf("rootContainerImageCommand(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

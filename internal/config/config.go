@@ -44,6 +44,8 @@ type Config struct {
 	MaxTokens int `toml:"max_tokens"`
 	// InferenceProfile is opt-in; empty preserves the generic provider payload.
 	InferenceProfile string `toml:"inference_profile"`
+	// DisableThinking asks compatible chat templates to return the visible answer.
+	DisableThinking bool `toml:"disable_thinking"`
 
 	// EnableTools allows function/tool calling when the model supports it.
 	EnableTools bool `toml:"enable_tools"`
