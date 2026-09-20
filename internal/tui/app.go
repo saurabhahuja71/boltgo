@@ -809,7 +809,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if llm.IsModelDiscoveryUnsupported(msg.err) {
 				m.lines = append(m.lines, chatLine{
 					role: "system",
-					text: "model discovery is not supported by this provider\ncurrent: " + m.deps.Agent.Cfg.Model + "\nusage: /model <name>",
+					text: "Model discovery is not supported by this provider.\ncurrent: " + m.deps.Agent.Cfg.Model + "\nusage: /model <name>",
 				})
 				m.refreshViewport()
 				return m, nil

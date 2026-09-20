@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -10,10 +12,12 @@ import (
 	"github.com/saurabhahuja71/agenterm/internal/llm"
 	"github.com/saurabhahuja71/agenterm/internal/permissions"
 	"github.com/saurabhahuja71/agenterm/internal/tools"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -1270,8 +1274,43 @@ func TestUnsupportedModelDiscoveryIsNonFatalForListing(t *testing.T) {
 	if m.modelDiscoveryLoading || m.modelPick != nil || !m.ta.Focused() {
 		t.Fatalf("unsupported discovery did not restore prompt: loading=%v picker=%v focused=%v", m.modelDiscoveryLoading, m.modelPick, m.ta.Focused())
 	}
-	if !containsText(m.lines[len(m.lines)-1].text, "model discovery is not supported") {
+	if m.lines[len(m.lines)-1].text != "Model discovery is not supported by this provider.\ncurrent: "+m.deps.Agent.Cfg.Model+"\nusage: /model <name>" {
 		t.Fatalf("unsupported discovery was reported as an unrelated failure: %q", m.lines[len(m.lines)-1].text)
+	}
+}
+
+func TestExplicitModelSwitchUsesLatestModelForCompletion(t *testing.T) {
+	var models []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		var request llm.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		models = append(models, request.Model)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer server.Close()
+	cfg := config.Default()
+	cfg.Provider = "custom"
+	cfg.BaseURL = server.URL
+	ag := agent.New(cfg, llm.New(server.URL, "test"), tools.DefaultBuiltins(false))
+	m := New(Deps{Title: "Bolt", Summary: "test", Agent: ag})
+	for _, name := range []string{"model-a", "model-b"} {
+		updated, cmd := m.handleSlash("/model " + name)
+		if cmd != nil {
+			t.Fatalf("model switch returned command for %q", name)
+		}
+		m = updated.(model)
+		if _, err := ag.Client.Chat(context.Background(), llm.ChatRequest{Model: ag.Cfg.Model}); err != nil {
+			t.Fatalf("completion for %q: %v", name, err)
+		}
+	}
+	if !reflect.DeepEqual(models, []string{"model-a", "model-b"}) {
+		t.Fatalf("completion models=%v", models)
 	}
 }
 

@@ -10,18 +10,37 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 // Client talks to any OpenAI-compatible Chat Completions API
 // (Ollama, xAI, OpenAI, vLLM, LocalAI, …).
 type Client struct {
-	BaseURL    string
-	APIKey     string
-	HTTPClient *http.Client
+	BaseURL                  string
+	APIKey                   string
+	HTTPClient               *http.Client
+	modelDiscoveryCapability atomic.Uint32
 }
 
 func New(baseURL, apiKey string) *Client {
+	return NewWithModelDiscoveryCapability(baseURL, apiKey, ModelDiscoveryCapabilityUnknown)
+}
+
+// ModelDiscoveryCapability describes whether the provider exposes the
+// optional OpenAI-compatible GET /models catalog.
+type ModelDiscoveryCapability uint8
+
+const (
+	ModelDiscoveryCapabilityUnknown ModelDiscoveryCapability = iota
+	ModelDiscoveryCapabilitySupported
+	ModelDiscoveryCapabilityUnsupported
+)
+
+// NewWithModelDiscoveryCapability constructs a client with an explicitly
+// configured model-catalog capability. Unknown keeps the existing behavior:
+// the first discovery request determines whether the provider supports it.
+func NewWithModelDiscoveryCapability(baseURL, apiKey string, capability ModelDiscoveryCapability) *Client {
 	// Streaming has no overall Timeout (models can load for minutes), but we
 	// must bound time-to-first-byte so a wedged Ollama does not hang forever.
 	var transport http.RoundTripper
@@ -37,7 +56,7 @@ func New(baseURL, apiKey string) *Client {
 			IdleConnTimeout:       90 * time.Second,
 		}
 	}
-	return &Client{
+	client := &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		HTTPClient: &http.Client{
@@ -45,6 +64,14 @@ func New(baseURL, apiKey string) *Client {
 			Transport: transport,
 		},
 	}
+	client.modelDiscoveryCapability.Store(uint32(capability))
+	return client
+}
+
+// SupportsModelDiscovery reports the configured capability. An unknown
+// capability remains potentially supported and is resolved by ListModels.
+func (c *Client) SupportsModelDiscovery() bool {
+	return ModelDiscoveryCapability(c.modelDiscoveryCapability.Load()) != ModelDiscoveryCapabilityUnsupported
 }
 
 type Role string
@@ -624,10 +651,7 @@ type ModelDiscoveryError struct {
 }
 
 func (e *ModelDiscoveryError) Error() string {
-	if e.Detail == "" {
-		return "model discovery is not supported"
-	}
-	return e.Detail
+	return "model discovery is not supported by this provider"
 }
 
 func IsModelDiscoveryUnsupported(err error) bool {
@@ -637,6 +661,9 @@ func IsModelDiscoveryUnsupported(err error) bool {
 
 // ListModels returns model ids from GET {base}/models (Ollama / OpenAI-compatible).
 func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	if !c.SupportsModelDiscovery() {
+		return nil, &ModelDiscoveryError{}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/models", nil)
 	if err != nil {
 		return nil, err
@@ -657,14 +684,14 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	if resp.StatusCode >= 300 {
 		detail := strings.TrimSpace(string(body))
 		low := strings.ToLower(detail)
-		unsupportedDetail := resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden &&
+		// Capability is established by an explicit provider response, not by
+		// an HTTP status alone. Do not soften auth or server failures.
+		unsupportedResponse := resp.StatusCode >= 400 && resp.StatusCode < 500 &&
+			resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden &&
 			(strings.Contains(low, "not supported") || strings.Contains(low, "not implemented"))
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed ||
-			resp.StatusCode == http.StatusNotImplemented || unsupportedDetail {
-			return nil, &ModelDiscoveryError{
-				StatusCode: resp.StatusCode,
-				Detail:     fmt.Sprintf("list models %s: %s", resp.Status, detail),
-			}
+		if unsupportedResponse {
+			c.modelDiscoveryCapability.Store(uint32(ModelDiscoveryCapabilityUnsupported))
+			return nil, &ModelDiscoveryError{StatusCode: resp.StatusCode, Detail: detail}
 		}
 		return nil, fmt.Errorf("list models %s: %s", resp.Status, detail)
 	}
@@ -699,6 +726,7 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 		seen[id] = struct{}{}
 		out = append(out, id)
 	}
+	c.modelDiscoveryCapability.Store(uint32(ModelDiscoveryCapabilitySupported))
 	return out, nil
 }
 

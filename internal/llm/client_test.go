@@ -15,12 +15,14 @@ func TestListModelsDistinguishesUnsupportedFromProviderFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		status      int
+		body        string
 		unsupported bool
 	}{
 		{name: "success", status: http.StatusOK},
-		{name: "not found", status: http.StatusNotFound, unsupported: true},
-		{name: "method not allowed", status: http.StatusMethodNotAllowed, unsupported: true},
-		{name: "authentication", status: http.StatusUnauthorized},
+		{name: "not found is a request failure", status: http.StatusNotFound, body: "endpoint missing"},
+		{name: "method not allowed is a request failure", status: http.StatusMethodNotAllowed, body: "method not allowed"},
+		{name: "explicit unsupported response", status: http.StatusMethodNotAllowed, body: "GET not supported for requested URI", unsupported: true},
+		{name: "authentication", status: http.StatusUnauthorized, body: "not supported for this token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,10 +30,11 @@ func TestListModelsDistinguishesUnsupportedFromProviderFailures(t *testing.T) {
 					_, _ = io.WriteString(w, `{"data":[{"id":"foo"}]}`)
 					return
 				}
-				http.Error(w, "provider response", tc.status)
+				http.Error(w, tc.body, tc.status)
 			}))
 			defer server.Close()
-			ids, err := (&Client{BaseURL: server.URL}).ListModels(context.Background())
+			client := New(server.URL, "")
+			ids, err := client.ListModels(context.Background())
 			if tc.status == http.StatusOK {
 				if err != nil || len(ids) != 1 || ids[0] != "foo" {
 					t.Fatalf("successful discovery: ids=%v err=%v", ids, err)
@@ -40,6 +43,9 @@ func TestListModelsDistinguishesUnsupportedFromProviderFailures(t *testing.T) {
 			}
 			if err == nil || IsModelDiscoveryUnsupported(err) != tc.unsupported {
 				t.Fatalf("status %d: err=%v unsupported=%v", tc.status, err, IsModelDiscoveryUnsupported(err))
+			}
+			if tc.unsupported && client.SupportsModelDiscovery() {
+				t.Fatal("explicit unsupported response did not update capability")
 			}
 		})
 	}
@@ -50,9 +56,26 @@ func TestListModelsDistinguishesUnsupportedFromProviderFailures(t *testing.T) {
 	}
 }
 
+func TestConfiguredUnsupportedModelDiscoveryMakesNoRequest(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := NewWithModelDiscoveryCapability(server.URL, "", ModelDiscoveryCapabilityUnsupported)
+	if client.SupportsModelDiscovery() {
+		t.Fatal("unsupported capability reported as supported")
+	}
+	_, err := client.ListModels(context.Background())
+	if !IsModelDiscoveryUnsupported(err) || requests != 0 {
+		t.Fatalf("configured unsupported capability: err=%v requests=%d", err, requests)
+	}
+}
+
 func TestDailyReadinessAcceptsProviderWithoutModelCatalog(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not implemented", http.StatusNotImplemented)
+		http.Error(w, "GET not implemented for this provider", http.StatusMethodNotAllowed)
 	}))
 	defer server.Close()
 	readiness, err := (&Client{BaseURL: server.URL}).DailyReadiness(context.Background(), "foo")
@@ -87,6 +110,22 @@ func TestExplicitModelIsSentToCompletionAndProviderRejectionSurfaces(t *testing.
 	var discoveryErr *ModelDiscoveryError
 	if errors.As(err, &discoveryErr) {
 		t.Fatalf("completion rejection was misclassified as discovery: %v", err)
+	}
+}
+
+func TestActualCompletionAuthAndNetworkFailuresRemainFailures(t *testing.T) {
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	_, err := New(authServer.URL, "").Chat(context.Background(), ChatRequest{Model: "foo"})
+	authServer.Close()
+	if err == nil || ProviderErrorClassOf(err) != ProviderAuthentication {
+		t.Fatalf("authentication failure classification=%q err=%v", ProviderErrorClassOf(err), err)
+	}
+
+	_, err = New("http://127.0.0.1:1", "").Chat(context.Background(), ChatRequest{Model: "foo"})
+	if err == nil || ProviderErrorClassOf(err) == "" || ProviderErrorClassOf(err) == ProviderModelUnavailable {
+		t.Fatalf("network failure classification=%q err=%v", ProviderErrorClassOf(err), err)
 	}
 }
 
