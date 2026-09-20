@@ -1236,6 +1236,55 @@ func TestModelDiscoveryFailureRestoresPrompt(t *testing.T) {
 	}
 }
 
+func TestExplicitModelSelectionDoesNotDiscover(t *testing.T) {
+	var modelsRequests int
+	m, server := modelWithHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/models") {
+			modelsRequests++
+		}
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	updated, cmd := m.handleSlash("/model @cf/zai-org/glm-4.7-flash")
+	m = updated.(model)
+	if cmd != nil || m.deps.Agent.Cfg.Model != "@cf/zai-org/glm-4.7-flash" {
+		t.Fatalf("explicit model was not accepted: cmd=%v model=%q", cmd != nil, m.deps.Agent.Cfg.Model)
+	}
+	if m.modelSelectionSource != modelSelectionExplicit || modelsRequests != 0 {
+		t.Fatalf("selection source/request mismatch: source=%q GET /models=%d", m.modelSelectionSource, modelsRequests)
+	}
+}
+
+func TestUnsupportedModelDiscoveryIsNonFatalForListing(t *testing.T) {
+	m, server := modelWithHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "GET not supported for requested URI", http.StatusMethodNotAllowed)
+	}))
+	defer server.Close()
+
+	updated, cmd := m.handleSlash("/model list")
+	m = updated.(model)
+	msg := cmd()
+	updated, _ = m.Update(msg)
+	m = updated.(model)
+	if m.modelDiscoveryLoading || m.modelPick != nil || !m.ta.Focused() {
+		t.Fatalf("unsupported discovery did not restore prompt: loading=%v picker=%v focused=%v", m.modelDiscoveryLoading, m.modelPick, m.ta.Focused())
+	}
+	if !containsText(m.lines[len(m.lines)-1].text, "model discovery is not supported") {
+		t.Fatalf("unsupported discovery was reported as an unrelated failure: %q", m.lines[len(m.lines)-1].text)
+	}
+}
+
+func TestEmptyModelSelectionRemainsInvalid(t *testing.T) {
+	m := testModel(t)
+	original := m.deps.Agent.Cfg.Model
+	updated, cmd := m.handleModelCmd([]string{"/model", ""})
+	m = updated
+	if cmd != nil || m.deps.Agent.Cfg.Model != original || !containsText(transcriptText(m), "usage: /model <name>") {
+		t.Fatalf("empty model command was accepted: cmd=%v model=%q transcript=%q", cmd != nil, m.deps.Agent.Cfg.Model, transcriptText(m))
+	}
+}
+
 func TestCancelledModelDiscoveryIgnoresLateResult(t *testing.T) {
 	started := make(chan struct{})
 	m, server := modelWithHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

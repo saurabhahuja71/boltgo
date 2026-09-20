@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -614,6 +615,26 @@ type modelsListResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// ModelDiscoveryError identifies a provider that does not implement the
+// optional OpenAI-compatible model catalog. An explicit model can still be
+// used when the provider accepts chat completions without exposing /models.
+type ModelDiscoveryError struct {
+	StatusCode int
+	Detail     string
+}
+
+func (e *ModelDiscoveryError) Error() string {
+	if e.Detail == "" {
+		return "model discovery is not supported"
+	}
+	return e.Detail
+}
+
+func IsModelDiscoveryUnsupported(err error) bool {
+	var discoveryErr *ModelDiscoveryError
+	return errors.As(err, &discoveryErr)
+}
+
 // ListModels returns model ids from GET {base}/models (Ollama / OpenAI-compatible).
 func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/models", nil)
@@ -634,7 +655,18 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("list models %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		detail := strings.TrimSpace(string(body))
+		low := strings.ToLower(detail)
+		unsupportedDetail := resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden &&
+			(strings.Contains(low, "not supported") || strings.Contains(low, "not implemented"))
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed ||
+			resp.StatusCode == http.StatusNotImplemented || unsupportedDetail {
+			return nil, &ModelDiscoveryError{
+				StatusCode: resp.StatusCode,
+				Detail:     fmt.Sprintf("list models %s: %s", resp.Status, detail),
+			}
+		}
+		return nil, fmt.Errorf("list models %s: %s", resp.Status, detail)
 	}
 	var parsed modelsListResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {

@@ -108,6 +108,9 @@ func ProviderErrorClassOf(err error) ProviderErrorClass {
 func (c *Client) DailyReadiness(ctx context.Context, model string) (ProviderReadiness, error) {
 	models, err := c.ListModels(ctx)
 	if err != nil {
+		if IsModelDiscoveryUnsupported(err) {
+			return ProviderReadiness{State: ProviderConnected, Model: model}, nil
+		}
 		return ProviderReadiness{State: ProviderUnavailable, Model: model}, wrapProviderError(err)
 	}
 	available := false

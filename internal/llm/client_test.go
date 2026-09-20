@@ -3,12 +3,92 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestListModelsDistinguishesUnsupportedFromProviderFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		unsupported bool
+	}{
+		{name: "success", status: http.StatusOK},
+		{name: "not found", status: http.StatusNotFound, unsupported: true},
+		{name: "method not allowed", status: http.StatusMethodNotAllowed, unsupported: true},
+		{name: "authentication", status: http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.status == http.StatusOK {
+					_, _ = io.WriteString(w, `{"data":[{"id":"foo"}]}`)
+					return
+				}
+				http.Error(w, "provider response", tc.status)
+			}))
+			defer server.Close()
+			ids, err := (&Client{BaseURL: server.URL}).ListModels(context.Background())
+			if tc.status == http.StatusOK {
+				if err != nil || len(ids) != 1 || ids[0] != "foo" {
+					t.Fatalf("successful discovery: ids=%v err=%v", ids, err)
+				}
+				return
+			}
+			if err == nil || IsModelDiscoveryUnsupported(err) != tc.unsupported {
+				t.Fatalf("status %d: err=%v unsupported=%v", tc.status, err, IsModelDiscoveryUnsupported(err))
+			}
+		})
+	}
+
+	_, err := (&Client{BaseURL: "http://127.0.0.1:1"}).ListModels(context.Background())
+	if err == nil || IsModelDiscoveryUnsupported(err) {
+		t.Fatalf("network failure was softened: %v", err)
+	}
+}
+
+func TestDailyReadinessAcceptsProviderWithoutModelCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not implemented", http.StatusNotImplemented)
+	}))
+	defer server.Close()
+	readiness, err := (&Client{BaseURL: server.URL}).DailyReadiness(context.Background(), "foo")
+	if err != nil || readiness.State != ProviderConnected || readiness.Model != "foo" {
+		t.Fatalf("unsupported catalog blocked readiness: readiness=%+v err=%v", readiness, err)
+	}
+}
+
+func TestExplicitModelIsSentToCompletionAndProviderRejectionSurfaces(t *testing.T) {
+	var gotModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		var request ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		gotModel = request.Model
+		http.Error(w, `{"error":"model rejected"}`, http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	_, err := (&Client{BaseURL: server.URL, HTTPClient: server.Client()}).Chat(context.Background(), ChatRequest{Model: "@cf/zai-org/glm-4.7-flash"})
+	if gotModel != "@cf/zai-org/glm-4.7-flash" {
+		t.Fatalf("completion model=%q", gotModel)
+	}
+	if err == nil || !strings.Contains(err.Error(), "400 Bad Request") {
+		t.Fatalf("provider rejection was not surfaced: %v", err)
+	}
+	var discoveryErr *ModelDiscoveryError
+	if errors.As(err, &discoveryErr) {
+		t.Fatalf("completion rejection was misclassified as discovery: %v", err)
+	}
+}
 
 func TestFunctionCallArgumentsStringOrObject(t *testing.T) {
 	var asStr FunctionCall

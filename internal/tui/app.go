@@ -251,14 +251,15 @@ type chatLine struct {
 }
 
 type model struct {
-	deps   Deps
-	vp     viewport.Model
-	ta     textarea.Model
-	lines  []chatLine
-	width  int
-	height int
-	busy   bool
-	status string
+	deps                 Deps
+	vp                   viewport.Model
+	ta                   textarea.Model
+	lines                []chatLine
+	width                int
+	height               int
+	busy                 bool
+	status               string
+	modelSelectionSource modelSelectionSource
 	// turnFailed keeps a provider/tool error visible through EventDone and the
 	// final stream-close event. It is reset when the next turn starts.
 	turnFailed bool
@@ -311,6 +312,14 @@ type model struct {
 	worktreeGeneration   uint64
 	worktreeRefreshAgain bool
 }
+
+type modelSelectionSource string
+
+const (
+	modelSelectionConfigured modelSelectionSource = "configured"
+	modelSelectionExplicit   modelSelectionSource = "explicit"
+	modelSelectionDiscovered modelSelectionSource = "discovered"
+)
 
 type workspaceSwitchRequest struct {
 	path   string
@@ -445,24 +454,25 @@ func New(deps Deps) model {
 	r := newGlamourRenderer(80, theme)
 
 	m := model{
-		deps:               deps,
-		vp:                 vp,
-		ta:                 ta,
-		status:             "ready",
-		stream:             &strings.Builder{},
-		turnAssistant:      -1,
-		renderer:           r,
-		verbose:            false, // compact tools by default
-		permissionMode:     deps.Agent.Permissions.Mode,
-		mouseMode:          "SELECT",
-		visionEnabled:      deps.Agent.Cfg.VisionEnabled,
-		visionSupported:    false,
-		followBottom:       true,
-		themeName:          theme,
-		scrubLeft:          5, // a few startup passes to catch late OSC replies
-		worktree:           worktreeSummary{RefreshInProgress: true},
-		worktreeGeneration: 1,
-		lines:              nil,
+		deps:                 deps,
+		vp:                   vp,
+		ta:                   ta,
+		status:               "ready",
+		modelSelectionSource: modelSelectionConfigured,
+		stream:               &strings.Builder{},
+		turnAssistant:        -1,
+		renderer:             r,
+		verbose:              false, // compact tools by default
+		permissionMode:       deps.Agent.Permissions.Mode,
+		mouseMode:            "SELECT",
+		visionEnabled:        deps.Agent.Cfg.VisionEnabled,
+		visionSupported:      false,
+		followBottom:         true,
+		themeName:            theme,
+		scrubLeft:            5, // a few startup passes to catch late OSC replies
+		worktree:             worktreeSummary{RefreshInProgress: true},
+		worktreeGeneration:   1,
+		lines:                nil,
 	}
 	// Re-apply after the model value is constructed so textarea's internal style
 	// pointer addresses this instance's FocusedStyle (see applyTextareaTheme).
@@ -796,6 +806,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.ta.Focus()
 			m.status = "ready"
+			if llm.IsModelDiscoveryUnsupported(msg.err) {
+				m.lines = append(m.lines, chatLine{
+					role: "system",
+					text: "model discovery is not supported by this provider\ncurrent: " + m.deps.Agent.Cfg.Model + "\nusage: /model <name>",
+				})
+				m.refreshViewport()
+				return m, nil
+			}
 			m.lines = append(m.lines, chatLine{
 				role: "error",
 				text: fmt.Sprintf("could not list models: %v\ncurrent: %s\nusage: /model <name>", msg.err, m.deps.Agent.Cfg.Model),
@@ -1887,7 +1905,7 @@ func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
-	return m.applyModelSelection(name), nil
+	return m.applyModelSelection(name, modelSelectionExplicit), nil
 }
 
 func (m model) handleModelPickKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1924,7 +1942,7 @@ func (m model) handleModelPickKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		name := p.ids[p.idx]
 		m.modelPick = nil
 		m.ta.Focus()
-		return m.applyModelSelection(name), nil
+		return m.applyModelSelection(name, modelSelectionDiscovered), nil
 	case "home", "g":
 		p.idx = 0
 		return m, nil
@@ -1942,7 +1960,7 @@ func (m model) handleModelPickKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					name := p.ids[p.idx]
 					m.modelPick = nil
 					m.ta.Focus()
-					return m.applyModelSelection(name), nil
+					return m.applyModelSelection(name, modelSelectionDiscovered), nil
 				}
 			}
 		}
@@ -1951,9 +1969,10 @@ func (m model) handleModelPickKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m model) applyModelSelection(name string) model {
+func (m model) applyModelSelection(name string, source modelSelectionSource) model {
 	prev := m.deps.Agent.Cfg.Model
 	m.deps.Agent.Cfg.Model = name
+	m.modelSelectionSource = source
 	m.deps.Summary = fmt.Sprintf("%s · %s · %s", m.deps.Agent.Cfg.Provider, m.deps.Agent.Cfg.Model, m.deps.Agent.Cfg.BaseURL)
 	m.status = "model: " + name
 	msg := fmt.Sprintf("model set to %s", name)
