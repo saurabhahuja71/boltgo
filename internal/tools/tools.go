@@ -153,6 +153,13 @@ func (r readFile) Run(_ context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("path required")
 	}
 	path, err := resolveExistingFileIn(in.Path, r.Workspace)
+	if err != nil && isOperationalConfigPath(in.Path) {
+		path = filepath.Clean(in.Path)
+		if st, statErr := os.Stat(path); statErr != nil || st.IsDir() {
+			return "", err
+		}
+		err = nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -512,6 +519,7 @@ func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("command required")
 	}
 	cmdStr := strings.TrimSpace(in.Command)
+	cmdStr = normalizeOperationalCommand(cmdStr)
 	if reason := shellCommandBlocked(cmdStr); reason != "" {
 		return "error: " + reason, nil
 	}
@@ -543,6 +551,46 @@ func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 		return fmt.Sprintf("%s\n[exit error: %v]", s, err), nil
 	}
 	return s, nil
+}
+
+// normalizeOperationalCommand keeps common read-only host diagnostics
+// portable across minimal images. It also prevents OpenSSH from consulting a
+// broken global config when the user's explicit config is available.
+func normalizeOperationalCommand(command string) string {
+	command = normalizePortCheck(command)
+	trimmed := strings.TrimSpace(command)
+	if strings.HasPrefix(trimmed, "ssh ") && !strings.Contains(trimmed, " -F ") {
+		config := os.Getenv("SSH_CONFIG_PATH")
+		if config == "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				candidate := filepath.Join(home, ".ssh", "config")
+				if _, err := os.Stat(candidate); err == nil {
+					config = candidate
+				}
+			}
+		}
+		if config != "" {
+			return "ssh -F " + shellQuote(config) + " " + strings.TrimSpace(strings.TrimPrefix(trimmed, "ssh "))
+		}
+	}
+	return command
+}
+
+var ssPortCheck = regexp.MustCompile(`^ss\s+-ltn\s+sport\s*=\s*:([0-9]+)\s*$`)
+
+func normalizePortCheck(command string) string {
+	if _, err := exec.LookPath("ss"); err == nil {
+		return command
+	}
+	match := ssPortCheck.FindStringSubmatch(strings.TrimSpace(command))
+	if len(match) == 2 {
+		return "netstat -tlnp | grep ':'" + match[1]
+	}
+	return command
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 // ShellCommandBlocked rejects mass crawls / infinite jobs that freeze the agent.
@@ -602,12 +650,36 @@ func shellWorkspaceBlocked(cmd, workspace string) string {
 		}
 		candidate := strings.TrimRight(match[1], ".,!?;:)]}")
 		if err := enforceWorkspacePath(workspace, candidate); err != nil {
+			if isOperationalConfigPath(candidate) && operationalConfigCommand(cmd) {
+				continue
+			}
 			if _, statErr := os.Stat(candidate); statErr == nil {
 				return err.Error()
 			}
 		}
 	}
 	return ""
+}
+
+// isOperationalConfigPath permits the read-only control-plane files needed by
+// kubectl and SSH tunnelling. These files are intentionally handled outside
+// the project workspace because kubeconfig servers commonly point at loopback
+// tunnel ports. It does not permit arbitrary home-directory access.
+func isOperationalConfigPath(p string) bool {
+	p = filepath.ToSlash(filepath.Clean(p))
+	return (strings.Contains(p, "/.kube/") && strings.HasPrefix(filepath.Base(p), "config-")) ||
+		strings.HasSuffix(p, "/.ssh/config")
+}
+
+func operationalConfigCommand(cmd string) bool {
+	low := strings.ToLower(strings.TrimSpace(cmd))
+	if strings.Contains(low, "kubectl") {
+		return true
+	}
+	if strings.HasPrefix(low, "ssh ") || low == "ssh" {
+		return strings.Contains(low, " -f") || strings.Contains(low, " -n") || strings.Contains(low, " -l") || strings.Contains(low, " -o")
+	}
+	return strings.HasPrefix(low, "cat ") || strings.HasPrefix(low, "grep ") || strings.Contains(low, " grep ")
 }
 
 // fetchURL is a safe-ish HTTP GET (curl/wget substitute without full shell).

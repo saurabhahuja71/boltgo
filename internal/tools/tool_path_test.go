@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -82,5 +83,35 @@ func TestAllowModeDoesNotBypassWorkspaceScope(t *testing.T) {
 	result = r.RunDetailed(context.Background(), "run_shell", `{"command":"cat `+secret+`"}`)
 	if !strings.Contains(result.Output, "outside the active workspace") {
 		t.Fatalf("shell absolute path escaped scope: %+v", result)
+	}
+}
+
+func TestOperationalConfigPathsAreReadOnlyExceptions(t *testing.T) {
+	if !isOperationalConfigPath("/home/sauahuja/.kube/config-sidb1flannel") {
+		t.Fatal("sidb kubeconfig should be recognized as an operational config")
+	}
+	if !isOperationalConfigPath("/home/sauahuja/.ssh/config") {
+		t.Fatal("SSH config should be recognized as an operational config")
+	}
+	if isOperationalConfigPath("/home/sauahuja/.ssh/id_rsa") {
+		t.Fatal("private keys must not be operational config exceptions")
+	}
+	if !operationalConfigCommand("KUBECONFIG=/home/sauahuja/.kube/config-sidb1flannel kubectl get pods") {
+		t.Fatal("kubectl command should be allowed to reference kubeconfig")
+	}
+	if operationalConfigCommand("rm -f /home/sauahuja/.kube/config-sidb1flannel") {
+		t.Fatal("destructive command must not be allowed by operational exception")
+	}
+}
+
+func TestNormalizeOperationalCommand(t *testing.T) {
+	got := normalizeOperationalCommand("ssh -T bastion true")
+	if !strings.Contains(got, "-F '") || !strings.Contains(got, "/.ssh/config'") {
+		t.Fatalf("SSH command was not bound to explicit config: %q", got)
+	}
+	if got := normalizePortCheck("ss -ltn sport = :6449"); got == "ss -ltn sport = :6449" {
+		if _, err := exec.LookPath("ss"); err != nil {
+			t.Fatal("missing ss should be normalized to netstat")
+		}
 	}
 }
