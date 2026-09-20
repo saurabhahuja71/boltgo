@@ -43,3 +43,15 @@ func TestRootContainerImageCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalReadOnlyKubernetesCommand(t *testing.T) {
+	if !localReadOnlyKubernetesCommand("KUBECONFIG=/home/user/.kube/config-cluster-a kubectl get pods -A") {
+		t.Fatal("explicit-kubeconfig read-only kubectl should use the local tunnel")
+	}
+	if localReadOnlyKubernetesCommand("KUBECONFIG=/home/user/.kube/config-cluster-a kubectl delete pod sample") {
+		t.Fatal("mutating kubectl command must not use the local read-only path")
+	}
+	if localReadOnlyKubernetesCommand("kubectl get pods") {
+		t.Fatal("implicit kubeconfig kubectl must not bypass SSH target selection")
+	}
+}

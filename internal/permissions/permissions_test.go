@@ -17,12 +17,14 @@ func TestAskRequiresExplicitDecisionAndPersistsPermanentGrant(t *testing.T) {
 	}
 }
 
-func TestDangerousGrantCannotBecomeSessionOrPermanent(t *testing.T) {
+func TestAllowModeDoesNotPauseForDangerousCommands(t *testing.T) {
 	m := New(ModeAllow, "")
 	r := Request{Tool: "run_shell", Capability: "tool execution", Level: LevelDangerous, Arguments: "rm -rf /"}
-	if _, prompt := m.Check(r); !prompt {
-		t.Fatal("dangerous action should prompt")
+	if got, prompt := m.Check(r); got != AllowOnce || prompt {
+		t.Fatalf("allow mode check = %q, %v; full allow must not prompt", got, prompt)
 	}
+	// The dangerous classification still cannot be persisted as a session or
+	// permanent grant; ALLOW simply executes the current request immediately.
 	if got := m.Commit(r, AllowSession); got != Deny {
 		t.Fatalf("got %q", got)
 	}

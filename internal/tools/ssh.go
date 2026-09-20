@@ -16,7 +16,7 @@ type sshExecute struct{}
 
 func (sshExecute) Name() string { return "ssh_execute" }
 func (sshExecute) Description() string {
-	return "Execute a literal command on an SSH config alias (for example podman8 or podman9). Docker/Podman image-list commands are run with non-interactive sudo so the result is from root storage. Before using this, prefer run_shell for kubectl, watch, logs, and other commands that should run in the current shell; ssh_execute checks the current hostname and kubectl context and runs locally when the target is already local."
+	return "Execute a literal command on an SSH config alias (for example podman8 or podman9). Docker/Podman image-list commands are run with non-interactive sudo so the result is from root storage. Read-only kubectl commands with an explicit KUBECONFIG use the current local shell and tunnel rather than treating a Kubernetes cluster name as an SSH hostname. Before using this, prefer run_shell for kubectl, watch, logs, and other commands that should run in the current shell; ssh_execute checks the current hostname and kubectl context and runs locally when the target is already local."
 }
 func (sshExecute) Schema() map[string]any {
 	return map[string]any{"type": "object", "required": []string{"host", "command"}, "additionalProperties": false, "properties": map[string]any{
@@ -53,7 +53,7 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 		}
 	}
 	info := currentExecutionContext(ctx)
-	if info.matches(in.Host, config) {
+	if localReadOnlyKubernetesCommand(in.Command) || info.matches(in.Host, config) {
 		return runLocalCommand(ctx, in.Command, in.Host, info), nil
 	}
 	args := []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}
@@ -73,6 +73,19 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 		return string(out), fmt.Errorf("ssh failed: %w", err)
 	}
 	return string(out), nil
+}
+
+func localReadOnlyKubernetesCommand(command string) bool {
+	low := strings.ToLower(strings.TrimSpace(command))
+	if !strings.Contains(low, "kubectl") || !strings.Contains(low, "kubeconfig=") {
+		return false
+	}
+	for _, forbidden := range []string{" apply ", " delete ", " patch ", " replace ", " edit ", " scale ", " rollout ", " label ", " taint "} {
+		if strings.Contains(" "+low+" ", forbidden) {
+			return false
+		}
+	}
+	return true
 }
 
 // rootContainerImageCommand makes the common image-inventory request

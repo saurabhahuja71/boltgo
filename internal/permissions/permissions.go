@@ -69,7 +69,10 @@ func (m *Manager) Check(r Request) (Decision, bool) {
 	if mode == ModePlan {
 		return Deny, false
 	}
-	if mode == ModeAllow && r.Level != LevelDangerous {
+	// ALLOW is an explicit full-autonomy mode. It must not pause for a user
+	// decision, including for commands classified as dangerous; ASK remains the
+	// mode that requires confirmation for those commands.
+	if mode == ModeAllow {
 		return AllowOnce, false
 	}
 	key := scope(r)
