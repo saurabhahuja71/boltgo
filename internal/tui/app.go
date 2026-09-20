@@ -183,7 +183,8 @@ func (m model) layoutFor(width, height int) tuiLayout {
 	}
 	l := tuiLayout{
 		width: width, height: height,
-		headerHeight: 1, statusHeight: 1, workspaceHeight: 1, footerHeight: 1,
+		// The status and keyboard help are rendered as one combined footer row.
+		headerHeight: 1, statusHeight: 1, workspaceHeight: 1, footerHeight: 0,
 		todoWidth: 0,
 	}
 	l.inputHeight = inputHeightFor(m.ta, max(1, width-2))
@@ -3080,10 +3081,10 @@ func applyTextareaTheme(ta *textarea.Model, name string) {
 	base := lipgloss.NewStyle().Foreground(fg).Background(bg)
 	muted := lipgloss.NewStyle().Foreground(colorMuted).Background(bg)
 	prompt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Background(bg)
-	// Use the accent for both faces. Bubble's cursor reverses this style while
-	// rendering; matching faces keep the block accent visible in the light
-	// theme instead of reversing to a white-on-white cursor cell.
-	cursor := lipgloss.NewStyle().Foreground(colorAccent).Background(colorAccent)
+	// Bubble reverses the cursor style while rendering. Keep the pre-reversal
+	// background on the theme canvas: after reversal the cursor is an accent
+	// block with readable text, including on the light theme.
+	cursor := lipgloss.NewStyle().Foreground(colorAccent).Background(bg)
 	for _, style := range []*textarea.Style{&ta.FocusedStyle, &ta.BlurredStyle} {
 		style.Base = base
 		style.CursorLine = lipgloss.NewStyle().Background(bg)
@@ -3305,7 +3306,6 @@ func (m model) View() string {
 	if summary := compactWorktreeSummary(m.worktree, w); summary != "" {
 		statusText = summary + " · " + statusText
 	}
-	statusLine := styleStatus.Render(truncateCells(statusText, w))
 	helpText := "Ctrl+Q quit · Ctrl+R permission · Ctrl+L mouse · Ctrl+Y vision · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline"
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
 		helpText = "PLAN MODE · Ctrl+Q quit · Ctrl+R permission · Enter send · Shift+Enter newline"
@@ -3313,7 +3313,10 @@ func (m model) View() string {
 	if m.modelPick != nil {
 		helpText = "Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick"
 	}
-	help := styleHelp.Render(truncateCells(helpText, w))
+	// Keep runtime state and keyboard controls together. This avoids two nearly
+	// identical chrome rows while retaining the status details users need.
+	footerText := statusText + " · " + helpText
+	footer := styleHelp.Render(truncateCells(footerText, w))
 	workspace := m.deps.Workspace
 	if workspace == "" {
 		workspace = mustCwd()
@@ -3338,10 +3341,9 @@ func (m model) View() string {
 	if m.modelPick != nil {
 		parts = append(parts, m.modelPickerView(dialogW+2))
 	}
-	// Keep the live connection/model status as the final terminal row. This
-	// makes provider connectivity and token state visible without competing
-	// with the editable prompt or getting lost above a modal panel.
-	parts = append(parts, cwdLine, input, help, statusLine)
+	// Keep the combined state/control row as the final terminal row. This makes
+	// provider connectivity and shortcuts visible without duplicating chrome.
+	parts = append(parts, cwdLine, input, footer)
 	frame := fitFrameHeight(lipgloss.JoinVertical(lipgloss.Left, parts...), l.height)
 	// Paint the complete frame so changing themes also changes the unused
 	// terminal canvas, not only the characters that happen to be present.

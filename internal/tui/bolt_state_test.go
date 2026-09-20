@@ -570,14 +570,16 @@ func TestRepeatedUpdatesKeepFixedUIInOneFinalFrame(t *testing.T) {
 
 func fixedRegionCounts(view string) (header, status, input, footer int) {
 	for _, line := range strings.Split(view, "\n") {
-		switch {
-		case strings.Contains(line, "Bolt · test · /help"):
+		if strings.Contains(line, "Bolt · test · /help") {
 			header++
-		case strings.Contains(line, "Bolt · ASK ·"):
+		}
+		if strings.Contains(line, "Bolt · ASK ·") {
 			status++
-		case strings.Contains(line, "› Message…"):
+		}
+		if strings.Contains(line, "› Message…") {
 			input++
-		case strings.Contains(line, "Ctrl+Q quit"):
+		}
+		if strings.Contains(line, "Ctrl+Q quit") {
 			footer++
 		}
 	}
@@ -1102,8 +1104,13 @@ func TestInputUsesVisibleStaticCursor(t *testing.T) {
 	if !strings.Contains(ansiSeq.ReplaceAllString(m.ta.View(), ""), "edit") {
 		t.Fatal("textarea did not render populated editable input")
 	}
-	if !strings.Contains(m.ta.View(), "48;2;3;105;161") {
-		t.Fatal("light-theme textarea did not render an accent cursor background")
+	if !strings.Contains(m.ta.View(), "7;38;2;3;105;161;48;2;255;255;255") {
+		t.Fatal("light-theme textarea did not render a contrasting cursor over typed text")
+	}
+	m.width, m.height = 100, 30
+	m.relayout()
+	if !strings.Contains(m.View(), "7;38;2;3;105;161;48;2;255;255;255") {
+		t.Fatal("final Bolt frame lost the contrasting cursor over typed text")
 	}
 }
 

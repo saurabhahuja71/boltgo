@@ -506,7 +506,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	return tui.Run(tui.Deps{
+	err = tui.Run(tui.Deps{
 		Title:       "Bolt",
 		Summary:     eff.Summary(),
 		Agent:       ag,
@@ -515,6 +515,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		SaveSession: saveSession,
 		Mode:        ag.ModeName(),
 	})
+	if saveSession {
+		if _, statErr := os.Stat(sessionPath); statErr == nil {
+			fmt.Fprintf(os.Stderr, "session id: latest (resume with: bolt --resume latest)\n")
+		}
+	}
+	return err
 }
 
 func isOllamaConfig(cfg config.Config) bool {
