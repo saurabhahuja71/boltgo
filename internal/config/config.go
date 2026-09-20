@@ -72,8 +72,16 @@ type Provider struct {
 type MCPServer struct {
 	Name    string `toml:"name"`
 	Enabled bool   `toml:"enabled"`
+	// Transport is "streamable_http" for URL servers. Empty preserves the
+	// existing URL=>Streamable HTTP behavior; command servers remain stdio.
+	Transport string `toml:"transport"`
 	// URL for streamable HTTP, e.g. http://127.0.0.1:8080/mcp
 	URL string `toml:"url"`
+	// Headers are additional HTTP headers. Values may contain ${ENV_VAR}.
+	Headers map[string]string `toml:"headers"`
+	// AuthEnv names an environment variable containing a bearer access token.
+	// The token is never persisted in config or included in diagnostics.
+	AuthEnv string `toml:"auth_env"`
 	// Command+Args for stdio transport (local process).
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`

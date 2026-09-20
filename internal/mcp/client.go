@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -59,8 +61,18 @@ func (m *Manager) Connect(ctx context.Context, s config.MCPServer) error {
 	var transport mcp.Transport
 	switch {
 	case s.URL != "":
-		transport = &mcp.StreamableClientTransport{Endpoint: s.URL}
+		endpoint, headers, err := httpConfig(s)
+		if err != nil {
+			return err
+		}
+		transport = &mcp.StreamableClientTransport{
+			Endpoint:   endpoint,
+			HTTPClient: &http.Client{Transport: headerTransport{base: http.DefaultTransport, headers: headers}},
+		}
 	case s.Command != "":
+		if s.Transport != "" && !strings.EqualFold(s.Transport, "stdio") {
+			return fmt.Errorf("server %q: command transport must be stdio", name)
+		}
 		cmd := exec.Command(s.Command, s.Args...)
 		transport = &mcp.CommandTransport{Command: cmd}
 	default:
@@ -91,6 +103,54 @@ func (m *Manager) Connect(ctx context.Context, s config.MCPServer) error {
 	})
 	m.mu.Unlock()
 	return nil
+}
+
+// httpConfig resolves non-secret configuration. AuthEnv is intentionally read
+// at connection time so tokens never enter config files or diagnostics.
+func httpConfig(s config.MCPServer) (string, http.Header, error) {
+	if s.Transport != "" && !strings.EqualFold(s.Transport, "streamable_http") {
+		return "", nil, fmt.Errorf("server %q: unsupported URL transport %q", s.Name, s.Transport)
+	}
+	endpoint := os.ExpandEnv(strings.TrimSpace(s.URL))
+	if endpoint == "" || strings.Contains(endpoint, "${") {
+		return "", nil, fmt.Errorf("server %q: streamable_http URL is missing or unresolved", s.Name)
+	}
+	headers := make(http.Header)
+	for key, value := range s.Headers {
+		value = os.ExpandEnv(value)
+		if strings.Contains(value, "${") {
+			return "", nil, fmt.Errorf("server %q: header %q contains an unresolved environment variable", s.Name, key)
+		}
+		headers.Set(key, value)
+	}
+	if s.AuthEnv != "" {
+		token := strings.TrimSpace(os.Getenv(s.AuthEnv))
+		if token == "" {
+			return "", nil, fmt.Errorf("server %q: bearer token environment variable %q is not set", s.Name, s.AuthEnv)
+		}
+		headers.Set("Authorization", "Bearer "+token)
+	}
+	return endpoint, headers, nil
+}
+
+type headerTransport struct {
+	base    http.RoundTripper
+	headers http.Header
+}
+
+func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	for key, values := range t.headers {
+		clone.Header.Del(key)
+		for _, value := range values {
+			clone.Header.Add(key, value)
+		}
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
 }
 
 // RegisterOnto adds MCP tools into a tools.Registry.

@@ -90,3 +90,12 @@ model = "gpt-4o-mini"
 name = "mcp-demo"
 enabled = false
 url = "http://127.0.0.1:8080/mcp"
+
+# Zoho MCP prototype: obtain the endpoint and OAuth access token through
+# Zoho's authenticated MCP setup. Never put the token in this file.
+# [[mcp_servers]]
+# name = "zoho"
+# enabled = true
+# transport = "streamable_http"
+# url = "${ZOHO_MCP_URL}"
+# auth_env = "ZOHO_MCP_ACCESS_TOKEN"
