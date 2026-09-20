@@ -3,7 +3,21 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/saurabhahuja71/agenterm/internal/llm"
 )
+
+func TestSessionChatLinesRestoresConversationRoles(t *testing.T) {
+	lines := sessionChatLines([]llm.Message{
+		{Role: llm.RoleSystem, Content: "private system prompt"},
+		{Role: llm.RoleUser, Content: "first question"},
+		{Role: llm.RoleAssistant, Content: "first answer"},
+		{Role: llm.RoleTool, Name: "read_file", Content: "file output"},
+	})
+	if len(lines) != 3 || lines[0].role != "user" || lines[1].role != "assistant" || lines[2].role != "tool" {
+		t.Fatalf("session roles were not restored: %#v", lines)
+	}
+}
 
 func TestActiveTurnKeepsOneAssistantLine(t *testing.T) {
 	m := model{

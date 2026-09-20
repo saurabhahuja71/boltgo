@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -204,6 +205,9 @@ func resumeRequested() bool {
 		return false
 	}
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("BOLT_RESUME")))
+	if v == "" {
+		return true
+	}
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
@@ -329,8 +333,12 @@ func runHeadless(prompt string) error {
 	}
 	if resumeRequested() {
 		if err := ag.LoadSession(sessionPath); err != nil {
-			fmt.Fprintf(os.Stderr, "session resume: %v\n", err)
-			saveSession = false
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "session resume: no previous session at %s\n", sessionPath)
+			} else {
+				fmt.Fprintf(os.Stderr, "session resume: %v\n", err)
+				saveSession = false
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "resumed session %s\n", sessionPath)
 		}
@@ -479,7 +487,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		ag.EnableDailyMode()
 	}
 
-	// Bolt sessions are opt-in: a normal launch is always a genuinely fresh history.
+	// Bolt resumes the workspace's latest session by default. --no-resume keeps
+	// the old fresh-session behavior for one launch.
 	resume := resumeRequested()
 	saveSession := true
 	sessionPath, err := agent.WorkspaceSessionPath(eff.Workspace, "latest")
@@ -488,8 +497,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 	if resume {
 		if err := ag.LoadSession(sessionPath); err != nil {
-			fmt.Fprintf(os.Stderr, "session resume: %v\n", err)
-			saveSession = false
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "session resume: no previous session at %s\n", sessionPath)
+			} else {
+				fmt.Fprintf(os.Stderr, "session resume: %v\n", err)
+				saveSession = false
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "  resumed session %s\n", sessionPath)
 		}

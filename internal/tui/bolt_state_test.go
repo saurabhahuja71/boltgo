@@ -147,16 +147,16 @@ func TestInteractiveQuestionRendersChoicesAndDoesNotQueueAnswer(t *testing.T) {
 	m.busy = true
 	cancelled := false
 	m.cancel = func() { cancelled = true }
-	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: "Cleanup requires force-removing untagged images. Proceed?"})
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventQuestion, Question: "Proceed with force-removing these untagged images?", Options: []string{"Yes", "No"}, AllowCustom: true})
 	view := m.View()
-	for _, want := range []string{"Agent needs your input", "1 Yes", "2 No", "3 Custom answer"} {
+	for _, want := range []string{"Agent needs your input", "> Yes", "  No", "Custom answer…"} {
 		if !containsText(view, want) {
 			t.Fatalf("question UI missing %q: %s", want, view)
 		}
 	}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
-	if !cancelled || m.questionAnswer != "yes" || len(m.pendingRequests) != 0 || m.pendingQuestion != nil {
+	if !cancelled || m.questionAnswer != "Yes" || len(m.pendingRequests) != 0 || m.pendingQuestion != nil {
 		t.Fatalf("question answer was not handled immediately: cancelled=%v answer=%q queue=%#v question=%v", cancelled, m.questionAnswer, m.pendingRequests, m.pendingQuestion)
 	}
 }
@@ -164,8 +164,12 @@ func TestInteractiveQuestionRendersChoicesAndDoesNotQueueAnswer(t *testing.T) {
 func TestInteractiveQuestionCustomAnswerMode(t *testing.T) {
 	m := testModel(t)
 	m.busy = false
-	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: "Which cleanup policy should I use?"})
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventQuestion, Question: "Which cleanup policy should I use?", Options: []string{"Tagged only", "All unused"}, AllowCustom: true})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	if m.pendingQuestion == nil || !m.pendingQuestion.customMode || m.ta.Placeholder != "Custom answer…" {
 		t.Fatal("custom answer mode was not opened")
@@ -176,6 +180,24 @@ func TestInteractiveQuestionCustomAnswerMode(t *testing.T) {
 	m = updated.(model)
 	if m.pendingQuestion != nil || m.pendingRequests != nil {
 		t.Fatalf("custom answer was not submitted: question=%v queue=%#v", m.pendingQuestion, m.pendingRequests)
+	}
+}
+
+func TestOrdinaryModelQuestionsNeverOpenInteractiveUI(t *testing.T) {
+	m := testModel(t)
+	outputs := []string{
+		"How can I check the Docker images on the podman9 server as root user?\n\nSSH to podman9 as root and run podman images.\n\nHere's the full and safe way to do it:\n\npodman images",
+		`The user asked: "Should I remove these images?"\n\nHere is the safe answer.`,
+		"Q: Should I remove these images?\nA: No, because they are still referenced.",
+		"How should I verify this?\n\nRun:\npodman images\npodman ps -a",
+		"Why is this important?\n\nBecause removing referenced images may break existing containers.",
+	}
+	for _, output := range outputs {
+		m.ensureStream().Reset()
+		m, _ = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: output})
+		if m.pendingQuestion != nil || strings.Contains(m.View(), "Agent needs your input") {
+			t.Fatalf("ordinary model output opened interactive UI: %q", output)
+		}
 	}
 }
 
@@ -1062,7 +1084,13 @@ func TestInputUsesOnePromptMarker(t *testing.T) {
 }
 
 func TestInputUsesVisibleStaticCursor(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.TrueColor)
 	m := testModel(t)
+	m.themeName = "light"
+	applyTheme("light")
+	applyTextareaTheme(&m.ta, "light")
 	if got := m.ta.Cursor.Mode(); got != cursor.CursorStatic {
 		t.Fatalf("cursor mode=%v, want static", got)
 	}
@@ -1071,8 +1099,11 @@ func TestInputUsesVisibleStaticCursor(t *testing.T) {
 	if m.ta.Value() != "edit these words" {
 		t.Fatal("textarea value changed while moving the cursor")
 	}
-	if !strings.Contains(m.ta.View(), "edit") {
+	if !strings.Contains(ansiSeq.ReplaceAllString(m.ta.View(), ""), "edit") {
 		t.Fatal("textarea did not render populated editable input")
+	}
+	if !strings.Contains(m.ta.View(), "48;2;3;105;161") {
+		t.Fatal("light-theme textarea did not render an accent cursor background")
 	}
 }
 

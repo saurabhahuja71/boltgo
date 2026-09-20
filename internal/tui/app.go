@@ -254,6 +254,29 @@ type chatLine struct {
 	mdSrc   string // text that mdCache was built from
 }
 
+func sessionChatLines(messages []llm.Message) []chatLine {
+	lines := make([]chatLine, 0, len(messages))
+	for _, message := range messages {
+		text := strings.TrimSpace(message.Content)
+		if text == "" {
+			continue
+		}
+		switch message.Role {
+		case llm.RoleUser:
+			lines = append(lines, chatLine{role: "user", text: text})
+		case llm.RoleAssistant:
+			lines = append(lines, chatLine{role: "assistant", text: text})
+		case llm.RoleTool:
+			label := "tool"
+			if message.Name != "" {
+				label = message.Name
+			}
+			lines = append(lines, chatLine{role: "tool", text: label + "\n" + text})
+		}
+	}
+	return lines
+}
+
 type model struct {
 	deps                 Deps
 	vp                   viewport.Model
@@ -336,8 +359,11 @@ type workspaceSwitchRequest struct {
 // be answered while the provider is still closing its response; in that case
 // questionAnswer is handed directly to the next turn after cancellation.
 type interactiveQuestion struct {
-	text       string
-	customMode bool
+	text        string
+	options     []string
+	selected    int
+	allowCustom bool
+	customMode  bool
 }
 
 // paintInterval is the minimum time between streaming viewport rebuilds.
@@ -490,7 +516,7 @@ func New(deps Deps) model {
 		scrubLeft:            5, // a few startup passes to catch late OSC replies
 		worktree:             worktreeSummary{RefreshInProgress: true},
 		worktreeGeneration:   1,
-		lines:                nil,
+		lines:                sessionChatLines(deps.Agent.History),
 	}
 	// Re-apply after the model value is constructed so textarea's internal style
 	// pointer addresses this instance's FocusedStyle (see applyTextareaTheme).
@@ -683,6 +709,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingQuestion != nil && m.pendingQuestion.customMode && msg.String() == "esc" {
 			m.pendingQuestion = nil
 			m.ta.Placeholder = "Message…"
+			m.ta.Focus()
 			m.ta.Reset()
 			m.status = "ready"
 			m.relayout()
@@ -692,7 +719,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingApproval != nil && isApprovalDecisionKey(msg) {
 			return m.handleApprovalKey(msg)
 		}
-		if m.pendingQuestion != nil && !m.pendingQuestion.customMode && isQuestionDecisionKey(msg) {
+		if m.pendingQuestion != nil && !m.pendingQuestion.customMode {
 			return m.handleQuestionKey(msg)
 		}
 		// Chat scroll keys — handle before the textarea so large answers are reachable.
@@ -984,34 +1011,53 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	return m.startTurn(text)
 }
 
-func isQuestionDecisionKey(msg tea.KeyMsg) bool {
-	switch strings.ToLower(msg.String()) {
-	case "1", "2", "3", "y", "n", "enter", "esc":
-		return true
-	default:
-		return false
-	}
-}
-
 func (m model) handleQuestionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	q := m.pendingQuestion
+	if q == nil {
+		return m, nil
+	}
+	total := len(q.options)
+	if q.allowCustom {
+		total++
+	}
 	switch strings.ToLower(msg.String()) {
-	case "1", "y":
-		return m.handleQuestionSubmit("yes")
-	case "2", "n":
-		return m.handleQuestionSubmit("no")
-	case "3":
-		m.pendingQuestion.customMode = true
-		m.ta.Placeholder = "Custom answer…"
-		m.ta.Focus()
-		m.status = "custom answer · Enter submit · Esc cancel"
-		m.relayout()
-		m.refreshViewport()
+	case "up", "shift+tab":
+		q.selected = (q.selected - 1 + total) % total
+	case "down", "tab":
+		q.selected = (q.selected + 1) % total
+	case "enter":
+		if q.allowCustom && q.selected == len(q.options) {
+			q.customMode = true
+			m.ta.Placeholder = "Custom answer…"
+			m.ta.Focus()
+			m.status = "custom answer · Enter submit · Esc cancel"
+			m.relayout()
+			m.refreshViewport()
+			return m, nil
+		}
+		return m.handleQuestionSubmit(q.options[q.selected])
+	case "c":
+		if q.allowCustom {
+			q.customMode = true
+			m.ta.Placeholder = "Custom answer…"
+			m.ta.Focus()
+			m.status = "custom answer · Enter submit · Esc cancel"
+			m.relayout()
+			m.refreshViewport()
+		}
+		return m, nil
 	case "esc":
 		m.pendingQuestion = nil
+		m.ta.Focus()
 		m.status = "ready"
 		m.relayout()
 		m.refreshViewport()
+		return m, nil
+	default:
+		return m, nil
 	}
+	m.status = fmt.Sprintf("input required · option %d/%d · Enter choose", q.selected+1, total)
+	m.refreshViewport()
 	return m, nil
 }
 
@@ -1046,36 +1092,6 @@ func (m model) handleQuestionSubmit(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.startTurn(answer)
-}
-
-func (m *model) detectInteractiveQuestion() {
-	if m.pendingQuestion != nil || m.turnFailed || m.stream == nil {
-		return
-	}
-	text := strings.TrimSpace(m.stream.String())
-	if !looksLikeInteractiveQuestion(text) {
-		return
-	}
-	m.pendingQuestion = &interactiveQuestion{text: text}
-	m.status = "answer required · 1 yes · 2 no · 3 custom"
-	m.relayout()
-}
-
-func looksLikeInteractiveQuestion(text string) bool {
-	text = strings.TrimSpace(text)
-	if text == "" || !strings.HasSuffix(text, "?") {
-		return false
-	}
-	low := strings.ToLower(text)
-	for _, phrase := range []string{
-		"would you like", "do you want", "should i", "shall i", "can i", "could i",
-		"may i", "proceed", "continue", "please confirm", "what would you",
-	} {
-		if strings.Contains(low, phrase) {
-			return true
-		}
-	}
-	return len([]rune(text)) <= 180
 }
 
 func (m model) activeWorkspace() string {
@@ -1429,6 +1445,24 @@ func (m *model) schedulePaint(force bool) tea.Cmd {
 
 func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 	switch ev.Kind {
+	case agent.EventQuestion:
+		options := append([]string(nil), ev.Options...)
+		if len(options) == 0 {
+			options = []string{"Yes", "No"}
+		}
+		question := strings.TrimSpace(ev.Question)
+		if question == "" {
+			question = strings.TrimSpace(ev.Text)
+		}
+		m.pendingQuestion = &interactiveQuestion{
+			text:        question,
+			options:     options,
+			allowCustom: ev.AllowCustom,
+		}
+		m.status = "input required · ↑/↓ select · Enter choose"
+		m.ta.Blur()
+		m.relayout()
+		return m, m.schedulePaint(true)
 	case agent.EventPermission:
 		m.pendingApproval = ev.Permission
 		m.approvalDecision = ev.Decision
@@ -1455,7 +1489,6 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 			m.upsertThinkingPlaceholder()
 		}
 		m.status = fmt.Sprintf("streaming… %s", spinnerFrame())
-		m.detectInteractiveQuestion()
 		return m, m.schedulePaint(false)
 
 	case agent.EventToolStart:
@@ -1532,7 +1565,6 @@ func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
 		return m, m.schedulePaint(true)
 
 	case agent.EventDone:
-		m.detectInteractiveQuestion()
 		m.pendingApproval = nil
 		m.approvalDecision = nil
 		m.clearThinkingPlaceholder()
@@ -1609,7 +1641,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			m.lines = append(m.lines, chatLine{role: "error", text: "resume: " + err.Error()})
 		} else {
 			m.pendingRequests = append([]string(nil), m.deps.Agent.PendingRequests...)
-			m.lines = append(m.lines, chatLine{role: "system", text: "resumed factual session; provider turn is fresh and ambiguous actions will not be replayed"})
+			m.lines = append(sessionChatLines(m.deps.Agent.History), chatLine{role: "system", text: "resumed factual session; provider turn is fresh and ambiguous actions will not be replayed"})
 		}
 	case "/model", "/models":
 		mod, cmd := m.handleModelCmd(parts)
@@ -1705,10 +1737,7 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 			m.lines = append(m.lines, chatLine{role: "error", text: err.Error()})
 		} else {
 			m.pendingRequests = append([]string(nil), m.deps.Agent.PendingRequests...)
-			m.lines = []chatLine{
-				{role: "system", text: "loaded session " + parts[1]},
-				{role: "system", text: m.deps.Agent.DailyCheckpoint()},
-			}
+			m.lines = append(sessionChatLines(m.deps.Agent.History), chatLine{role: "system", text: "loaded session " + parts[1]}, chatLine{role: "system", text: m.deps.Agent.DailyCheckpoint()})
 		}
 	case "/compact":
 		m.deps.Agent.CompactHistory()
@@ -2898,11 +2927,30 @@ func interactiveQuestionText(q *interactiveQuestion) string {
 	if q == nil {
 		return "Agent needs your input"
 	}
-	choices := "1 Yes  2 No  3 Custom answer"
-	if q.customMode {
-		choices = "Custom answer · type below and press Enter · Esc cancel"
+	var b strings.Builder
+	b.WriteString("Agent needs your input\n\n")
+	b.WriteString(q.text)
+	b.WriteString("\n\n")
+	for i, option := range q.options {
+		prefix := "  "
+		if i == q.selected && !q.customMode {
+			prefix = "> "
+		}
+		b.WriteString(prefix + option + "\n")
 	}
-	return "Agent needs your input\n\n" + q.text + "\n\n" + choices
+	if q.allowCustom {
+		prefix := "  "
+		if q.customMode || (!q.customMode && q.selected == len(q.options)) {
+			prefix = "> "
+		}
+		b.WriteString(prefix + "Custom answer…\n")
+	}
+	if q.customMode {
+		b.WriteString("\nType your answer below and press Enter · Esc cancel")
+	} else {
+		b.WriteString("\n↑/↓ select · Enter choose · C custom · Esc cancel")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func workspaceApprovalText(r *workspaceSwitchRequest) string {
@@ -3032,9 +3080,10 @@ func applyTextareaTheme(ta *textarea.Model, name string) {
 	base := lipgloss.NewStyle().Foreground(fg).Background(bg)
 	muted := lipgloss.NewStyle().Foreground(colorMuted).Background(bg)
 	prompt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Background(bg)
-	// A contrasting block cursor remains visible at end-of-input (where the
-	// cursor is rendered over a space) as well as over existing text.
-	cursor := lipgloss.NewStyle().Foreground(bg).Background(colorAccent)
+	// Use the accent for both faces. Bubble's cursor reverses this style while
+	// rendering; matching faces keep the block accent visible in the light
+	// theme instead of reversing to a white-on-white cursor cell.
+	cursor := lipgloss.NewStyle().Foreground(colorAccent).Background(colorAccent)
 	for _, style := range []*textarea.Style{&ta.FocusedStyle, &ta.BlurredStyle} {
 		style.Base = base
 		style.CursorLine = lipgloss.NewStyle().Background(bg)

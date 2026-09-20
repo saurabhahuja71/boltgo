@@ -29,6 +29,10 @@ func TestResumeRequestedPrecedence(t *testing.T) {
 	t.Cleanup(func() { flagResume, flagNoResume, os.Args[0] = oldResume, oldNoResume, oldArg })
 	os.Args[0] = "bolt"
 	flagResume, flagNoResume = false, false
+	t.Setenv("BOLT_RESUME", "")
+	if !resumeRequested() {
+		t.Fatal("normal Bolt launch should resume the workspace session by default")
+	}
 	t.Setenv("BOLT_RESUME", "1")
 	if !resumeRequested() {
 		t.Fatal("BOLT_RESUME=1 should request resume")

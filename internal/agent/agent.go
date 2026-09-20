@@ -25,16 +25,20 @@ const (
 	EventStatus
 	EventPermission
 	EventUsage
+	EventQuestion
 )
 
 type Event struct {
-	Kind       EventKind
-	Text       string
-	Tool       string
-	ToolOut    string
-	Permission *permissions.Request
-	Decision   chan permissions.Decision
-	Usage      *llm.Usage
+	Kind        EventKind
+	Text        string
+	Tool        string
+	ToolOut     string
+	Permission  *permissions.Request
+	Decision    chan permissions.Decision
+	Usage       *llm.Usage
+	Question    string
+	Options     []string
+	AllowCustom bool
 }
 
 type GoalProgressClass string
