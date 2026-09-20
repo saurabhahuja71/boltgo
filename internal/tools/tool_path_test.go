@@ -115,3 +115,12 @@ func TestNormalizeOperationalCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteSSHCommandsUseSSHExecute(t *testing.T) {
+	if got := shellCommandBlocked("ssh podman9 podman images"); !strings.Contains(got, "ssh_execute") {
+		t.Fatalf("remote SSH command was not redirected: %q", got)
+	}
+	if got := shellCommandBlocked("ssh -L 6449:127.0.0.1:6443 podman9 -N"); got != "" {
+		t.Fatalf("SSH tunnel was incorrectly blocked: %q", got)
+	}
+}

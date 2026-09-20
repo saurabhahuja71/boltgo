@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,6 +15,27 @@ func TestEffectiveWorkspaceUsesBoltEnvironment(t *testing.T) {
 	want, _ := filepath.Abs(workspace)
 	if got.Workspace != want {
 		t.Fatalf("workspace = %q, want %q", got.Workspace, want)
+	}
+}
+
+func TestLoadTracksExplicitPermissionMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(`permission_mode = "ask"
+model = "configured-model"
+base_url = "http://configured.example/v1"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTERM_CONFIG", path)
+	cfg, _, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.PermissionModeConfigured || cfg.PermissionMode != "ask" {
+		t.Fatalf("explicit permission mode was not retained: %#v", cfg)
+	}
+	if cfg.Model != "configured-model" || cfg.BaseURL != "http://configured.example/v1" {
+		t.Fatalf("configured model/endpoint were not retained: %#v", cfg)
 	}
 }
 

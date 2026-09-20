@@ -26,6 +26,11 @@ build:
 	ln -sf $(BINARY) bolt-s1
 	ln -sf $(BINARY) bolt-s2
 	ln -sf $(BINARY) bolt-s3
+	ln -sf $(BINARY) bolt-s4
+	ln -sf $(BINARY) bolt-s5
+	ln -sf $(BINARY) bolt-s6
+	ln -sf $(BINARY) bolt-s7
+	ln -sf $(BINARY) bolt-s8
 
 install:
 	CGO_ENABLED=0 go install -trimpath -ldflags="$(LDFLAGS)" $(MODULE)

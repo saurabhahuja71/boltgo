@@ -12,7 +12,10 @@ import (
 // Config is the user-facing agenterm settings file.
 type Config struct {
 	PermissionMode string `toml:"permission_mode"`
-	VisionEnabled  bool   `toml:"vision_enabled"`
+	// PermissionModeConfigured distinguishes an explicit config value from the
+	// in-memory default so launcher policy defaults cannot replace user choice.
+	PermissionModeConfigured bool `toml:"-"`
+	VisionEnabled            bool `toml:"vision_enabled"`
 	// Workspace is the user project root used by all filesystem and process tools.
 	// It is intentionally independent from the directory containing the Bolt binary.
 	Workspace string `toml:"workspace"`
@@ -191,9 +194,11 @@ func Load() (Config, string, error) {
 		}
 		return applyEnv(cfg), path, nil
 	}
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	metadata, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return Config{}, path, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.PermissionModeConfigured = metadata.IsDefined("permission_mode")
 	// Merge defaults for missing provider map / presets (e.g. older configs lack sglang).
 	if cfg.Providers == nil {
 		cfg.Providers = Default().Providers

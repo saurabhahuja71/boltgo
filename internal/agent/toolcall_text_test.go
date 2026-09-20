@@ -1,6 +1,9 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestExtractToolCallsFromContent(t *testing.T) {
 	known := map[string]struct{}{
@@ -27,6 +30,57 @@ func TestExtractToolCallsFromContent(t *testing.T) {
 	calls, rest = extractToolCallsFromContent("hello there", known)
 	if len(calls) != 0 || rest != "hello there" {
 		t.Fatalf("unexpected chat parse: calls=%d rest=%q", len(calls), rest)
+	}
+}
+
+func TestExtractNamedToolCallFromProviderText(t *testing.T) {
+	known := map[string]struct{}{"str_replace": {}}
+	raw := `The implementation is already correct. str_replace{"path":"calc/calc_test.go","old":"old","new":"new"}`
+	calls, rest := extractToolCallsFromContent(raw, known)
+	if len(calls) != 1 || calls[0].Function.Name != "str_replace" {
+		t.Fatalf("calls=%+v rest=%q", calls, rest)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "calc/calc_test.go") {
+		t.Fatalf("arguments=%q", calls[0].Function.Arguments)
+	}
+	if rest != "The implementation is already correct." {
+		t.Fatalf("rest=%q", rest)
+	}
+}
+
+func TestExtractXMLFunctionToolCall(t *testing.T) {
+	calls, rest := extractToolCallsFromContent(`<function=run_shell>
+<parameter=command>
+KUBECONFIG=/tmp/config kubectl get pods
+</parameter>
+</function>
+</tool_call>`, map[string]struct{}{"run_shell": {}})
+	if len(calls) != 1 || calls[0].Function.Name != "run_shell" || calls[0].Function.Arguments != `{"command":"KUBECONFIG=/tmp/config kubectl get pods"}` {
+		t.Fatalf("XML tool call = %#v", calls)
+	}
+	if rest != "" {
+		t.Fatalf("XML tool markup remained: %q", rest)
+	}
+}
+
+func TestOrdinaryToolNameMentionIsNotRecovered(t *testing.T) {
+	known := map[string]struct{}{"str_replace": {}}
+	raw := "Use str_replace when an edit is required."
+	calls, rest := extractToolCallsFromContent(raw, known)
+	if len(calls) != 0 || rest != raw {
+		t.Fatalf("calls=%+v rest=%q", calls, rest)
+	}
+}
+
+func TestExtractAdjacentNamedToolCalls(t *testing.T) {
+	known := map[string]struct{}{"str_replace": {}, "run_tests": {}}
+	raw := `str_replace{"path":"calc/calc.go","old":"old","new":"new"}run_tests{"command":"go test ./..."}`
+	calls, rest := extractToolCallsFromContent(raw, known)
+	if len(calls) != 2 || rest != "" {
+		t.Fatalf("calls=%+v rest=%q", calls, rest)
+	}
+	if calls[0].Function.Name != "str_replace" || calls[1].Function.Name != "run_tests" {
+		t.Fatalf("call order/names=%q,%q", calls[0].Function.Name, calls[1].Function.Name)
 	}
 }
 

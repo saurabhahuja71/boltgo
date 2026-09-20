@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -156,38 +157,44 @@ func runUpgrade() error {
 
 func launcherName() string {
 	base := strings.ToLower(filepath.Base(os.Args[0]))
-	if base == "bolt-s1" || base == "bolt-s2" || base == "bolt-s3" {
-		return base
+	if strings.HasPrefix(base, "bolt-s") {
+		if n, err := strconv.Atoi(strings.TrimPrefix(base, "bolt-s")); err == nil && n >= 1 && n <= 8 {
+			return base
+		}
 	}
 	return "bolt"
 }
 
 func applyLauncherPreset(cfg *config.Config, launcher string) {
 	switch launcher {
-	case "bolt-s1":
-		cfg.Provider = "custom"
-		cfg.BaseURL = envOr("BOLT_S1_BASE_URL", "http://127.0.0.1:11435/v1")
-		cfg.APIKey = envOr("BOLT_S1_API_KEY", "ollama")
-		cfg.Model = envOr("BOLT_S1_MODEL", "qwen3-coder:latest")
-		cfg.PermissionMode = "allow"
-	case "bolt-s2":
-		cfg.Provider = "custom"
-		cfg.BaseURL = envOr("BOLT_S2_BASE_URL", sglangLocalURL("SGLANG2_LOCAL_PORT", "30002"))
-		cfg.APIKey = envOr("BOLT_S2_API_KEY", "sglang")
-		cfg.Model = envOr("BOLT_S2_MODEL", envOr("SGLANG_DEFAULT_MODEL", "Darwin-9B-Opus"))
-		cfg.PermissionMode = "allow"
+	case "bolt-s1", "bolt-s2":
+		if !cfg.PermissionModeConfigured && os.Getenv("BOLT_PERMISSION_MODE") == "" {
+			cfg.PermissionMode = "allow"
+		}
 	case "bolt-s3":
-		cfg.Provider = "custom"
-		cfg.BaseURL = envOr("BOLT_S3_BASE_URL", envOr("SGLANG3_BASE_URL", "http://127.0.0.1:30004")+"/v1")
-		cfg.APIKey = envOr("BOLT_S3_API_KEY", "sglang")
-		cfg.Model = envOr("BOLT_S3_MODEL", envOr("SGLANG3_MODEL", "/sglang-data/models/gpt-oss-120b"))
-		cfg.PermissionMode = "allow"
+		if !cfg.PermissionModeConfigured && os.Getenv("BOLT_PERMISSION_MODE") == "" {
+			cfg.PermissionMode = "allow"
+		}
+		// S3's current SGLang backend needs visible answers instead of
+		// reasoning-only responses; this is behavioral, not model selection.
 		cfg.DisableThinking = true
 	}
 }
 
-func sglangLocalURL(portKey, fallbackPort string) string {
-	return "http://127.0.0.1:" + envOr(portKey, fallbackPort) + "/v1"
+func applyLauncherEnvironment(cfg *config.Config, launcher string) {
+	prefix := strings.ToUpper(strings.TrimPrefix(launcher, "bolt-"))
+	if !strings.HasPrefix(prefix, "S") {
+		return
+	}
+	if v := os.Getenv("BOLT_" + prefix + "_BASE_URL"); v != "" {
+		cfg.BaseURL, cfg.Provider = v, "custom"
+	}
+	if v := os.Getenv("BOLT_" + prefix + "_MODEL"); v != "" {
+		cfg.Model = v
+	}
+	if v := os.Getenv("BOLT_" + prefix + "_API_KEY"); v != "" {
+		cfg.APIKey = v
+	}
 }
 
 func envOr(key, fallback string) string {
@@ -216,7 +223,9 @@ func runHeadless(prompt string) error {
 	if err != nil {
 		return err
 	}
-	applyLauncherPreset(&cfg, launcherName())
+	launcher := launcherName()
+	applyLauncherEnvironment(&cfg, launcher)
+	applyLauncherPreset(&cfg, launcher)
 	if flagProvider != "" {
 		cfg.Provider = flagProvider
 	}
@@ -387,7 +396,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	applyLauncherPreset(&cfg, launcherName())
+	launcher := launcherName()
+	applyLauncherEnvironment(&cfg, launcher)
+	applyLauncherPreset(&cfg, launcher)
 
 	// CLI overrides
 	if flagProvider != "" {

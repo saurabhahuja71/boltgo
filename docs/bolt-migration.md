@@ -18,7 +18,7 @@ identifiers.
 | Todos | `internal/todos` + todo tools + fixed TUI panel | Migrated; shared store is independent of conversation scrolling and updates through the existing tool loop. |
 | Vision | config/runtime TUI state | Toggle and status are migrated; current Agenterm text client has no image-content transport, so ON is reported as requested-but-unsupported and no image call is fabricated. |
 | Bolt footer/shortcut semantics | `internal/tui` model state and Lip Gloss view | Migrated; Ctrl+Q/R/L/Y/T/O/B, Enter, Shift+Enter, dynamic permission/mouse/vision/model/status/token fallback, fixed panels. |
-| `bolt`, `bolt-s1`, `bolt-s2`, `bolt-s3` launchers | one executable selected by `argv[0]` | Migrated as thin shared-runtime aliases. S1 defaults to Ollama `127.0.0.1:11435/v1` + `qwen3-coder:latest`; S2 defaults to `SGLANG_HOST` or `127.0.0.1:30002` + `SGLANG_DEFAULT_MODEL`/`Darwin-9B-Opus`; S3 defaults to `SGLANG3_BASE_URL` or `127.0.0.1:30004` + `SGLANG3_MODEL`/`/sglang-data/models/gpt-oss-120b`. |
+| `bolt`, `bolt-s1` … `bolt-s8` launchers | one executable selected by `argv[0]` | Thin shared-runtime aliases. They select only launcher behavior; model, endpoint, provider, and API key come from the loaded config or supported environment overrides. S1–S3 retain their behavioral defaults (ALLOW, with S3 visible-answer mode). |
 | Upgrade | historical `bolt upgrade` installer command | Restored as `bolt upgrade`; it checks the latest `boltgo` GitHub release, verifies published SHA-256 assets, and atomically replaces only the executable. Configuration, permissions, sessions, and workspace files are untouched. Existing `agenterm-*` release asset names remain supported for compatibility. |
 
 ## Current execution contract
@@ -114,11 +114,9 @@ can select `ask`, `allow`, or `plan`.
 
 ## Launcher compatibility
 
-`make build` creates one `bolt` binary and `bolt-s1`, `bolt-s2`, and `bolt-s3`
-symlinks. The executable selects its preset from `argv[0]`; all four paths use
-the same runtime, workspace handling, session policy, and TUI. The shell
-functions in the previous boltpy environment also opened tunnels and warmed
-models; the Go aliases only select the endpoint/model and intentionally leave
-tunnel lifecycle to the caller. Override endpoint/model with the documented
-`BOLT_S*_BASE_URL`, `BOLT_S*_MODEL`, `SGLANG_HOST`, `SGLANG_DEFAULT_MODEL`,
-`SGLANG3_BASE_URL`, and `SGLANG3_MODEL` variables.
+`make build` creates one `bolt` binary and `bolt-s1` through `bolt-s8`
+symlinks. The executable selects its behavioral preset from `argv[0]`; all
+paths use the same runtime, workspace handling, session policy, and TUI. Model,
+endpoint, provider, and API key values are resolved centrally from the config
+file and supported `BOLT_S*_BASE_URL`, `BOLT_S*_MODEL`, and `BOLT_S*_API_KEY`
+environment overrides. Tunnel lifecycle remains the caller's responsibility.

@@ -67,6 +67,16 @@ func TestVerificationCriteriaAreIndependent(t *testing.T) {
 	}
 }
 
+func TestDeclaredVerificationCannotPassWithoutEvidence(t *testing.T) {
+	var state AgentRunState
+	state.reset("fix the implementation, run the relevant test and then go test ./...")
+	state.addObservation("read_file", `{"path":"calc/calc.go"}`, tools.ExecutionResult{Output: "contents", Category: tools.FailureSuccess})
+	state.Verification = VerificationPassed
+	if state.canVerify() {
+		t.Fatalf("verification passed without any test evidence: %+v", state)
+	}
+}
+
 func TestBuildFailureSurvivesSuccessfulRead(t *testing.T) {
 	state := verificationState()
 	state.addObservation("run_shell", `{"command":"go build ./..."}`, failedTests())
@@ -154,6 +164,16 @@ func TestAcceptanceCriteriaDetectImplementationAndRegressionTestRequests(t *test
 	criteria = acceptanceCriteriaForGoal("Change the greeting and update all affected tests")
 	if len(criteria) != 2 || criteria[0].Key != "implementation" || criteria[1].Key != "tests_added" {
 		t.Fatalf("criteria=%+v", criteria)
+	}
+}
+
+func TestReadOnlyProhibitionDoesNotCreateVerificationCriterion(t *testing.T) {
+	goal := "Go to podman9 and report images. Do not pull, delete, restart, or build images."
+	criteria := acceptanceCriteriaForGoal(goal)
+	for _, criterion := range criteria {
+		if strings.HasPrefix(criterion.Key, "verification:") {
+			t.Fatalf("prohibited build was treated as requested verification: %+v", criteria)
+		}
 	}
 }
 

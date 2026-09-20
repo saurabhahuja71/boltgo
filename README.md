@@ -79,9 +79,10 @@ bolt --ping            # check the API
 bolt                   # open the Bolt TUI (Ollama default)
 
 # Optional launcher presets:
-bolt-s1                # configured Ollama/S1 runtime
-bolt-s2                # configured SGLang/S2 runtime
-bolt-s3                # configured SGLang/S3 runtime
+bolt-s1                # S1 behavioral preset; model/endpoint come from config
+bolt-s2                # S2 behavioral preset; model/endpoint come from config
+bolt-s3                # S3 behavioral preset; model/endpoint come from config
+bolt-s4 ... bolt-s8     # additional thin aliases using the same config
 
 # SGLang instead:
 bolt --provider sglang --ping
@@ -163,7 +164,7 @@ Also published: `linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64.ex
 ```bash
 git clone https://github.com/saurabhahuja71/boltgo.git
 cd boltgo
-make build          # → ./bolt and bolt-s1/bolt-s2/bolt-s3 aliases
+make build          # → ./bolt and bolt-s1 through bolt-s8 aliases
 ./bolt              # primary Go Bolt executable
 make install        # → $(go env GOPATH)/bin (or $GOBIN)
 # or:

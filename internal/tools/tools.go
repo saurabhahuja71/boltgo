@@ -496,6 +496,7 @@ func (runShell) Name() string { return "run_shell" }
 func (runShell) Description() string {
 	return "Run ONE short bash command (scripts, make, single curl/wget URL, tests). " +
 		"Timeout 25s; process group is killed on timeout. " +
+		"For a remote SSH command from ~/.ssh/config, use ssh_execute directly; run_shell is for local commands and SSH tunnel setup only. " +
 		"Do NOT crawl sites or check many links via xargs/find+curl — use the fetch tool on explicit URLs from repo files. " +
 		"Prefer fetch for HTTP GET; prefer read_file/str_replace for file work."
 }
@@ -601,6 +602,9 @@ func ShellCommandBlocked(cmd string) string {
 
 func shellCommandBlocked(cmd string) string {
 	low := strings.ToLower(cmd)
+	if isRemoteSSHCommand(cmd) {
+		return "blocked remote SSH command in run_shell; call ssh_execute with the SSH config alias and literal remote command"
+	}
 	// Any xargs over the tree is a hang risk (curl, grep, etc.)
 	if strings.Contains(low, "xargs") {
 		return "blocked xargs pipeline. Use the grep tool (pattern) and fetch tool (one URL at a time), not shell xargs."
@@ -636,6 +640,38 @@ func shellCommandBlocked(cmd string) string {
 		return "blocked: command too long"
 	}
 	return ""
+}
+
+// isRemoteSSHCommand distinguishes a remote command from read-only SSH config
+// inspection and tunnel setup. Remote commands have a token after the target
+// alias; they must use ssh_execute so SSH config loading, root image storage,
+// and tool-result handling stay consistent.
+func isRemoteSSHCommand(command string) bool {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 || fields[0] != "ssh" {
+		return false
+	}
+	optionsWithValue := map[string]bool{"-b": true, "-c": true, "-D": true, "-E": true, "-F": true, "-I": true, "-i": true, "-J": true, "-L": true, "-l": true, "-o": true, "-p": true, "-R": true, "-S": true, "-W": true, "-w": true}
+	optionsWithoutValue := map[string]bool{"-4": true, "-6": true, "-f": true, "-N": true, "-n": true, "-q": true, "-T": true, "-v": true}
+	targetSeen := false
+	for i := 1; i < len(fields); i++ {
+		field := fields[i]
+		if targetSeen && optionsWithoutValue[field] {
+			continue
+		}
+		if !targetSeen && strings.HasPrefix(field, "-") {
+			if optionsWithValue[field] {
+				i++
+			}
+			continue
+		}
+		if !targetSeen {
+			targetSeen = true
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 var shellAbsolutePath = regexp.MustCompile(`(?:^|[\s"'=])(/[^\s"';&|()]+)`)

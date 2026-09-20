@@ -109,10 +109,10 @@ fi
 # Keep the historical executable name while making Bolt the primary command.
 # Symlinks also preserve argv[0], so the launcher presets select bolt-s1/s2/s3.
 if [[ "$os" != "windows" ]]; then
-  for launcher in agenterm bolt-s1 bolt-s2 bolt-s3; do
+  for launcher in agenterm bolt-s1 bolt-s2 bolt-s3 bolt-s4 bolt-s5 bolt-s6 bolt-s7 bolt-s8; do
     ln -sfn "$(basename "$dest")" "${INSTALL_DIR}/${launcher}"
   done
-  echo "Installed launchers: bolt, bolt-s1, bolt-s2, bolt-s3 (agenterm compatibility alias)"
+  echo "Installed launchers: bolt, bolt-s1 through bolt-s8 (agenterm compatibility alias)"
 fi
 
 # PATH hint

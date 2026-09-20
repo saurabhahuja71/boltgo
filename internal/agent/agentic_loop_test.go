@@ -57,6 +57,12 @@ func toolSSEMultiple(calls ...llm.ToolCall) string {
 	return fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"tool_calls\":%s}}]}\n\ndata: [DONE]\n\n", b)
 }
 
+func mixedToolSSE(content string, call llm.ToolCall) string {
+	b, _ := json.Marshal(call)
+	c, _ := json.Marshal(content)
+	return fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":%s,\"tool_calls\":[%s]}}]}\n\ndata: [DONE]\n\n", c, b)
+}
+
 func textSSE(text string) string {
 	b, _ := json.Marshal(text)
 	return fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":%s}}]}\n\ndata: [DONE]\n\n", b)
@@ -165,6 +171,31 @@ func TestAgentStructuredToolProtocolChainsResultIntoNextCall(t *testing.T) {
 	}
 }
 
+func TestAgentPreservesEmptyToolResultAsValidMessage(t *testing.T) {
+	reader := &scriptedTool{name: "ssh_execute", outputs: []scriptedOutcome{{out: ""}}}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return toolSSE("ssh_execute", `{"host":"podman9","command":"sudo -i"}`)
+		}
+		return textSSE("the command completed without output")
+	}, reg)
+	defer closeServer()
+
+	if err := ag.RunUserMessage(context.Background(), "inspect the remote host and report", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) < 2 {
+		t.Fatalf("empty tool result did not reach the next request: %d requests", len(*requests))
+	}
+	for _, msg := range (*requests)[1].Messages {
+		if msg.Role == llm.RoleTool && msg.ToolCallID == "call-1" && strings.TrimSpace(msg.Content) == "" {
+			t.Fatal("empty tool result was serialized without content")
+		}
+	}
+}
+
 func TestAgentPreservesConfiguredOutputLimitAfterTools(t *testing.T) {
 	reader := &scriptedTool{name: "read_file"}
 	reg := tools.NewRegistry()
@@ -211,6 +242,36 @@ func TestAgentRetriesUnsupportedToolMarkupOnce(t *testing.T) {
 	}
 	if len(reader.calls) != 1 || len(*requests) < 3 || ag.RunState.Verification != VerificationPassed {
 		t.Fatalf("markup recovery failed: calls=%d requests=%d state=%+v", len(reader.calls), len(*requests), ag.RunState)
+	}
+}
+
+func TestAgentRunsTextToolCallAlongsideStructuredToolCall(t *testing.T) {
+	edit := &scriptedTool{name: "str_replace"}
+	tests := &scriptedTool{name: "run_tests"}
+	reg := tools.NewRegistry()
+	reg.Register(edit)
+	reg.Register(tests)
+	ag, _, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return mixedToolSSE(`str_replace{"path":"x.go","old":"old","new":"new"}`, llm.ToolCall{
+				ID: "test-call", Type: "function", Function: llm.FunctionCall{Name: "run_tests", Arguments: `{"command":"go test ./..."}`},
+			})
+		}
+		return textSSE("verified")
+	}, reg)
+	defer closeServer()
+
+	if err := ag.RunUserMessage(context.Background(), "fix x.go and run go test ./...", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	edit.mu.Lock()
+	editCalls := len(edit.calls)
+	edit.mu.Unlock()
+	tests.mu.Lock()
+	testCalls := len(tests.calls)
+	tests.mu.Unlock()
+	if editCalls != 1 || testCalls != 1 {
+		t.Fatalf("mixed tool calls were not both executed: edit=%d tests=%d state=%+v", editCalls, testCalls, ag.RunState)
 	}
 }
 

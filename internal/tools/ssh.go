@@ -16,7 +16,7 @@ type sshExecute struct{}
 
 func (sshExecute) Name() string { return "ssh_execute" }
 func (sshExecute) Description() string {
-	return "Execute a literal command on an SSH config alias (for example podman8 or podman9). Docker/Podman image-list commands are run with non-interactive sudo so the result is from root storage. Read-only kubectl commands with an explicit KUBECONFIG use the current local shell and tunnel rather than treating a Kubernetes cluster name as an SSH hostname. Before using this, prefer run_shell for kubectl, watch, logs, and other commands that should run in the current shell; ssh_execute checks the current hostname and kubectl context and runs locally when the target is already local."
+	return "Execute a literal remote command on an SSH config alias (for example podman8 or podman9). Use this tool directly for SSH host commands; do not wrap remote SSH commands in run_shell. Docker/Podman image-list commands are run with non-interactive sudo so the result is from root storage. Read-only kubectl commands with an explicit KUBECONFIG use the current local shell and tunnel rather than treating a Kubernetes cluster name as an SSH hostname. Before using this, prefer run_shell for kubectl, watch, logs, and other commands that should run in the current shell; ssh_execute checks the current hostname and kubectl context and runs locally when the target is already local."
 }
 func (sshExecute) Schema() map[string]any {
 	return map[string]any{"type": "object", "required": []string{"host", "command"}, "additionalProperties": false, "properties": map[string]any{

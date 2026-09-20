@@ -586,11 +586,15 @@ Do not answer with only a markdown plan or shell snippets.`,
 			emit(Event{Kind: EventUsage, Usage: &usage})
 		}
 
-		// Ollama/Qwen often print tools as plain JSON content — recover and run them.
-		if len(msg.ToolCalls) == 0 && len(roundTools) > 0 && a.Tools != nil {
+		// Ollama-compatible providers can mix a structured tool call with a
+		// second compact textual call in the same assistant message. Recover
+		// advertised textual calls even when one native call is already present;
+		// otherwise the text is silently discarded and the task can lose an
+		// independent edit or verification action.
+		if len(roundTools) > 0 && a.Tools != nil {
 			if recovered, rest := extractToolCallsFromContent(msg.Content, toolNameSet(a.Tools)); len(recovered) > 0 {
 				emit(Event{Kind: EventStatus, Text: fmt.Sprintf("recovered %d tool call(s) from text", len(recovered))})
-				msg.ToolCalls = recovered
+				msg.ToolCalls = append(recovered, msg.ToolCalls...)
 				msg.Content = rest
 			}
 		}
@@ -952,6 +956,13 @@ Do not answer with only a markdown plan or shell snippets.`,
 			out := result.Output
 			// Cap what the model sees so it does not re-dump huge listings into chat.
 			outForModel := capToolResult(result.ModelOutput(), 6_000)
+			// OpenAI-compatible APIs require tool messages to carry a concrete
+			// string content value. Commands such as `sudo -i` can succeed while
+			// producing no stdout; leaving Content empty makes JSON omit it and
+			// Ollama rejects the next request with "invalid message content type".
+			if strings.TrimSpace(outForModel) == "" {
+				outForModel = "[tool completed successfully with no output]"
+			}
 			emit(Event{Kind: EventToolEnd, Tool: name, ToolOut: out}) // TUI uses compact formatter
 			a.History = append(a.History, llm.Message{
 				Role:       llm.RoleTool,
@@ -1153,7 +1164,7 @@ func isActionRequest(user string) bool {
 	}
 	needles := []string{
 		"do it", "apply the", "apply these", "apply this", "make the change",
-		"implement ", "implement it", "write the", "update the readme", "update readme",
+		"implement ", "implement it", "fix ", "write the", "update the readme", "update readme",
 		"edit the", "fix the", "create a branch", "create branch", "commit ",
 		"git commit", "git push", "push the", "refactor ", "add a section",
 		"improve the readme", "improve readme", "please apply", "go ahead and",

@@ -3,7 +3,9 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,8 +16,10 @@ import (
 // text JSON instead of OpenAI tool_calls. Recover those so the agent loop runs.
 
 var (
-	reJSONObject = regexp.MustCompile(`(?s)\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
-	reFencedJSON = regexp.MustCompile("(?s)```(?:json|tool)?\\s*(\\{.*?\\})\\s*```")
+	reJSONObject   = regexp.MustCompile(`(?s)\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
+	reFencedJSON   = regexp.MustCompile("(?s)```(?:json|tool)?\\s*(\\{.*?\\})\\s*```")
+	reXMLFunction  = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_]+)>\s*(.*?)\s*</function>`)
+	reXMLParameter = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_]+)>\s*(.*?)\s*</parameter>`)
 )
 
 // hasUnsupportedToolMarkup identifies common template tags that are not
@@ -78,6 +82,14 @@ func extractToolCallsFromContent(content string, knownTools map[string]struct{})
 		return []llm.ToolCall{tc}, ""
 	}
 
+	// Some local chat templates emit the same call as XML-like markup rather
+	// than JSON, for example <function=run_shell><parameter=command>...</parameter>
+	// </function>. Recover only advertised tools and named parameters; ordinary
+	// prose containing angle brackets remains untouched.
+	if calls, rest := extractXMLToolCalls(content, knownTools); len(calls) > 0 {
+		return calls, rest
+	}
+
 	// Scan for JSON objects that look like tool calls.
 	matches := reJSONObject.FindAllStringIndex(content, -1)
 	if len(matches) == 0 {
@@ -97,9 +109,166 @@ func extractToolCallsFromContent(content string, knownTools map[string]struct{})
 	b.WriteString(content[last:])
 	rest = strings.TrimSpace(b.String())
 	if len(calls) == 0 {
-		return nil, content
+		return extractNamedToolCalls(content, knownTools)
 	}
 	return calls, rest
+}
+
+func extractXMLToolCalls(content string, knownTools map[string]struct{}) ([]llm.ToolCall, string) {
+	var calls []llm.ToolCall
+	var b strings.Builder
+	last := 0
+	for _, match := range reXMLFunction.FindAllStringSubmatchIndex(content, -1) {
+		if len(match) < 6 {
+			continue
+		}
+		name := content[match[2]:match[3]]
+		if _, ok := knownTools[name]; !ok {
+			continue
+		}
+		body := content[match[4]:match[5]]
+		args := map[string]string{}
+		for _, parameter := range reXMLParameter.FindAllStringSubmatchIndex(body, -1) {
+			if len(parameter) < 6 {
+				continue
+			}
+			key := body[parameter[2]:parameter[3]]
+			value := html.UnescapeString(strings.TrimSpace(body[parameter[4]:parameter[5]]))
+			args[key] = value
+		}
+		if len(args) == 0 {
+			continue
+		}
+		encoded, err := json.Marshal(args)
+		if err != nil {
+			continue
+		}
+		wrapped := fmt.Sprintf(`{"name":%q,"arguments":%s}`, name, encoded)
+		tc, ok := parseOneToolJSON(wrapped, knownTools)
+		if !ok {
+			continue
+		}
+		b.WriteString(content[last:match[0]])
+		calls = append(calls, tc)
+		last = match[1]
+	}
+	if len(calls) == 0 {
+		return nil, content
+	}
+	b.WriteString(content[last:])
+	return calls, strings.TrimSpace(strings.ReplaceAll(b.String(), "</tool_call>", ""))
+}
+
+// extractNamedToolCalls recovers the compact function-style form emitted by
+// some OpenAI-compatible local providers, for example:
+//
+//	str_replace{"path":"calc/calc_test.go", ...}
+//
+// This is still parsed only when the name is an advertised tool and the
+// following value is a JSON object. Ordinary prose mentioning a tool name is
+// therefore left untouched.
+func extractNamedToolCalls(content string, knownTools map[string]struct{}) ([]llm.ToolCall, string) {
+	type candidate struct {
+		start int
+		end   int
+		call  llm.ToolCall
+	}
+	var candidates []candidate
+	for name := range knownTools {
+		for start := 0; ; {
+			rel := strings.Index(content[start:], name)
+			if rel < 0 {
+				break
+			}
+			idx := start + rel
+			if !toolNameBoundary(content, idx, len(name)) {
+				start = idx + len(name)
+				continue
+			}
+			pos := idx + len(name)
+			for pos < len(content) && (content[pos] == ' ' || content[pos] == '\t' || content[pos] == ':' || content[pos] == '(') {
+				pos++
+			}
+			if pos >= len(content) || content[pos] != '{' {
+				start = idx + len(name)
+				continue
+			}
+			end := matchingJSONObjectEnd(content, pos)
+			if end < 0 {
+				break
+			}
+			wrapped := fmt.Sprintf(`{"name":%q,"arguments":%s}`, name, content[pos:end+1])
+			if tc, ok := parseOneToolJSON(wrapped, knownTools); ok {
+				candidates = append(candidates, candidate{start: idx, end: end + 1, call: tc})
+			}
+			start = end + 1
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, content
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].start < candidates[j].start })
+	var calls []llm.ToolCall
+	var b strings.Builder
+	last := 0
+	for _, item := range candidates {
+		if item.start < last {
+			continue
+		}
+		b.WriteString(content[last:item.start])
+		calls = append(calls, item.call)
+		last = item.end
+	}
+	b.WriteString(content[last:])
+	rest := strings.TrimSpace(b.String())
+	return calls, rest
+}
+
+func toolNameBoundary(content string, start, length int) bool {
+	if start > 0 {
+		prev := content[start-1]
+		if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
+			return false
+		}
+	}
+	if end := start + length; end < len(content) {
+		next := content[end]
+		if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || (next >= '0' && next <= '9') || next == '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func matchingJSONObjectEnd(content string, start int) int {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(content); i++ {
+		ch := content[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 func parseOneToolJSON(raw string, knownTools map[string]struct{}) (llm.ToolCall, bool) {

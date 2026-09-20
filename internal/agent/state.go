@@ -188,6 +188,9 @@ func (s *AgentRunState) completedCriteria() string {
 }
 
 func (s *AgentRunState) canVerify() bool {
+	if s.requiresVerification() && !s.hasSuccessfulVerificationEvidence() {
+		return false
+	}
 	for _, criterion := range s.VerificationCriteria {
 		if criterion.Status != VerificationPassed {
 			return false
@@ -199,6 +202,19 @@ func (s *AgentRunState) canVerify() bool {
 	// Non-verification failures retain the existing recovery behavior. A
 	// verification failure is handled above and cannot be cleared by a read.
 	return len(s.Observations) > 0 && s.Observations[len(s.Observations)-1].Success
+}
+
+func (s *AgentRunState) requiresVerification() bool {
+	for _, criterion := range s.AcceptanceCriteriaState {
+		// Independent verification requirements are concrete evidence gates. A
+		// generic "verify it" criterion may still be satisfied by the existing
+		// no-op confirmation path, but named focused/full test requirements may
+		// not pass without corresponding tool evidence.
+		if strings.HasPrefix(criterion.Key, "verification:") {
+			return true
+		}
+	}
+	return false
 }
 
 // canComplete is the final completion gate. Verification is necessary, but
@@ -376,7 +392,7 @@ func goalRequestsVerification(low string) bool {
 	return strings.Contains(low, "run test") ||
 		strings.Contains(low, "run go test") ||
 		strings.Contains(low, "verify") ||
-		strings.Contains(low, "build") ||
+		strings.Contains(low, "go build") ||
 		strings.Contains(low, "vet") ||
 		strings.Contains(low, "run the relevant test") ||
 		strings.Contains(low, "run relevant test") ||

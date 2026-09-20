@@ -8,7 +8,7 @@ import (
 )
 
 func TestLauncherPresetsShareOneRuntime(t *testing.T) {
-	for _, name := range []string{"bolt", "bolt-s1", "bolt-s2", "bolt-s3"} {
+	for _, name := range []string{"bolt", "bolt-s1", "bolt-s2", "bolt-s3", "bolt-s4", "bolt-s5", "bolt-s6", "bolt-s7", "bolt-s8"} {
 		old := os.Args[0]
 		os.Args[0] = name
 		if got := launcherName(); got != name {
@@ -20,25 +20,47 @@ func TestLauncherPresetsShareOneRuntime(t *testing.T) {
 		if cfg.BaseURL == "" || cfg.Model == "" {
 			t.Fatalf("%s incomplete preset: %#v", name, cfg)
 		}
-		if name == "bolt-s1" && cfg.PermissionMode != "allow" {
-			t.Fatalf("bolt-s1 permission mode = %q, want allow", cfg.PermissionMode)
+		if (name == "bolt-s1" || name == "bolt-s2" || name == "bolt-s3") && cfg.PermissionMode != "allow" {
+			t.Fatalf("%s permission mode = %q, want allow", name, cfg.PermissionMode)
 		}
 	}
 }
 
-func TestLauncherPresetsUseDedicatedSGLangSettings(t *testing.T) {
-	t.Setenv("SGLANG_HOST", "http://127.0.0.1:30000")
-	t.Setenv("SGLANG2_LOCAL_PORT", "30002")
+func TestLauncherPreservesConfiguredModelAndEndpoint(t *testing.T) {
 	cfg := config.Default()
-	applyLauncherPreset(&cfg, "bolt-s2")
-	if cfg.BaseURL != "http://127.0.0.1:30002/v1" {
-		t.Fatalf("bolt-s2 BaseURL = %q, want dedicated local port", cfg.BaseURL)
+	cfg.Model, cfg.BaseURL, cfg.Provider = "configured-model", "http://configured.example/v1", "custom"
+	for _, name := range []string{"bolt-s1", "bolt-s2", "bolt-s3", "bolt-s4", "bolt-s5", "bolt-s6", "bolt-s7", "bolt-s8"} {
+		got := cfg
+		applyLauncherEnvironment(&got, name)
+		applyLauncherPreset(&got, name)
+		if got.Model != cfg.Model || got.BaseURL != cfg.BaseURL {
+			t.Fatalf("%s replaced configured values: got model=%q base=%q", name, got.Model, got.BaseURL)
+		}
 	}
+}
 
+func TestLauncherEnvironmentOverridesConfiguredValues(t *testing.T) {
+	t.Setenv("BOLT_S1_MODEL", "env-model")
+	t.Setenv("BOLT_S1_BASE_URL", "http://env.example/v1")
+	cfg := config.Default()
+	cfg.Model, cfg.BaseURL = "configured-model", "http://configured.example/v1"
+	applyLauncherEnvironment(&cfg, "bolt-s1")
+	if cfg.Model != "env-model" || cfg.BaseURL != "http://env.example/v1" || cfg.Provider != "custom" {
+		t.Fatalf("environment override failed: %#v", cfg)
+	}
+}
+
+func TestBoltS1PolicyDefaultAndExplicitPolicy(t *testing.T) {
+	cfg := config.Default()
+	applyLauncherPreset(&cfg, "bolt-s1")
+	if cfg.PermissionMode != "allow" {
+		t.Fatalf("default bolt-s1 policy = %q, want allow", cfg.PermissionMode)
+	}
 	cfg = config.Default()
-	applyLauncherPreset(&cfg, "bolt-s3")
-	if !cfg.DisableThinking {
-		t.Fatal("bolt-s3 must disable Qwen3 thinking-only responses")
+	cfg.PermissionMode, cfg.PermissionModeConfigured = "ask", true
+	applyLauncherPreset(&cfg, "bolt-s1")
+	if cfg.PermissionMode != "ask" {
+		t.Fatalf("explicit bolt-s1 policy was replaced: %q", cfg.PermissionMode)
 	}
 }
 
