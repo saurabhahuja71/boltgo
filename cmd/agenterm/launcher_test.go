@@ -20,6 +20,9 @@ func TestLauncherPresetsShareOneRuntime(t *testing.T) {
 		if cfg.BaseURL == "" || cfg.Model == "" {
 			t.Fatalf("%s incomplete preset: %#v", name, cfg)
 		}
+		if name == "bolt-s1" && cfg.PermissionMode != "allow" {
+			t.Fatalf("bolt-s1 permission mode = %q, want allow", cfg.PermissionMode)
+		}
 	}
 }
 

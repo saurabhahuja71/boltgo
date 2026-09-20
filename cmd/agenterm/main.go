@@ -169,6 +169,7 @@ func applyLauncherPreset(cfg *config.Config, launcher string) {
 		cfg.BaseURL = envOr("BOLT_S1_BASE_URL", "http://127.0.0.1:11435/v1")
 		cfg.APIKey = envOr("BOLT_S1_API_KEY", "ollama")
 		cfg.Model = envOr("BOLT_S1_MODEL", "qwen3-coder:latest")
+		cfg.PermissionMode = "allow"
 	case "bolt-s2":
 		cfg.Provider = "custom"
 		cfg.BaseURL = envOr("BOLT_S2_BASE_URL", sglangLocalURL("SGLANG2_LOCAL_PORT", "30002"))
