@@ -36,7 +36,7 @@ var (
 	flagShell            bool
 	flagNoShell          bool
 	flagPing             bool
-	flagResume           bool
+	flagResume           string
 	flagNoResume         bool
 	flagWorkspace        string
 	flagGoalGraph        bool
@@ -66,7 +66,7 @@ func main() {
 	root.PersistentFlags().BoolVar(&flagShell, "shell", false, "force-enable run_shell (bash/curl/wget/scripts)")
 	root.PersistentFlags().BoolVar(&flagNoShell, "no-shell", false, "disable run_shell for this session")
 	root.PersistentFlags().BoolVar(&flagPing, "ping", false, "check LLM endpoint and exit")
-	root.PersistentFlags().BoolVar(&flagResume, "resume", false, "explicitly resume the workspace session")
+	root.PersistentFlags().StringVar(&flagResume, "resume", "", "resume a workspace session by ID (for example: latest)")
 	root.PersistentFlags().BoolVar(&flagNoResume, "no-resume", false, "explicitly start a fresh conversation")
 	root.PersistentFlags().StringVar(&flagInferenceProfile, "inference-profile", "", "opt-in inference profile (e.g. local-coding-reproducible)")
 	root.PersistentFlags().StringVarP(&flagWorkspace, "workspace", "p", "", "user workspace for all filesystem and shell tools (default: current directory)")
@@ -192,23 +192,7 @@ func envOr(key, fallback string) string {
 }
 
 func resumeRequested() bool {
-	if flagResume {
-		return true
-	}
-	if flagNoResume {
-		return false
-	}
-	// S3 is the remote/shared model launcher. Do not accidentally replay a
-	// prior workspace conversation because a shell or wrapper exported the
-	// generic BOLT_RESUME setting. An explicit --resume still opts in.
-	if launcherName() == "bolt-s3" {
-		return false
-	}
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("BOLT_RESUME")))
-	if v == "" {
-		return true
-	}
-	return v == "1" || v == "true" || v == "yes" || v == "on"
+	return strings.TrimSpace(flagResume) != "" && !flagNoResume
 }
 
 func runHeadless(prompt string) error {
@@ -261,7 +245,7 @@ func runHeadless(prompt string) error {
 			cfg.InferenceProfile = "local-coding-reproducible"
 		}
 	}
-	if flagResume && flagNoResume {
+	if strings.TrimSpace(flagResume) != "" && flagNoResume {
 		return fmt.Errorf("--resume and --no-resume are mutually exclusive")
 	}
 	eff := cfg.Effective()
@@ -332,15 +316,19 @@ func runHeadless(prompt string) error {
 		return err
 	}
 	if resumeRequested() {
-		if err := ag.LoadSession(sessionPath); err != nil {
+		resumePath, pathErr := agent.WorkspaceSessionPath(eff.Workspace, strings.TrimSpace(flagResume))
+		if pathErr != nil {
+			return pathErr
+		}
+		if err := ag.LoadSession(resumePath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				fmt.Fprintf(os.Stderr, "session resume: no previous session at %s\n", sessionPath)
+				fmt.Fprintf(os.Stderr, "session resume: no previous session at %s\n", resumePath)
 			} else {
 				fmt.Fprintf(os.Stderr, "session resume: %v\n", err)
 				saveSession = false
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "resumed session %s\n", sessionPath)
+			fmt.Fprintf(os.Stderr, "resumed session %s\n", resumePath)
 		}
 	}
 	if flagDaily && saveSession {
@@ -427,7 +415,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if flagDaily && isOllamaConfig(cfg.Effective()) {
 		cfg.InferenceProfile = "local-coding-reproducible"
 	}
-	if flagResume && flagNoResume {
+	if strings.TrimSpace(flagResume) != "" && flagNoResume {
 		return fmt.Errorf("--resume and --no-resume are mutually exclusive")
 	}
 
@@ -487,8 +475,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		ag.EnableDailyMode()
 	}
 
-	// Bolt resumes the workspace's latest session by default. --no-resume keeps
-	// the old fresh-session behavior for one launch.
+	// Bolt starts fresh by default. --resume <session-id> explicitly restores
+	// a saved workspace session; --no-resume is an explicit fresh override.
 	resume := resumeRequested()
 	saveSession := true
 	sessionPath, err := agent.WorkspaceSessionPath(eff.Workspace, "latest")
@@ -496,15 +484,19 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if resume {
-		if err := ag.LoadSession(sessionPath); err != nil {
+		resumePath, pathErr := agent.WorkspaceSessionPath(eff.Workspace, strings.TrimSpace(flagResume))
+		if pathErr != nil {
+			return pathErr
+		}
+		if err := ag.LoadSession(resumePath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				fmt.Fprintf(os.Stderr, "session resume: no previous session at %s\n", sessionPath)
+				fmt.Fprintf(os.Stderr, "session resume: no previous session at %s\n", resumePath)
 			} else {
 				fmt.Fprintf(os.Stderr, "session resume: %v\n", err)
 				saveSession = false
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "  resumed session %s\n", sessionPath)
+			fmt.Fprintf(os.Stderr, "  resumed session %s\n", resumePath)
 		}
 	}
 	if flagDaily && saveSession {

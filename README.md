@@ -424,7 +424,8 @@ bolt --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf
 bolt --no-tools           # pure chat (faster)
 bolt --shell              # allow run_shell
 bolt --no-mcp
-bolt --no-resume          # start fresh without loading the workspace session
+bolt --resume latest      # explicitly resume a saved workspace session
+bolt --no-resume          # explicitly start fresh (default behavior)
 bolt upgrade              # download and atomically install the latest Go release
 ```
 
@@ -446,10 +447,10 @@ bolt upgrade              # download and atomically install the latest Go releas
 ```
 
 Bolt automatically saves completed turns to `.bolt/sessions/latest.json` in
-the active workspace and resumes that session on the next launch. Use
-`--no-resume` for a fresh launch, or `/sessions`, `/save`, and `/load` to
-manage named workspace sessions. An interrupted or corrupt session is not
-silently replayed.
+the active workspace. Launches are fresh by default; use `--resume <session-id>`
+to restore a session explicitly, or `/sessions`, `/save`, and `/load` to manage
+named workspace sessions. An interrupted or corrupt session is not silently
+replayed.
 
 Greetings skip tools automatically. For fully tool-free sessions: `/tools off`, `enable_tools = false`, or `AGENTERM_ENABLE_TOOLS=0`.
 

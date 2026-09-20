@@ -28,24 +28,22 @@ func TestResumeRequestedPrecedence(t *testing.T) {
 	oldArg := os.Args[0]
 	t.Cleanup(func() { flagResume, flagNoResume, os.Args[0] = oldResume, oldNoResume, oldArg })
 	os.Args[0] = "bolt"
-	flagResume, flagNoResume = false, false
-	t.Setenv("BOLT_RESUME", "")
-	if !resumeRequested() {
-		t.Fatal("normal Bolt launch should resume the workspace session by default")
+	flagResume, flagNoResume = "", false
+	if resumeRequested() {
+		t.Fatal("normal Bolt launch should start a fresh session by default")
 	}
-	t.Setenv("BOLT_RESUME", "1")
+	flagResume = "latest"
 	if !resumeRequested() {
-		t.Fatal("BOLT_RESUME=1 should request resume")
+		t.Fatal("--resume latest should request resume")
 	}
 	flagNoResume = true
 	if resumeRequested() {
 		t.Fatal("--no-resume should override BOLT_RESUME")
 	}
 	flagNoResume = false
-	flagResume = true
-	t.Setenv("BOLT_RESUME", "0")
+	flagResume = "latest"
 	if !resumeRequested() {
-		t.Fatal("--resume should override BOLT_RESUME=0")
+		t.Fatal("--resume latest should override an empty default")
 	}
 }
 
@@ -53,13 +51,13 @@ func TestBoltS3StartsFreshUnlessExplicitResume(t *testing.T) {
 	oldResume, oldNoResume, oldArg := flagResume, flagNoResume, os.Args[0]
 	t.Cleanup(func() { flagResume, flagNoResume, os.Args[0] = oldResume, oldNoResume, oldArg })
 	os.Args[0] = "bolt-s3"
-	flagResume, flagNoResume = false, false
+	flagResume, flagNoResume = "", false
 	t.Setenv("BOLT_RESUME", "1")
 	if resumeRequested() {
 		t.Fatal("bolt-s3 must ignore implicit BOLT_RESUME")
 	}
-	flagResume = true
+	flagResume = "latest"
 	if !resumeRequested() {
-		t.Fatal("explicit --resume must still resume bolt-s3")
+		t.Fatal("explicit --resume latest must still resume bolt-s3")
 	}
 }
