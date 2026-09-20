@@ -55,7 +55,7 @@ func TestBoltShortcutsAndFooterState(t *testing.T) {
 		}
 	}
 	view := m.View()
-	for _, want := range []string{"Bolt · ALLOW", "INTERACTIVE", "Vision ON", "—", "Ctrl+Q"} {
+	for _, want := range []string{"Ctrl+R ALLOW", "INTERACTIVE", "Ctrl+Y Vision ON", "Ctrl+Q"} {
 		if !containsText(view, want) {
 			t.Fatalf("status/footer missing %q: %s", want, view)
 		}
@@ -85,7 +85,7 @@ func TestDailyViewShowsModeProfileStageAndCheckpoint(t *testing.T) {
 }
 
 func TestTruncateCellsKeepsFixedStatusOnOneTerminalRow(t *testing.T) {
-	status := "Bolt · ASK · SELECT · Darwin-9B-Opus · 12171 tokens · ← read_file · ok (2.0 KB) ⠋"
+	status := "Bolt · Ctrl+R ASK · Ctrl+L SELECT · Ctrl+Y Vision OFF · Darwin-9B-Opus · 12171 tokens · Ready"
 	got := truncateCells(status, 40)
 	if lipgloss.Width(got) > 40 {
 		t.Fatalf("truncated status width=%d want <= 40: %q", lipgloss.Width(got), got)
@@ -573,7 +573,7 @@ func fixedRegionCounts(view string) (header, status, input, footer int) {
 		if strings.Contains(line, "Bolt · test · /help") {
 			header++
 		}
-		if strings.Contains(line, "Bolt · ASK ·") {
+		if strings.Contains(line, "Ctrl+R ASK") {
 			status++
 		}
 		if strings.Contains(line, "› Message…") {

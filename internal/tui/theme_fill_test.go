@@ -85,7 +85,7 @@ func TestStatusLineIsCompactSubtle(t *testing.T) {
 	// remains a single compact line rather than treating its canvas as a bar.
 	statusLines := 0
 	for _, line := range strings.Split(view, "\n") {
-		if !strings.Contains(line, "· ASK ·") {
+		if !strings.Contains(line, "Ctrl+R ASK") {
 			continue
 		}
 		statusLines++
