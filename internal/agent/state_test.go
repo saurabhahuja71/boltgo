@@ -392,3 +392,11 @@ func TestCommaCollectionRequirementsAreIndependent(t *testing.T) {
 		t.Fatalf("collection requirements = %+v", reqs)
 	}
 }
+
+func TestCommaIdentificationRequirementsAreIndependent(t *testing.T) {
+	goal := "Identify object growth, retained references, intentional caching, resource leaks, and expected versus unexpected memory behavior."
+	reqs := ExtractExplicitRequirements(goal)
+	if len(reqs) != 5 {
+		t.Fatalf("identification requirements = %+v", reqs)
+	}
+}

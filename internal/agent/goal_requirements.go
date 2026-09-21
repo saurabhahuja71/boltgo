@@ -77,7 +77,7 @@ func ExtractExplicitRequirements(goal string) []GoalRequirement {
 
 func bulletInspectionRequirements(goal string) []GoalRequirement {
 	low := strings.ToLower(goal)
-	if !strings.Contains(low, "inspect:") && !strings.Contains(low, "collect:") && !strings.Contains(low, "investigate:") {
+	if !strings.Contains(low, "inspect:") && !strings.Contains(low, "collect:") && !strings.Contains(low, "investigate:") && !strings.Contains(low, "identify:") && !strings.Contains(low, "determine:") && !strings.Contains(low, "compare:") && !strings.Contains(low, "trace:") {
 		return nil
 	}
 	var out []GoalRequirement
@@ -97,46 +97,47 @@ func bulletInspectionRequirements(goal string) []GoalRequirement {
 
 func commaInspectionRequirements(text string) []GoalRequirement {
 	low := strings.ToLower(text)
-	start := -1
-	verb := ""
-	for _, candidate := range []string{"inspect ", "collect ", "investigate "} {
-		if i := strings.Index(low, candidate); i >= 0 && (start < 0 || i < start) {
-			start, verb = i, strings.TrimSpace(candidate)
-		}
-	}
-	if start < 0 {
-		return nil
-	}
-	end := len(text)
-	for _, marker := range []string{". determine", ". do not", ". return", "\n"} {
-		if i := strings.Index(low[start:], marker); i >= 0 && start+i < end {
-			end = start + i
-		}
-	}
-	segment := strings.TrimSpace(text[start+len(verb)+1:end])
-	lowSegment := strings.ToLower(segment)
-	for _, action := range []string{" then ", " fix ", " implement ", " run ", " verify ", " return ", " make "} {
-		if strings.Contains(lowSegment, action) {
-			return nil
-		}
-	}
-	parts := strings.Split(segment, ",")
-	if len(parts) < 3 {
-		return nil
-	}
-	out := make([]GoalRequirement, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		part = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(part), "and "))
-		if part == "" {
+	best := []GoalRequirement(nil)
+	for _, candidate := range []string{"inspect", "collect", "investigate", "identify", "determine", "compare", "trace"} {
+		start := strings.Index(low, candidate+" ")
+		if start < 0 {
 			continue
 		}
-		out = append(out, requirement("explore", verb+" "+part, GoalNodeExploration, "requested observation recorded", part))
+		end := len(text)
+		for _, marker := range []string{". determine", ". do not", ". return", "\n"} {
+			if i := strings.Index(low[start:], marker); i >= 0 && start+i < end {
+				end = start + i
+			}
+		}
+		segment := strings.TrimSpace(text[start+len(candidate)+1 : end])
+		lowSegment := strings.ToLower(segment)
+		invalid := false
+		for _, action := range []string{" then ", " fix ", " implement ", " run ", " verify ", " return ", " make "} {
+			if strings.Contains(lowSegment, action) {
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		parts := strings.Split(segment, ",")
+		if len(parts) < 3 {
+			continue
+		}
+		out := make([]GoalRequirement, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			part = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(part), "and "))
+			if part != "" {
+				out = append(out, requirement("explore", candidate+" "+part, GoalNodeExploration, "requested observation recorded", part))
+			}
+		}
+		if len(out) >= 2 && len(out) > len(best) {
+			best = out
+		}
 	}
-	if len(out) < 2 {
-		return nil
-	}
-	return out
+	return best
 }
 
 func requirement(base, description string, typ GoalNodeType, evidence, source string) GoalRequirement {
