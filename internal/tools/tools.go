@@ -1,15 +1,18 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -529,6 +532,10 @@ func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	}
 	cmdStr := strings.TrimSpace(in.Command)
 	cmdStr = normalizeOperationalCommand(cmdStr)
+	if port, ok := sshTunnelPort(cmdStr); ok && tcpPortInUse(port) {
+		return fmt.Sprintf("existing local SSH tunnel is already active on port %s; do not open another tunnel, kill the existing process, or switch ports. Continue with local kubectl using the active tunnel.", port), nil
+	}
+	cmdStr = applyTunnelKubeconfig(cmdStr)
 	if reason := shellCommandBlocked(cmdStr); reason != "" {
 		return "error: " + reason, nil
 	}
@@ -557,9 +564,72 @@ func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Sprintf("%s\n[timeout after %s — process group killed]", s, shellTimeout), nil
 		}
+		if strings.Contains(s, "Address already in use") || strings.Contains(s, "cannot listen on port") {
+			return s + "\n[existing local SSH tunnel is active on this port; do not open another tunnel, kill the existing process, or switch ports. Continue with local kubectl using the available kubeconfig/context.]", nil
+		}
+		if strings.Contains(s, "does not exist") && strings.Contains(s, "context ") && strings.Contains(cmdStr, "kubectl") {
+			return s + "\n[invalid Kubernetes context; do not invent a replacement. Run kubectl config current-context or kubectl config get-contexts -o name, then retry with an actual context or explicit KUBECONFIG.]", nil
+		}
 		return fmt.Sprintf("%s\n[exit error: %v]", s, err), nil
 	}
 	return s, nil
+}
+
+func sshTunnelPort(command string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 || fields[0] != "ssh" {
+		return "", false
+	}
+	for i := 1; i < len(fields); i++ {
+		value := ""
+		if fields[i] == "-L" && i+1 < len(fields) {
+			i++
+			value = fields[i]
+		} else if strings.HasPrefix(fields[i], "-L") && len(fields[i]) > 2 {
+			value = strings.TrimPrefix(fields[i], "-L")
+		}
+		if value == "" {
+			continue
+		}
+		parts := strings.Split(value, ":")
+		if len(parts) >= 3 {
+			if _, err := strconv.Atoi(parts[0]); err == nil {
+				return parts[0], true
+			}
+			if _, err := strconv.Atoi(parts[1]); err == nil {
+				return parts[1], true
+			}
+		}
+	}
+	return "", false
+}
+
+func tcpPortInUse(port string) bool {
+	listener, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err == nil {
+		_ = listener.Close()
+		return false
+	}
+	return true
+}
+
+func applyTunnelKubeconfig(command string) string {
+	low := strings.ToLower(command)
+	if !strings.Contains(low, "kubectl") || strings.Contains(low, "kubeconfig=") || !tcpPortInUse("6449") {
+		return command
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return command
+	}
+	paths, _ := filepath.Glob(filepath.Join(home, ".kube", "config-*"))
+	for _, path := range paths {
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && (bytes.Contains(data, []byte("127.0.0.1:6449")) || bytes.Contains(data, []byte("localhost:6449"))) {
+			return "KUBECONFIG=" + shellQuote(path) + " " + command
+		}
+	}
+	return command
 }
 
 // normalizeOperationalCommand keeps common read-only host diagnostics

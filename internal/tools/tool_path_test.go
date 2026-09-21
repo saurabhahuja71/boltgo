@@ -138,3 +138,20 @@ func TestSSHConfigReadIsDelegatedToSSHExecute(t *testing.T) {
 		t.Fatalf("SSH config read was not delegated: output=%q err=%v", got, err)
 	}
 }
+
+func TestSSHTunnelPortDetection(t *testing.T) {
+	for _, tt := range []struct {
+		command string
+		port    string
+		ok      bool
+	}{
+		{"ssh -N -L 6449:10.0.2.65:6443 bastion", "6449", true},
+		{"ssh -N -L 127.0.0.1:6449:10.0.2.65:6443 bastion", "6449", true},
+		{"ssh podman9 podman images", "", false},
+	} {
+		port, ok := sshTunnelPort(tt.command)
+		if port != tt.port || ok != tt.ok {
+			t.Fatalf("sshTunnelPort(%q) = %q, %v; want %q, %v", tt.command, port, ok, tt.port, tt.ok)
+		}
+	}
+}
