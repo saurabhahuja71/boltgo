@@ -73,6 +73,14 @@ Later sources win:
 | **Built-in tools** | Files, git, optional shell — run on your machine |
 | **MCP** | Extra tools from external servers; agenterm is the **client** |
 
+Configured MCP servers can use local stdio or Streamable HTTP. Bolt connects
+enabled servers at startup, discovers their tool schemas, and registers each
+tool as `<server>__<tool>` in the same registry as built-in coding tools. A
+coding task can therefore combine MCP repository/search/issue tools with
+`read_file`, `str_replace`, tests, and git while retaining the normal
+permission and verification flow. HTTP bearer tokens are read from the named
+environment variable at connection time and are not stored in configuration.
+
 Models are **not** bundled in the binary. You need Ollama, SGLang, or another API running somewhere reachable.
 
 ## Quiet by default

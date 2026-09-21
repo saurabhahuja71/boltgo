@@ -232,10 +232,15 @@ bolt --provider sglang -m qwen2.5-coder-32b-q4_k_m.gguf
 | List / switch model | `/model` · `/model qwen2.5-coder:32b` |
 | Disable tools this session | `/tools off` |
 | Clear history | `/clear` |
-| Toggle mouse mode | **Ctrl+L** |
-| Toggle theme | **Ctrl+B** |
-| Toggle todo panel | **Ctrl+T** |
-| Quit | **Ctrl+C** |
+| Toggle mouse mode | **^L** |
+| Toggle theme | **^B** |
+| Toggle todo panel | **^T** |
+| Quit | **^C** |
+
+The fixed folder row shows `Ready` when idle and an active-run timer such as
+`Working (2m 07s • esc to interrupt)` while a request is running. The final
+footer row contains compact caret-form shortcuts, the active model, and token
+usage.
 
 Run Bolt with an explicit workspace (`bolt --workspace /path/to/myrepo`) so file tools use that workspace.
 
@@ -501,6 +506,60 @@ url = "http://127.0.0.1:8080/mcp"
 
 Disable for a session: `bolt --no-mcp`. Demo server: [mcp-demo](https://github.com/saurabhahuja71/mcp-demo).
 
+#### Connect any MCP server for coding work
+
+Add an enabled server to `~/.agenterm/config.toml`, then restart Bolt. Bolt
+discovers the server's tools during startup and exposes them to the agent along
+with the built-in file, shell, test, and git tools. Remote tools are registered
+with the name `<server>__<tool>` so names cannot collide between servers.
+
+For a local stdio MCP server:
+
+```toml
+[[mcp_servers]]
+name = "repo-tools"
+enabled = true
+transport = "stdio"
+command = "/absolute/path/to/my-mcp-server"
+args = ["--workspace", "/path/to/myrepo"]
+```
+
+For a Streamable HTTP MCP server:
+
+```toml
+[[mcp_servers]]
+name = "coding-services"
+enabled = true
+transport = "streamable_http"
+url = "${CODING_MCP_URL}"
+auth_env = "CODING_MCP_TOKEN"
+# Optional non-secret headers:
+# headers = { X-Workspace = "/path/to/myrepo" }
+```
+
+Start it with the required runtime values:
+
+```bash
+export CODING_MCP_URL='https://mcp.example.test/mcp'
+export CODING_MCP_TOKEN='replace-with-a-runtime-token'
+bolt --workspace /path/to/myrepo --ping
+bolt --workspace /path/to/myrepo
+```
+
+Use MCP tools in normal coding requests, for example:
+
+```text
+Use the repository search MCP tool to find callers of HandleRequest,
+inspect the relevant files, implement the smallest fix, run the focused tests,
+and report the verification evidence.
+```
+
+Keep MCP servers scoped to the workspace and capabilities they need. Do not
+put access tokens in TOML, prompts, committed files, or shell history; use
+`auth_env` for HTTP bearer authentication. `--no-mcp` disables all configured
+MCP connections for one session. If a server fails during startup, Bolt reports
+the connection error instead of silently claiming its tools are available.
+
 ---
 
 ## FAQ
@@ -610,10 +669,17 @@ image:
 | `agenterm-windows-amd64.exe` | Windows |
 | `ghcr.io/saurabhahuja71/agenterm:vX.Y.Z` | Container |
 
+Commits pushed to `main` are published by the automatic release workflow as
+the next minor GitHub release. For a local cross-build, use an explicit version
+without creating a tag:
+
 ```bash
-git tag v1.1.11 && git push origin v1.1.11
-make dist VERSION=1.1.11   # local cross-build
+make dist VERSION=1.15.0
 ```
+
+The current launcher aliases remain thin entry points: `bolt-s1` through
+`bolt-s8` select behavior only. Model, endpoint, provider, and API key values
+come from loaded configuration or supported environment overrides.
 
 ---
 

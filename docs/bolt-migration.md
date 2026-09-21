@@ -17,7 +17,7 @@ identifiers.
 | Permission mode | `internal/permissions` + `agent.EventPermission` | Migrated; ASK/ALLOW/PLAN, safe/confirm/dangerous levels, once/session/permanent grants, deny path, and fixed approval UI. |
 | Todos | `internal/todos` + todo tools + fixed TUI panel | Migrated; shared store is independent of conversation scrolling and updates through the existing tool loop. |
 | Vision | config/runtime TUI state | Toggle and status are migrated; current Agenterm text client has no image-content transport, so ON is reported as requested-but-unsupported and no image call is fabricated. |
-| Bolt footer/shortcut semantics | `internal/tui` model state and Lip Gloss view | Migrated; Ctrl+Q/R/L/Y/T/O/B, Enter, Shift+Enter, dynamic permission/mouse/vision/model/status/token fallback, fixed panels. |
+| Bolt footer/shortcut semantics | `internal/tui` model state and Lip Gloss view | Migrated; compact ^Q/^R/^L/^Y/^T/^O/^B controls, Enter, Shift+Enter, active-run timer, dynamic model/status/token display, fixed panels, and visible cursor block. |
 | `bolt`, `bolt-s1` … `bolt-s8` launchers | one executable selected by `argv[0]` | Thin shared-runtime aliases. They select only launcher behavior; model, endpoint, provider, and API key come from the loaded config or supported environment overrides. S1–S3 retain their behavioral defaults (ALLOW, with S3 visible-answer mode). |
 | Upgrade | historical `bolt upgrade` installer command | Restored as `bolt upgrade`; it checks the latest `boltgo` GitHub release, verifies published SHA-256 assets, and atomically replaces only the executable. Configuration, permissions, sessions, and workspace files are untouched. Existing `agenterm-*` release asset names remain supported for compatibility. |
 
@@ -31,6 +31,19 @@ explicit `--no-resume` wins over the environment.
 
 No further migration work is required for the implemented scope. Future
 multimodal work is optional and separately scoped.
+
+SSH config aliases are resolved from the user's `~/.ssh/config` through the
+`ssh_execute` tool. Workspace file tools do not inspect `.ssh/config`; remote
+image inventory commands are normalized to non-interactive root commands so a
+request such as “go to podman9 and list Docker images” remains read-only and
+does not depend on an interactive shell.
+
+MCP coding integrations use `[[mcp_servers]]` entries in
+`~/.agenterm/config.toml`. Set `enabled = true` and provide either a local
+`command` plus `args` for stdio or a `streamable_http` `url`. For HTTP auth,
+set `auth_env` to the name of an environment variable containing the bearer
+token; credentials are not persisted. Discovered tools are registered as
+`<server>__<tool>` and participate in the same agent loop as built-in tools.
 
 ## Phase 4 parity and hardening assessment
 
@@ -87,14 +100,15 @@ workspace/session policy. Explicit headless resume and `--no-resume` over an
 active `BOLT_RESUME=1` environment were verified against a temporary
 workspace.
 
-S2 and S3 were not live-tested: the configured local endpoints
-`127.0.0.1:30000` and `127.0.0.1:30004` were unavailable in the validation
-environment. No externally managed provider process was restarted or changed.
-The wrappers remain endpoint/model selectors and do not manage the old shell
-functions' tunnels or model warm-up.
+The current S2/S3 follow-up used only the existing local Ollama-compatible
+endpoints and did not download or switch models. The podman9 image-inventory
+query was verified through S3 at `127.0.0.1:30004`; the wrappers remain
+endpoint/model selectors and do not manage externally controlled tunnels or
+model warm-up.
 
 The PTY smoke verified live streaming, token/status updates, approval/deny,
-Ctrl+Q/R/L/Y/T/O/B, fixed input/footer/workspace, and clean teardown. Full
+^Q/^R/^L/^Y/^T/^O/^B, fixed input/footer/workspace, active-run timing, visible
+cursor block, and clean teardown. Full
 mouse-wheel traversal and terminal-resize behavior still need a terminal
 environment that can generate wheel/resize events; the canonical Bubbles
 viewport remains in place and the automated state tests pass. The conversation
