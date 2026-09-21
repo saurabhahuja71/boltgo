@@ -533,7 +533,7 @@ func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	cmdStr := strings.TrimSpace(in.Command)
 	cmdStr = normalizeOperationalCommand(cmdStr)
 	if port, ok := sshTunnelPort(cmdStr); ok && tcpPortInUse(port) {
-		return fmt.Sprintf("existing local SSH tunnel is already active on port %s; do not open another tunnel, kill the existing process, or switch ports. Continue with local kubectl using the active tunnel.", port), nil
+		return activeTunnelGuidance(port), nil
 	}
 	cmdStr = applyTunnelKubeconfig(cmdStr)
 	if reason := shellCommandBlocked(cmdStr); reason != "" {
@@ -613,23 +613,38 @@ func tcpPortInUse(port string) bool {
 	return true
 }
 
+func activeTunnelGuidance(port string) string {
+	message := fmt.Sprintf("existing local SSH tunnel is already active on port %s; do not open another tunnel, kill the existing process, or switch ports.", port)
+	if kubeconfig := tunnelKubeconfigPath(); kubeconfig != "" {
+		return message + fmt.Sprintf(" Use the active tunnel now with KUBECONFIG=%s kubectl config current-context, then KUBECONFIG=%s kubectl get nodes -o wide and KUBECONFIG=%s kubectl get pods -A -o wide. These are read-only status checks.", shellQuote(kubeconfig), shellQuote(kubeconfig), shellQuote(kubeconfig))
+	}
+	return message + " Discover the available kubeconfig/context, then run kubectl config current-context, kubectl get nodes -o wide, and kubectl get pods -A -o wide as read-only status checks."
+}
+
 func applyTunnelKubeconfig(command string) string {
 	low := strings.ToLower(command)
 	if !strings.Contains(low, "kubectl") || strings.Contains(low, "kubeconfig=") || !tcpPortInUse("6449") {
 		return command
 	}
+	if path := tunnelKubeconfigPath(); path != "" {
+		return "KUBECONFIG=" + shellQuote(path) + " " + command
+	}
+	return command
+}
+
+func tunnelKubeconfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return command
+		return ""
 	}
 	paths, _ := filepath.Glob(filepath.Join(home, ".kube", "config-*"))
 	for _, path := range paths {
 		data, readErr := os.ReadFile(path)
 		if readErr == nil && (bytes.Contains(data, []byte("127.0.0.1:6449")) || bytes.Contains(data, []byte("localhost:6449"))) {
-			return "KUBECONFIG=" + shellQuote(path) + " " + command
+			return path
 		}
 	}
-	return command
+	return ""
 }
 
 // normalizeOperationalCommand keeps common read-only host diagnostics

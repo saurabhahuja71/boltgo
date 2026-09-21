@@ -67,6 +67,12 @@ func TestBundledInteractiveImageCommandBecomesDirectRootCommand(t *testing.T) {
 	}
 }
 
+func TestTunnelCommandIsNotSentAsNestedRemoteSSH(t *testing.T) {
+	if port, ok := sshTunnelPort("ssh -N -L 6449:10.0.2.65:6443 bastion"); !ok || port != "6449" {
+		t.Fatalf("tunnel command was not recognized: port=%q ok=%v", port, ok)
+	}
+}
+
 func TestLocalReadOnlyKubernetesCommand(t *testing.T) {
 	if !localReadOnlyKubernetesCommand("KUBECONFIG=/home/user/.kube/config-cluster-a kubectl get pods -A") {
 		t.Fatal("explicit-kubeconfig read-only kubectl should use the local tunnel")

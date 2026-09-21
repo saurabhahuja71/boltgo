@@ -40,6 +40,12 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 	if in.Timeout <= 0 {
 		in.Timeout = 30
 	}
+	if port, ok := sshTunnelPort(in.Command); ok {
+		if tcpPortInUse(port) {
+			return activeTunnelGuidance(port), nil
+		}
+		return "error: SSH tunnel setup is a local operation; call run_shell with the tunnel command so Bolt can manage the local process and verify the port", nil
+	}
 	if normalized, ok := normalizeInteractiveRootCommand(in.Command); ok {
 		in.Command = normalized
 	} else if isInteractiveRootShell(in.Command) {
