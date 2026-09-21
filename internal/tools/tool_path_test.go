@@ -155,3 +155,14 @@ func TestSSHTunnelPortDetection(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeSystemDiagnosticPathsRemainAvailable(t *testing.T) {
+	for _, path := range []string{"/dev/null", "/dev/stdout"} {
+		if !isSafeSystemDiagnosticPath(path) {
+			t.Fatalf("diagnostic path %q was not allowed", path)
+		}
+	}
+	if isSafeSystemDiagnosticPath("/etc/passwd") {
+		t.Fatal("unrelated system file was incorrectly allowed")
+	}
+}

@@ -781,6 +781,9 @@ func shellWorkspaceBlocked(cmd, workspace string) string {
 			continue
 		}
 		candidate := strings.TrimRight(match[1], ".,!?;:)]}")
+		if isSafeSystemDiagnosticPath(candidate) {
+			continue
+		}
 		if err := enforceWorkspacePath(workspace, candidate); err != nil {
 			if isOperationalConfigPath(candidate) && operationalConfigCommand(cmd) {
 				continue
@@ -791,6 +794,14 @@ func shellWorkspaceBlocked(cmd, workspace string) string {
 		}
 	}
 	return ""
+}
+
+func isSafeSystemDiagnosticPath(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "/dev/null" || clean == "/dev/stdin" || clean == "/dev/stdout" || clean == "/dev/stderr" {
+		return true
+	}
+	return false
 }
 
 // isOperationalConfigPath permits the read-only control-plane files needed by
