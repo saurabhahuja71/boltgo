@@ -52,7 +52,7 @@ func ExtractExplicitRequirements(goal string) []GoalRequirement {
 		if artifactMentioned(text, low) {
 			out = append(out, requirement("create-artifact", text, GoalNodeArtifact, "named artifact exists with requested content", text))
 		}
-		if explorationMentioned(low) {
+		if explorationMentioned(low) && len(commaInspectionRequirements(text)) == 0 {
 			out = append(out, requirement("explore", text, GoalNodeExploration, "requested repository observation recorded", text))
 		}
 		implementationAction := strings.Contains(low, "fix ") || strings.Contains(low, "implement ") || strings.Contains(low, "change ") || strings.Contains(low, "refactor ") || (implementationMentioned(low) && !artifactMentioned(text, low))
@@ -63,7 +63,80 @@ func ExtractExplicitRequirements(goal string) []GoalRequirement {
 			out = append(out, requirement("verify", text, GoalNodeVerification, "requested verification passed", text))
 		}
 	}
+	// A colon followed by bullet items is a common way to enumerate separate
+	// read-only evidence obligations. Keep each item authoritative and
+	// independent instead of collapsing the whole list into one observation.
+	for _, item := range bulletInspectionRequirements(goal) {
+		out = append(out, item)
+	}
+	for _, item := range commaInspectionRequirements(goal) {
+		out = append(out, item)
+	}
 	return stabilizeRequirementIDs(out)
+}
+
+func bulletInspectionRequirements(goal string) []GoalRequirement {
+	low := strings.ToLower(goal)
+	if !strings.Contains(low, "inspect:") && !strings.Contains(low, "collect:") && !strings.Contains(low, "investigate:") {
+		return nil
+	}
+	var out []GoalRequirement
+	for _, line := range strings.Split(goal, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 3 || (line[0] != '-' && line[0] != '*') {
+			continue
+		}
+		text := strings.TrimSpace(line[1:])
+		if text == "" {
+			continue
+		}
+		out = append(out, requirement("explore", "inspect "+text, GoalNodeExploration, "requested observation recorded", text))
+	}
+	return out
+}
+
+func commaInspectionRequirements(text string) []GoalRequirement {
+	low := strings.ToLower(text)
+	start := -1
+	verb := ""
+	for _, candidate := range []string{"inspect ", "collect ", "investigate "} {
+		if i := strings.Index(low, candidate); i >= 0 && (start < 0 || i < start) {
+			start, verb = i, strings.TrimSpace(candidate)
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	end := len(text)
+	for _, marker := range []string{". determine", ". do not", ". return", "\n"} {
+		if i := strings.Index(low[start:], marker); i >= 0 && start+i < end {
+			end = start + i
+		}
+	}
+	segment := strings.TrimSpace(text[start+len(verb)+1:end])
+	lowSegment := strings.ToLower(segment)
+	for _, action := range []string{" then ", " fix ", " implement ", " run ", " verify ", " return ", " make "} {
+		if strings.Contains(lowSegment, action) {
+			return nil
+		}
+	}
+	parts := strings.Split(segment, ",")
+	if len(parts) < 3 {
+		return nil
+	}
+	out := make([]GoalRequirement, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		part = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(part), "and "))
+		if part == "" {
+			continue
+		}
+		out = append(out, requirement("explore", verb+" "+part, GoalNodeExploration, "requested observation recorded", part))
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
 }
 
 func requirement(base, description string, typ GoalNodeType, evidence, source string) GoalRequirement {

@@ -226,12 +226,71 @@ func (s *AgentRunState) canComplete() bool {
 	if !s.canVerify() {
 		return false
 	}
+	if !s.explicitExplorationRequirementsComplete() {
+		return false
+	}
 	for _, criterion := range s.AcceptanceCriteriaState {
 		if !criterion.Satisfied {
 			return false
 		}
 	}
 	return true
+}
+
+func (s *AgentRunState) explicitExplorationRequirementsComplete() bool {
+	for _, req := range s.ExplicitRequirements {
+		if req.Type == GoalNodeExploration && !s.explorationRequirementSatisfied(req) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *AgentRunState) explorationRequirementSatisfied(req GoalRequirement) bool {
+	terms := requirementEvidenceTerms(req.SourceText)
+	for i, call := range s.ToolCalls {
+		if call.Outcome != tools.FailureSuccess || !isObservationTool(call.Name) {
+			continue
+		}
+		haystack := strings.ToLower(call.Name + " " + call.Arguments + " " + call.TargetPath)
+		if i < len(s.Observations) {
+			haystack += " " + strings.ToLower(s.Observations[i].Summary)
+		}
+		for _, term := range terms {
+			if strings.Contains(haystack, term) || strings.Contains(haystack, term+"s") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isObservationTool(name string) bool {
+	switch name {
+	case "repo_map", "list_dir", "read_file", "find_files", "grep", "fetch", "run_shell", "ssh_execute":
+		return true
+	default:
+		return false
+	}
+}
+
+func requirementEvidenceTerms(text string) []string {
+	stop := map[string]bool{
+		"inspect": true, "investigate": true, "collect": true, "determine": true,
+		"report": true, "using": true, "existing": true, "actual": true,
+		"first": true, "the": true, "and": true, "for": true, "with": true,
+	}
+	seen := map[string]bool{}
+	terms := []string{}
+	for _, word := range strings.Fields(strings.ToLower(text)) {
+		word = strings.Trim(word, "`'\".,:;()[]{}")
+		if len(word) < 3 || stop[word] || seen[word] {
+			continue
+		}
+		seen[word] = true
+		terms = append(terms, word)
+	}
+	return terms
 }
 
 func (s *AgentRunState) hasMutation() bool {
@@ -516,6 +575,19 @@ func (s *AgentRunState) controlContext() string {
 		b.WriteString("acceptance_criteria_state:\n")
 		for _, criterion := range s.AcceptanceCriteriaState {
 			fmt.Fprintf(&b, "- %s: %t\n", criterion.Description, criterion.Satisfied)
+		}
+	}
+	if len(s.ExplicitRequirements) > 0 {
+		b.WriteString("explicit_requirements:\n")
+		for _, req := range s.ExplicitRequirements {
+			if req.Type != GoalNodeExploration {
+				continue
+			}
+			state := "pending"
+			if s.explorationRequirementSatisfied(req) {
+				state = "satisfied by authoritative observation"
+			}
+			fmt.Fprintf(&b, "- %s [%s]\n", req.Description, state)
 		}
 	}
 	b.WriteString("Preserve the original goal. Use tool results as authoritative current state. Do not claim completion without verifying every applicable acceptance criterion. Keep internal reasoning private.\n")

@@ -350,3 +350,45 @@ func TestTestMutationRequiresTargetPath(t *testing.T) {
 		})
 	}
 }
+
+func TestReadOnlyBulletRequirementsNeedIndependentEvidence(t *testing.T) {
+	var state AgentRunState
+	state.reset("Inspect:\n- node status\n- pod readiness\n- recent events")
+	if len(state.ExplicitRequirements) != 3 {
+		t.Fatalf("explicit inspection requirements = %+v", state.ExplicitRequirements)
+	}
+	state.Verification = VerificationPassed
+	state.addObservation("run_shell", `{"command":"kubectl get nodes"}`, tools.ExecutionResult{Output: "node-1 Ready", Category: tools.FailureSuccess})
+	if state.canComplete() {
+		t.Fatal("one read-only observation satisfied the whole evidence list")
+	}
+	state.addObservation("run_shell", `{"command":"kubectl get pods"}`, tools.ExecutionResult{Output: "pod-1 Running", Category: tools.FailureSuccess})
+	if state.canComplete() {
+		t.Fatal("two read-only observations satisfied an incomplete evidence list")
+	}
+	state.addObservation("run_shell", `{"command":"kubectl get events"}`, tools.ExecutionResult{Output: "Normal Scheduled", Category: tools.FailureSuccess})
+	if !state.canComplete() {
+		t.Fatalf("independent read-only evidence did not complete the state: %+v", state)
+	}
+}
+
+func TestCommaInspectionRequirementsAreIndependent(t *testing.T) {
+	goal := "Inspect node status and conditions, pod status and readiness, restart counts, events, services, endpoints, and container logs."
+	reqs := ExtractExplicitRequirements(goal)
+	if len(reqs) != 8 {
+		t.Fatalf("inspection requirements = %+v", reqs)
+	}
+	for _, req := range reqs {
+		if req.Type != GoalNodeExploration {
+			t.Fatalf("non-exploration requirement: %+v", req)
+		}
+	}
+}
+
+func TestCommaCollectionRequirementsAreIndependent(t *testing.T) {
+	goal := "Collect nodes and node conditions, SIDB pods and readiness, restart counts, recent warning/error events, services and endpoints."
+	reqs := ExtractExplicitRequirements(goal)
+	if len(reqs) != 5 {
+		t.Fatalf("collection requirements = %+v", reqs)
+	}
+}
