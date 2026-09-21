@@ -2768,24 +2768,32 @@ func trimANSIHorizontalPadding(s string) string {
 	for _, line := range strings.SplitAfter(s, "\n") {
 		body := strings.TrimSuffix(line, "\n")
 		type token struct {
-			raw   string
-			style bool
-			space bool
+			raw         string
+			style       bool
+			space       bool
+			cursorSpace bool
 		}
 		var tokens []token
+		cursorStyle := false
 		for len(body) > 0 {
 			if loc := ansiCSI.FindStringIndex(body); loc != nil && loc[0] == 0 {
-				tokens = append(tokens, token{raw: body[:loc[1]], style: true})
+				raw := body[:loc[1]]
+				if strings.Contains(raw, "[0m") {
+					cursorStyle = false
+				} else if strings.Contains(raw, "[7;") {
+					cursorStyle = true
+				}
+				tokens = append(tokens, token{raw: raw, style: true})
 				body = body[loc[1]:]
 				continue
 			}
 			r, size := utf8.DecodeRuneInString(body)
-			tokens = append(tokens, token{raw: body[:size], space: unicode.IsSpace(r)})
+			tokens = append(tokens, token{raw: body[:size], space: unicode.IsSpace(r), cursorSpace: cursorStyle && unicode.IsSpace(r)})
 			body = body[size:]
 		}
 		lastVisible := -1
 		for i, tok := range tokens {
-			if !tok.style && !tok.space {
+			if !tok.style && (!tok.space || tok.cursorSpace) {
 				lastVisible = i
 			}
 		}

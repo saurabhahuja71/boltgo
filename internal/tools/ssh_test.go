@@ -55,6 +55,18 @@ func TestInteractiveRootShellIsRejectedWithReadOnlyGuidance(t *testing.T) {
 	}
 }
 
+func TestBundledInteractiveImageCommandBecomesDirectRootCommand(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"sudo -i; docker images", "sudo -n docker images"},
+		{"sudo su -; podman images -a", "sudo -n podman images -a"},
+	} {
+		got, ok := normalizeInteractiveRootCommand(tt.in)
+		if !ok || got != tt.want {
+			t.Fatalf("normalizeInteractiveRootCommand(%q) = %q, %v; want %q, true", tt.in, got, ok, tt.want)
+		}
+	}
+}
+
 func TestLocalReadOnlyKubernetesCommand(t *testing.T) {
 	if !localReadOnlyKubernetesCommand("KUBECONFIG=/home/user/.kube/config-cluster-a kubectl get pods -A") {
 		t.Fatal("explicit-kubeconfig read-only kubectl should use the local tunnel")

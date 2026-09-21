@@ -40,7 +40,9 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 	if in.Timeout <= 0 {
 		in.Timeout = 30
 	}
-	if isInteractiveRootShell(in.Command) {
+	if normalized, ok := normalizeInteractiveRootCommand(in.Command); ok {
+		in.Command = normalized
+	} else if isInteractiveRootShell(in.Command) {
 		return "error: interactive root shells are not supported; call ssh_execute again with the literal read-only command to run as root, such as `podman images` or `docker images`", nil
 	}
 	in.Command = rootContainerImageCommand(in.Command)
@@ -86,6 +88,19 @@ func isInteractiveRootShell(command string) bool {
 	return strings.HasPrefix(trimmed, "sudo -i ") || strings.HasPrefix(trimmed, "sudo -i;") ||
 		strings.HasPrefix(trimmed, "sudo su ") || strings.HasPrefix(trimmed, "sudo su;") ||
 		strings.HasPrefix(trimmed, "sudo su - ") || strings.HasPrefix(trimmed, "sudo su -;")
+}
+
+func normalizeInteractiveRootCommand(command string) (string, bool) {
+	trimmed := strings.TrimSpace(command)
+	for _, prefix := range []string{"sudo -i;", "sudo -i ", "sudo su -;", "sudo su - ", "sudo su;", "sudo su "} {
+		if strings.HasPrefix(trimmed, prefix) {
+			remainder := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+			if remainder == "docker images" || remainder == "podman images" || strings.HasPrefix(remainder, "docker images ") || strings.HasPrefix(remainder, "podman images ") {
+				return "sudo -n " + remainder, true
+			}
+		}
+	}
+	return "", false
 }
 
 func localReadOnlyKubernetesCommand(command string) bool {
