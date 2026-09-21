@@ -124,3 +124,17 @@ func TestRemoteSSHCommandsUseSSHExecute(t *testing.T) {
 		t.Fatalf("SSH tunnel was incorrectly blocked: %q", got)
 	}
 }
+
+func TestSSHConfigInspectionUsesSSHExecute(t *testing.T) {
+	if got := shellCommandBlocked("cat ~/.ssh/config | grep podman9"); !strings.Contains(got, "ssh_execute") {
+		t.Fatalf("SSH config inspection was not redirected: %q", got)
+	}
+}
+
+func TestSSHConfigReadIsDelegatedToSSHExecute(t *testing.T) {
+	tool := readFile{Workspace: t.TempDir()}
+	got, err := tool.Run(context.Background(), `{"path":"~/.ssh/config"}`)
+	if err != nil || !strings.Contains(got, "ssh_execute") {
+		t.Fatalf("SSH config read was not delegated: output=%q err=%v", got, err)
+	}
+}

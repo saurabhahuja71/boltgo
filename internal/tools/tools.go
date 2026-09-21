@@ -152,6 +152,9 @@ func (r readFile) Run(_ context.Context, argsJSON string) (string, error) {
 	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || in.Path == "" {
 		return "", fmt.Errorf("path required")
 	}
+	if isSSHConfigPath(in.Path) {
+		return "SSH configuration is resolved by ssh_execute; do not read ~/.ssh/config with read_file. Call ssh_execute with the requested host alias and remote command.", nil
+	}
 	path, err := resolveExistingFileIn(in.Path, r.Workspace)
 	if err != nil && isOperationalConfigPath(in.Path) {
 		path = filepath.Clean(in.Path)
@@ -176,6 +179,11 @@ func (r readFile) Run(_ context.Context, argsJSON string) (string, error) {
 		return fmt.Sprintf("[resolved path: %s]\n%s", path, string(data)), nil
 	}
 	return string(data), nil
+}
+
+func isSSHConfigPath(path string) bool {
+	clean := filepath.ToSlash(strings.TrimSpace(path))
+	return clean == "~/.ssh/config" || strings.HasSuffix(clean, "/.ssh/config")
 }
 
 type writeFile struct{ Workspace string }
@@ -604,6 +612,9 @@ func shellCommandBlocked(cmd string) string {
 	low := strings.ToLower(cmd)
 	if isRemoteSSHCommand(cmd) {
 		return "blocked remote SSH command in run_shell; call ssh_execute with the SSH config alias and literal remote command"
+	}
+	if strings.Contains(low, ".ssh/config") {
+		return "blocked SSH-config inspection in run_shell; call ssh_execute with the SSH config alias instead of reading ~/.ssh/config from the workspace"
 	}
 	// Any xargs over the tree is a hang risk (curl, grep, etc.)
 	if strings.Contains(low, "xargs") {

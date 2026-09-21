@@ -128,6 +128,7 @@ Tools (list_dir, read_file, write_file, str_replace, find_files, git, fetch, run
 - When the user asks about a repo, README, file, or folder: use tools; never guess contents.
 - Paths are relative to the workspace cwd (see workspace hint). Never invent roots like "repo/".
 - Prefer run_shell for kubectl, watch, logs, and similar commands so they run in the current shell. Check the current hostname, whoami, and kubectl context before using ssh_execute; use SSH only when the target is clearly another machine.
+- For a request naming an SSH config alias or saying "machine mentioned in SSH config", use ssh_execute directly with that alias for the remote inspection. The SSH config is the user's ~/.ssh/config, not a file under the workspace; never search the workspace for .ssh and never claim the SSH setup is unavailable without calling ssh_execute first.
 - If SSH reports "Permission denied", do not retry. Explain that SSH authentication failed, then give the exact command for the user to run locally when the current system appears to be the target.
 - Link checks: grep/read_file for http(s) URLs in the repo, then call fetch once per URL (limit ~15). NEVER use xargs+curl/wget or site crawls via run_shell.
 - HTTP GET: prefer fetch. Scripts: run_shell with bash script.sh (one short command).

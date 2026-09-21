@@ -3371,7 +3371,9 @@ func (m model) View() string {
 	footer := styleHelp.Render(truncateCells(footerText, w))
 	cwdLine := styleHelp.Render(truncateCells(workspaceText, w))
 	// Prompt-like input: no rounded/boxed frame.
-	input := trimANSIHorizontalPadding(m.ta.View())
+	// Keep the textarea's styled trailing cell: when the cursor is at end of
+	// input, that space is the visible block cursor and must not be trimmed.
+	input := m.ta.View()
 	parts := []string{styleHeader.Render(truncateCells(m.deps.Title+" · "+m.deps.Summary+" · /help", w)), body}
 	dialogW := max(10, w)
 	if m.pendingApproval != nil {

@@ -40,6 +40,9 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 	if in.Timeout <= 0 {
 		in.Timeout = 30
 	}
+	if isInteractiveRootShell(in.Command) {
+		return "error: interactive root shells are not supported; call ssh_execute again with the literal read-only command to run as root, such as `podman images` or `docker images`", nil
+	}
 	in.Command = rootContainerImageCommand(in.Command)
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(in.Timeout*float64(time.Second)))
 	defer cancel()
@@ -73,6 +76,16 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 		return string(out), fmt.Errorf("ssh failed: %w", err)
 	}
 	return string(out), nil
+}
+
+func isInteractiveRootShell(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "sudo -i" || trimmed == "sudo su" || trimmed == "sudo su -" || trimmed == "su" || trimmed == "su -" {
+		return true
+	}
+	return strings.HasPrefix(trimmed, "sudo -i ") || strings.HasPrefix(trimmed, "sudo -i;") ||
+		strings.HasPrefix(trimmed, "sudo su ") || strings.HasPrefix(trimmed, "sudo su;") ||
+		strings.HasPrefix(trimmed, "sudo su - ") || strings.HasPrefix(trimmed, "sudo su -;")
 }
 
 func localReadOnlyKubernetesCommand(command string) bool {

@@ -44,6 +44,17 @@ func TestRootContainerImageCommand(t *testing.T) {
 	}
 }
 
+func TestInteractiveRootShellIsRejectedWithReadOnlyGuidance(t *testing.T) {
+	for _, command := range []string{"sudo -i", "su -"} {
+		if !isInteractiveRootShell(command) {
+			t.Fatalf("expected %q to be recognized as interactive", command)
+		}
+	}
+	if isInteractiveRootShell("podman images") {
+		t.Fatal("read-only image command must remain executable")
+	}
+}
+
 func TestLocalReadOnlyKubernetesCommand(t *testing.T) {
 	if !localReadOnlyKubernetesCommand("KUBECONFIG=/home/user/.kube/config-cluster-a kubectl get pods -A") {
 		t.Fatal("explicit-kubeconfig read-only kubectl should use the local tunnel")
