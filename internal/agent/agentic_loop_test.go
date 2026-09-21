@@ -171,6 +171,34 @@ func TestAgentStructuredToolProtocolChainsResultIntoNextCall(t *testing.T) {
 	}
 }
 
+func TestAgentDoesNotStreamProvisionalPostToolAnswerTwice(t *testing.T) {
+	reader := &scriptedTool{name: "read_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	ag, _, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return mixedToolSSE("provisional answer", llm.ToolCall{
+				ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"README.md"}`},
+			})
+		}
+		return textSSE("verified answer")
+	}, reg)
+	defer closeServer()
+
+	var tokens []string
+	if err := ag.RunUserMessage(context.Background(), "inspect README.md and report", func(event Event) {
+		if event.Kind == EventToken {
+			tokens = append(tokens, event.Text)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(tokens, "")
+	if joined != "verified answer" {
+		t.Fatalf("streamed provisional or duplicate answer: %q", joined)
+	}
+}
+
 func TestAgentPreservesEmptyToolResultAsValidMessage(t *testing.T) {
 	reader := &scriptedTool{name: "ssh_execute", outputs: []scriptedOutcome{{out: ""}}}
 	reg := tools.NewRegistry()

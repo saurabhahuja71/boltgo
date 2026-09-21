@@ -2657,8 +2657,9 @@ func chatBubble(base lipgloss.Style, label, body string, width int) string {
 }
 
 func (m *model) renderAssistantBody(ln *chatLine, width int) string {
+	displayText := compactAssistantDisplayText(ln.text)
 	if m.renderer == nil || ln.text == "" {
-		return wrap(ln.text, width-4)
+		return wrap(displayText, width-4)
 	}
 	// Reuse cached glamour output when text is unchanged.
 	if ln.mdCache != "" && ln.mdSrc == ln.text {
@@ -2666,12 +2667,12 @@ func (m *model) renderAssistantBody(ln *chatLine, width int) string {
 	}
 	// Huge markdown through glamour blocks the event loop for seconds.
 	if len(ln.text) > glamourMaxBytes {
-		out := wrap(ln.text, width-4)
+		out := wrap(displayText, width-4)
 		ln.mdCache = out
 		ln.mdSrc = ln.text
 		return out
 	}
-	if out, err := m.renderer.Render(ln.text); err == nil {
+	if out, err := m.renderer.Render(displayText); err == nil {
 		out = strings.TrimRight(out, "\n")
 		if hasFencedCodeBlock(ln.text) {
 			// Glamour's block writer pads every rendered line to the document
@@ -2684,7 +2685,40 @@ func (m *model) renderAssistantBody(ln *chatLine, width int) string {
 		ln.mdSrc = ln.text
 		return out
 	}
-	return wrap(ln.text, width-4)
+	return wrap(displayText, width-4)
+}
+
+// compactAssistantDisplayText removes accidental blank-line runs from model
+// prose while preserving intentional whitespace inside fenced code blocks.
+// The durable assistant message remains unchanged; this is presentation-only.
+func compactAssistantDisplayText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+	blank := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			blank = false
+			out = append(out, line)
+			continue
+		}
+		if !inFence && trimmed == "" {
+			if blank {
+				continue
+			}
+			blank = true
+		} else {
+			blank = false
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 // tintCodeBlockSurface applies a restrained theme-aware background to each
@@ -2783,7 +2817,7 @@ func (m *model) refreshViewport() {
 			// Foreground-only labels: no filled message cards.
 			label := styleUser.Render("You")
 			body := wrap(ln.text, width)
-			b.WriteString(chatBubble(styleUserBubble, label, body, width) + "\n\n")
+			b.WriteString(chatBubble(styleUserBubble, label, body, width) + "\n")
 		case "assistant", "assistant-stream":
 			labelText := "Agent"
 			if ln.role == "assistant-stream" {
@@ -2791,26 +2825,26 @@ func (m *model) refreshViewport() {
 			}
 			label := styleAsst.Render(labelText)
 			rendered := m.renderAssistantBody(ln, width)
-			b.WriteString(chatBubble(styleAsstBubble, label, rendered, width) + "\n\n")
+			b.WriteString(chatBubble(styleAsstBubble, label, rendered, width) + "\n")
 		case "thinking":
 			label := styleAsst.Render("Agent")
 			body := styleStatus.Render(wrap(ln.text, width))
-			b.WriteString(chatBubble(styleAsstBubble, label, body, width) + "\n\n")
+			b.WriteString(chatBubble(styleAsstBubble, label, body, width) + "\n")
 		case "tool":
 			b.WriteString(styleTool.Render("Tool") + "\n")
-			b.WriteString(styleTool.Render(wrap(ln.text, width)) + "\n\n")
+			b.WriteString(styleTool.Render(wrap(ln.text, width)) + "\n")
 		case "queued":
 			queued := len(m.pendingRequests)
 			if queued < 1 {
 				queued = 1
 			}
 			b.WriteString(styleStatus.Render(fmt.Sprintf("Queued · %d", queued)) + "\n")
-			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n\n")
+			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n")
 		case "error":
 			b.WriteString(styleErr.Render("Error") + "\n")
-			b.WriteString(styleErr.Render(wrap(ln.text, width)) + "\n\n")
+			b.WriteString(styleErr.Render(wrap(ln.text, width)) + "\n")
 		default:
-			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n\n")
+			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n")
 		}
 	}
 	// Stick to bottom only when already following the latest lines. If the user

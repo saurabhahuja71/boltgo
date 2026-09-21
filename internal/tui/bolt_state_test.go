@@ -1056,6 +1056,17 @@ func TestFencedCodeRenderingPreservesLogicalLinesAndIndentation(t *testing.T) {
 	}
 }
 
+func TestAssistantDisplayCompactsProseBlankLinesPreservingCode(t *testing.T) {
+	text := "first\n\n\nsecond\n```go\nfunc main() {}\n\n\n```"
+	got := compactAssistantDisplayText(text)
+	if strings.Contains(got, "first\n\n\nsecond") {
+		t.Fatalf("prose blank lines were not compacted: %q", got)
+	}
+	if !strings.Contains(got, "func main() {}\n\n\n```") {
+		t.Fatalf("code-block whitespace was changed: %q", got)
+	}
+}
+
 var ansiForTest = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 func TestInputUsesOnePromptMarker(t *testing.T) {

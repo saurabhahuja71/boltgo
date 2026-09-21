@@ -565,11 +565,17 @@ Do not answer with only a markdown plan or shell snippets.`,
 		emit(Event{Kind: EventStatus, Text: fmt.Sprintf("calling %s (round %d)…", a.Cfg.Model, round+1)})
 		var msg llm.Message
 		var err error
+		// Once a tool has run, the next model response is provisional: Bolt
+		// still needs its verification pass. Do not stream that provisional
+		// text to the user, because the verified response is emitted below and
+		// would otherwise appear twice in the TUI/headless output.
+		quietModelText := verificationRequested || toolsUsed > 0
+		var stream *streamBridge
 		if a.DailyMode {
-			msg, err = a.dailyChatStream(ctx, req, emit, verificationRequested)
+			msg, err = a.dailyChatStream(ctx, req, emit, quietModelText)
 		} else {
-			handler := &streamBridge{emit: emit, quiet: verificationRequested}
-			msg, err = a.Client.ChatStream(ctx, req, handler)
+			stream = &streamBridge{emit: emit, quiet: quietModelText, deferUntilToolDecision: true}
+			msg, err = a.Client.ChatStream(ctx, req, stream)
 		}
 		if err != nil {
 			a.RunState.Phase = PhaseBlocked
@@ -611,6 +617,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 					msg.Content = ""
 				}
 			}
+		}
+		if stream != nil && len(msg.ToolCalls) == 0 && !stream.quiet && !isShellOnlyAssistantText(msg.Content) {
+			stream.commit()
 		}
 		unsupportedToolMarkup := hasUnsupportedToolMarkup(msg.Content)
 		if unsupportedToolMarkup {
@@ -995,15 +1004,26 @@ Do not answer with only a markdown plan or shell snippets.`,
 }
 
 type streamBridge struct {
-	emit  func(Event)
-	quiet bool
+	emit                   func(Event)
+	quiet                  bool
+	deferUntilToolDecision bool
+	tokens                 strings.Builder
 }
 
 func (s *streamBridge) OnToken(token string) {
-	if s.quiet {
+	if s.deferUntilToolDecision {
+		s.tokens.WriteString(token)
 		return
 	}
-	s.emit(Event{Kind: EventToken, Text: token})
+	if !s.quiet {
+		s.emit(Event{Kind: EventToken, Text: token})
+	}
+}
+
+func (s *streamBridge) commit() {
+	if !s.quiet && s.tokens.Len() > 0 {
+		s.emit(Event{Kind: EventToken, Text: s.tokens.String()})
+	}
 }
 
 func (s *streamBridge) OnToolCallDelta(index int, tc llm.ToolCall) {
