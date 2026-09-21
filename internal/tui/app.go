@@ -2349,6 +2349,16 @@ func (m model) busyBannerText() string {
 	return text
 }
 
+func formatElapsed(sec int) string {
+	if sec < 0 {
+		sec = 0
+	}
+	if sec >= 60 {
+		return fmt.Sprintf("%dm %02ds", sec/60, sec%60)
+	}
+	return fmt.Sprintf("%ds", sec)
+}
+
 func (m *model) clearThinkingPlaceholder() {
 	for len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "thinking" {
 		m.lines = m.lines[:len(m.lines)-1]
@@ -3325,42 +3335,39 @@ func (m model) View() string {
 			tokens = fmt.Sprintf("%d tokens", total)
 		}
 	}
-	vision := "Vision OFF"
-	if m.visionEnabled {
-		vision = "Vision ON"
-	}
-	// Keep each live state beside the shortcut that changes it. This makes the
-	// footer useful as a glanceable control/status line instead of two lists.
-	statusText := fmt.Sprintf("Bolt · Ctrl+R %s · Ctrl+L %s · Ctrl+Y %s",
-		strings.ToUpper(string(m.permissionMode)), m.mouseMode, vision)
-	if m.deps.Agent.DailyMode {
-		statusText = fmt.Sprintf("Bolt · Ctrl+R %s · %s · %s · %s · %s · %s · Ctrl+L %s · Ctrl+Y %s",
-			strings.ToUpper(string(m.permissionMode)), m.deps.Agent.ModeName(), dailyStageDisplay(m.deps.Agent),
-			profileDisplay(m.deps.Agent.InferenceProfile), modelName,
-			fmt.Sprintf("%d changed", len(m.deps.Agent.ChangedFiles())), m.mouseMode, vision)
-	}
-	if summary := compactWorktreeSummary(m.worktree, w); summary != "" {
-		statusText = summary + " · " + statusText
-	}
 	workspace := m.deps.Workspace
 	if workspace == "" {
 		workspace = mustCwd()
 	}
 	// Reserve room for the live status so long workspaces do not hide Ready or
 	// a queued/streaming indicator at the right edge.
-	workspaceText := "📁 " + displayCwdAt(workspace, max(20, w-24)) + " · " + status
+	statusLabel := status
+	if m.busy {
+		statusLabel = fmt.Sprintf("Working (%s • esc to interrupt)", formatElapsed(m.waitSecs))
+	}
+	workspaceText := "📁 " + displayCwdAt(workspace, max(20, w-24))
+	if summary := compactWorktreeSummary(m.worktree, w); summary != "" {
+		workspaceText += " · " + summary
+	}
+	workspaceText += " · " + statusLabel
 	// Put the state-changing shortcuts first so a narrow terminal does not
 	// truncate the controls behind the model name or workspace path.
-	helpText := fmt.Sprintf("Ctrl+Q quit · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline · %s · %s", modelName, tokens)
+	helpText := fmt.Sprintf("^Q quit · ^T todos · ^O commands · ^B theme · Enter send · Shift+Enter newline · %s · %s", modelName, tokens)
+	if len(m.pendingRequests) > 0 {
+		helpText = fmt.Sprintf("Queued · %d · %s", len(m.pendingRequests), helpText)
+	}
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
-		helpText = fmt.Sprintf("PLAN MODE · Ctrl+Q quit · Ctrl+T todos · Ctrl+O commands · Ctrl+B theme · Enter send · Shift+Enter newline · %s · %s", modelName, tokens)
+		helpText = fmt.Sprintf("PLAN MODE · ^Q quit · ^T todos · ^O commands · ^B theme · Enter send · Shift+Enter newline · %s · %s", modelName, tokens)
 	}
 	if m.modelPick != nil {
 		helpText = "Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick"
 	}
-	// Keep runtime state and keyboard controls together. This avoids two nearly
-	// identical chrome rows while retaining the status details users need.
-	footerText := statusText + " · " + helpText
+	footerText := helpText
+	if m.deps.Agent.DailyMode {
+		footerText = fmt.Sprintf("Daily · %s · %s · %s · %d changed · %s",
+			m.deps.Agent.ModeName(), dailyStageDisplay(m.deps.Agent),
+			profileDisplay(m.deps.Agent.InferenceProfile), len(m.deps.Agent.ChangedFiles()), helpText)
+	}
 	footer := styleHelp.Render(truncateCells(footerText, w))
 	cwdLine := styleHelp.Render(truncateCells(workspaceText, w))
 	// Prompt-like input: no rounded/boxed frame.

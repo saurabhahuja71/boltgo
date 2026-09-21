@@ -85,7 +85,7 @@ func TestStatusLineIsCompactSubtle(t *testing.T) {
 	// remains a single compact line rather than treating its canvas as a bar.
 	statusLines := 0
 	for _, line := range strings.Split(view, "\n") {
-		if !strings.Contains(line, "Ctrl+R ASK") {
+		if !strings.Contains(line, "· Ready") {
 			continue
 		}
 		statusLines++
@@ -116,7 +116,7 @@ func TestLightThemeFinalViewIsContentFirst(t *testing.T) {
 	m := lightModel(t, 160, 40)
 	view := m.View()
 	plain := ansiSeq.ReplaceAllString(view, "")
-	for _, want := range []string{"You", "advice", "Agent", "Bolt ·", "📁", "Ctrl+Q", "Todos"} {
+	for _, want := range []string{"You", "advice", "Agent", "Bolt ·", "📁", "^Q", "Todos"} {
 		if !strings.Contains(plain, want) && !strings.Contains(strings.ToLower(plain), strings.ToLower(want)) {
 			// Message placeholder uses ellipsis variant.
 			if want == "📁" && strings.Contains(plain, "📁") {
@@ -212,7 +212,7 @@ func TestLightThemePaintsFooterCanvas(t *testing.T) {
 	m := lightModel(t, 160, 40)
 	view := m.View()
 	for _, line := range strings.Split(view, "\n") {
-		if !strings.Contains(line, "Ctrl+Q quit") {
+		if !strings.Contains(line, "^Q quit") {
 			continue
 		}
 		if !strings.Contains(line, "48;2;255;255;255") {

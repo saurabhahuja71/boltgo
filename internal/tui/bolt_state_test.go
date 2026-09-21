@@ -55,7 +55,7 @@ func TestBoltShortcutsAndFooterState(t *testing.T) {
 		}
 	}
 	view := m.View()
-	for _, want := range []string{"Ctrl+R ALLOW", "INTERACTIVE", "Ctrl+Y Vision ON", "Ctrl+Q"} {
+	for _, want := range []string{"^Q", "^T", "^O", "^B"} {
 		if !containsText(view, want) {
 			t.Fatalf("status/footer missing %q: %s", want, view)
 		}
@@ -85,7 +85,7 @@ func TestDailyViewShowsModeProfileStageAndCheckpoint(t *testing.T) {
 }
 
 func TestTruncateCellsKeepsFixedStatusOnOneTerminalRow(t *testing.T) {
-	status := "Bolt · Ctrl+R ASK · Ctrl+L SELECT · Ctrl+Y Vision OFF · Darwin-9B-Opus · 12171 tokens · Ready"
+	status := "^R ASK · ^L SELECT · ^Y Vision OFF · Darwin-9B-Opus · 12171 tokens · Ready"
 	got := truncateCells(status, 40)
 	if lipgloss.Width(got) > 40 {
 		t.Fatalf("truncated status width=%d want <= 40: %q", lipgloss.Width(got), got)
@@ -438,7 +438,7 @@ func TestTodoPanelUsesFixedRightSideAtNormalWidth(t *testing.T) {
 		t.Fatalf("todo side layout not applied: side=%v viewport=%d", m.todoOnSide(120), m.vp.Width)
 	}
 	view := m.View()
-	if strings.Index(view, "Todos") < 0 || strings.Index(view, "Todos") > strings.LastIndex(view, "Bolt ·") {
+	if strings.Index(view, "Todos") < 0 || strings.Index(view, "Todos") > strings.LastIndex(view, "^Q quit") {
 		t.Fatalf("todo panel was not rendered beside conversation before fixed footer")
 	}
 	if m.vp.Height < 20 {
@@ -520,7 +520,7 @@ func TestTodoPanelIsPresentInFinalViewAtWideWidth(t *testing.T) {
 	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final TUI view omitted the empty todo panel: %q", view)
 	}
-	if strings.Index(view, "Todos") >= strings.LastIndex(view, "Bolt ·") {
+	if strings.Index(view, "Todos") >= strings.LastIndex(view, "^Q quit") {
 		t.Fatal("todo panel was not composed above the fixed footer")
 	}
 }
@@ -557,13 +557,13 @@ func TestRepeatedUpdatesKeepFixedUIInOneFinalFrame(t *testing.T) {
 	} {
 		action()
 		view := m.View()
-		for _, marker := range []string{"📁 ", "Ctrl+Q", "Message…", "Todos"} {
+		for _, marker := range []string{"📁 ", "^Q", "Message…", "Todos"} {
 			if got := strings.Count(view, marker); got != 1 {
 				t.Fatalf("final frame contains %d copies of %q: %q", got, marker, view)
 			}
 		}
-		if got := strings.Count(view, "Bolt ·"); got != 2 {
-			t.Fatalf("final frame contains %d Bolt rows, want header and status: %q", got, view)
+		if got := strings.Count(view, "Bolt ·"); got != 1 {
+			t.Fatalf("final frame contains %d Bolt headers, want one: %q", got, view)
 		}
 	}
 }
@@ -573,13 +573,13 @@ func fixedRegionCounts(view string) (header, status, input, footer int) {
 		if strings.Contains(line, "Bolt · test · /help") {
 			header++
 		}
-		if strings.Contains(line, "Ctrl+R ASK") {
+		if strings.Contains(line, "📁 ") {
 			status++
 		}
 		if strings.Contains(line, "› Message…") {
 			input++
 		}
-		if strings.Contains(line, "Ctrl+Q quit") {
+		if strings.Contains(line, "^Q quit") {
 			footer++
 		}
 	}
@@ -706,7 +706,7 @@ func TestTodoToggleAppearsInFinalView(t *testing.T) {
 	if !strings.Contains(view, "Todos") || !strings.Contains(view, "No todos") {
 		t.Fatalf("final view omitted empty todo panel: %q", view)
 	}
-	if strings.Index(view, "Todos") > strings.LastIndex(view, "Bolt ·") {
+	if strings.Index(view, "Todos") > strings.LastIndex(view, "^Q quit") {
 		t.Fatal("todo panel was composed below the fixed footer")
 	}
 	if m.vp.Width <= 0 || m.conversationWidth(160) <= 0 {
