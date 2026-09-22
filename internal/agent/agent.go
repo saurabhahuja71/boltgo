@@ -989,7 +989,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 				a.RunState.ToolArguments = ""
 				a.persistDaily()
 			}
-			if result.Category != tools.FailureSuccess && !scopeRejected && !repeatedAction {
+			// Safety/policy refusals did not execute a tool and must not consume
+			// the retry budget needed to choose the safe alternative named by the
+			// refusal. Keep the refusal in history and normal call accounting.
+			if result.Category != tools.FailureSuccess && result.Category != tools.FailureUnsupported && !scopeRejected && !repeatedAction {
 				a.RunState.Retries++
 				emit(Event{Kind: EventStatus, Text: stateStatus(a.RunState.Phase)})
 			}

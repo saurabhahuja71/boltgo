@@ -162,6 +162,8 @@ func classifyFailure(text string) FailureCategory {
 		return FailureInvalidInput
 	case strings.Contains(low, "exit status"), strings.Contains(low, "command failed"):
 		return FailureCommand
+	case strings.Contains(low, "blocked"):
+		return FailureUnsupported
 	default:
 		return FailureUnknown
 	}

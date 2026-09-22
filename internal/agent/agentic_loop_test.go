@@ -508,6 +508,25 @@ func TestAgentRetryLimitStopsToolFailureRecovery(t *testing.T) {
 	}
 }
 
+func TestAgentSafetyRejectionDoesNotConsumeRetryBudget(t *testing.T) {
+	blocked := &scriptedTool{name: "run_shell", outputs: []scriptedOutcome{{out: "error: blocked xargs pipeline; use grep"}}}
+	reg := tools.NewRegistry()
+	reg.Register(blocked)
+	ag, _, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return toolSSE("run_shell", `{"command":"find . -type f | xargs grep TODO"}`)
+		}
+		return textSSE("the safe alternative was not needed")
+	}, reg)
+	defer closeServer()
+	if err := ag.RunUserMessage(context.Background(), "inspect the repository", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if ag.RunState.Retries != 0 {
+		t.Fatalf("safety rejection consumed retry budget: state=%+v", ag.RunState)
+	}
+}
+
 func TestAgentNoOpAlreadyCorrectStillVerifies(t *testing.T) {
 	reader := &scriptedTool{name: "read_file"}
 	writer := &scriptedTool{name: "write_file"}
