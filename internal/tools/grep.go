@@ -68,7 +68,7 @@ func (g grepTool) Run(ctx context.Context, argsJSON string) (string, error) {
 	if _, err := exec.LookPath("rg"); err == nil {
 		return runRipgrep(ctx, in.Pattern, in.Path, in.Glob, in.CaseInsensitive, in.MaxResults)
 	}
-	return runWalkGrep(in.Pattern, in.Path, in.Glob, in.CaseInsensitive, in.MaxResults)
+	return runWalkGrep(ctx, in.Pattern, in.Path, in.Glob, in.CaseInsensitive, in.MaxResults)
 }
 
 func runRipgrep(ctx context.Context, pattern, path, glob string, ci bool, max int) (string, error) {
@@ -98,7 +98,10 @@ func runRipgrep(ctx context.Context, pattern, path, glob string, ci bool, max in
 	return s, nil
 }
 
-func runWalkGrep(pattern, root, glob string, ci bool, max int) (string, error) {
+func runWalkGrep(ctx context.Context, pattern, root, glob string, ci bool, max int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	pat := pattern
 	if ci {
 		pat = "(?i)" + pattern
@@ -110,6 +113,9 @@ func runWalkGrep(pattern, root, glob string, ci bool, max int) (string, error) {
 	var b strings.Builder
 	n := 0
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil || n >= max {
 			return nil
 		}
@@ -141,6 +147,9 @@ func runWalkGrep(pattern, root, glob string, ci bool, max int) (string, error) {
 		sc.Buffer(buf, 1024*1024)
 		lineNo := 0
 		for sc.Scan() {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			lineNo++
 			line := sc.Text()
 			if re.MatchString(line) {
@@ -153,6 +162,9 @@ func runWalkGrep(pattern, root, glob string, ci bool, max int) (string, error) {
 		}
 		return nil
 	})
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if n == 0 {
 		return "no matches", nil
 	}
