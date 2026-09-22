@@ -1316,7 +1316,7 @@ func capToolResult(s string, max int) string {
 
 // Keep provider payloads below small local context windows after adding the
 // system prompt, tool schemas, control state, and the current request.
-const modelHistoryBudget = 10_000
+const modelHistoryBudget = 8_000
 
 // modelHistoryForRequest returns a bounded view of the conversation. Session
 // persistence and the in-memory factual history remain lossless; only the
