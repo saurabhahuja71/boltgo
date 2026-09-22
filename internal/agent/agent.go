@@ -421,6 +421,10 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	}
 
 	toolsUsed := 0
+	investigationGenerations := make(map[string]uint64)
+	var workspaceGeneration uint64
+	consecutiveNoProgressRounds := 0
+	synthesisOnly := false
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -473,6 +477,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		}
 		if a.CompatibilityMode {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: a.compatibilityOperationalContext()})
+		}
+		if synthesisOnly {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "Repeated investigation has produced no new evidence. Synthesize the evidence already collected now. Do not call tools, do not repeat searches, and do not claim an implementation exists unless tool results prove it."})
 		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
@@ -551,6 +558,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 		} else if round > 0 && a.Cfg.EnableTools && a.Tools != nil && toolsUsed < toolCap && round < toolCap {
 			roundTools = a.Tools.LLMTools()
 		}
+		if synthesisOnly {
+			roundTools = nil
+			emit(Event{Kind: EventStatus, Text: "repeated investigation detected; requesting evidence-only synthesis"})
+		}
 		if toolsUsed >= toolCap || toolsUsed >= maxToolCalls || a.RunState.Retries >= retryLimit || round >= toolCap {
 			if !a.compatibilityClosureActive {
 				roundTools = nil // force plain-text answer
@@ -567,6 +578,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 		} else if !attachTools && isTrivialChat(user) {
 			req.ToolChoice = "none"
 		}
+		// The synthesis opportunity applies to this request only. If the normal
+		// verification path needs another round, it may advertise its tools.
+		synthesisOnly = false
 
 		emit(Event{Kind: EventStatus, Text: fmt.Sprintf("calling %s (round %d)…", a.Cfg.Model, round+1)})
 		var msg llm.Message
@@ -851,6 +865,8 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 			}
 		}
+		roundHadInvestigation := false
+		roundHadProgress := false
 		for callIndex, tc := range msg.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				emit(Event{Kind: EventError, Text: "cancelled"})
@@ -869,6 +885,15 @@ Do not answer with only a markdown plan or shell snippets.`,
 			batchedRead := callIndex < batchLen
 			if batchedRead {
 				result = batchResults[callIndex]
+			}
+			fingerprint, investigation := investigationFingerprint(name, args)
+			duplicateInvestigation := false
+			if investigation && !batchedRead && a.Scheduler == nil && !a.DailyMode && !a.CompatibilityMode {
+				seenGeneration, seen := investigationGenerations[fingerprint]
+				duplicateInvestigation = seen && seenGeneration == workspaceGeneration
+			}
+			if investigation {
+				roundHadInvestigation = true
 			}
 			actionKey := ""
 			repeatedAction := false
@@ -898,7 +923,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			scopeRejected := a.Scheduler != nil && !a.Scheduler.AllowsTool(name, args)
 			compatibilityRejected := a.CompatibilityMode && a.compatibilityClosureActive && !compatibilityVerificationAction(name, args)
-			if repeatedAction {
+			if duplicateInvestigation {
+				result = tools.ExecutionResult{Output: repeatedInvestigationObservation(name), Category: tools.FailureUnsupported}
+				a.RunState.addObservation(name, args, result)
+			} else if repeatedAction {
 				result = tools.ExecutionResult{Output: fmt.Sprintf("goal_graph_repeated_action: %s was already attempted without new evidence; choose a different legal action", name), Category: tools.FailureUnsupported}
 				a.RunState.addNonExecutionObservation(name, result.Output)
 				a.recordGoalProgress(GoalProgressRepeated, result.Output, name, false, false)
@@ -967,13 +995,13 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 			}
 			emit(Event{Kind: EventToolStart, Tool: name, Text: args})
-			if scopeRejected || repeatedAction {
+			if scopeRejected || repeatedAction || duplicateInvestigation {
 				emit(Event{Kind: EventStatus, Text: fmt.Sprintf("%s: %s", result.Category, compactStateText(result.Output, 220))})
 			} else {
 				emit(Event{Kind: EventStatus, Text: fmt.Sprintf("running %s…", name)})
 			}
 			a.RunState.CurrentStep = name
-			if !scopeRejected && !repeatedAction {
+			if !scopeRejected && !repeatedAction && !duplicateInvestigation {
 				before := a.goalGraphSnapshot()
 				a.RunState.addObservation(name, args, result)
 				if a.Scheduler != nil {
@@ -994,6 +1022,17 @@ Do not answer with only a markdown plan or shell snippets.`,
 				a.RunState.ToolInProgress = ""
 				a.RunState.ToolArguments = ""
 				a.persistDaily()
+			}
+			if result.Category == tools.FailureSuccess {
+				roundHadProgress = true
+				if investigation && !duplicateInvestigation {
+					// Failed reads remain retryable. Only successful evidence
+					// establishes a duplicate investigation fingerprint.
+					investigationGenerations[fingerprint] = workspaceGeneration
+				}
+				if workspaceMutation(name) {
+					workspaceGeneration++
+				}
 			}
 			// Safety/policy refusals did not execute a tool and must not consume
 			// the retry budget needed to choose the safe alternative named by the
@@ -1025,6 +1064,19 @@ Do not answer with only a markdown plan or shell snippets.`,
 			if result.Category != tools.FailureUnsupported {
 				toolsUsed++
 			}
+		}
+		if roundHadInvestigation {
+			if roundHadProgress {
+				consecutiveNoProgressRounds = 0
+			} else {
+				consecutiveNoProgressRounds++
+				if consecutiveNoProgressRounds >= 2 {
+					synthesisOnly = true
+					emit(Event{Kind: EventStatus, Text: "repeated investigation made no progress; evidence synthesis required"})
+				}
+			}
+		} else if roundHadProgress {
+			consecutiveNoProgressRounds = 0
 		}
 		// loop: model continues with tool results
 	}

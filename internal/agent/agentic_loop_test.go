@@ -582,6 +582,78 @@ func TestAgentSafetyRejectionAddsRecoveryInstruction(t *testing.T) {
 	}
 }
 
+func TestAgentSuppressesRepeatedInvestigationAndSynthesizes(t *testing.T) {
+	reader := &scriptedTool{name: "read_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		if n <= 3 {
+			return toolSSE("read_file", `{"path":"missing-worker-pool.go"}`)
+		}
+		return textSSE("The requested worker-pool implementation does not exist in this repository.")
+	}, reg)
+	defer closeServer()
+	var events []Event
+	if err := ag.RunUserMessage(context.Background(), "find and fix the worker-pool implementation", func(event Event) {
+		events = append(events, event)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reader.mu.Lock()
+	readCalls := len(reader.calls)
+	reader.mu.Unlock()
+	if readCalls != 1 {
+		t.Fatalf("repeated investigation dispatched %d times, want 1", readCalls)
+	}
+	if len(*requests) < 4 {
+		t.Fatalf("no bounded synthesis opportunity was reached: requests=%d", len(*requests))
+	}
+	foundObservation := false
+	foundSynthesis := false
+	for _, event := range events {
+		foundObservation = foundObservation || strings.Contains(event.Text, "no progress")
+		foundSynthesis = foundSynthesis || strings.Contains(event.Text, "evidence-only synthesis")
+	}
+	if !foundObservation || !foundSynthesis {
+		t.Fatalf("missing no-progress recovery events: observation=%v synthesis=%v events=%+v", foundObservation, foundSynthesis, events)
+	}
+}
+
+func TestAgentAllowsInvestigationAfterMutation(t *testing.T) {
+	reader := &scriptedTool{name: "read_file"}
+	writer := &scriptedTool{name: "write_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	reg.Register(writer)
+	ag, _, closeServer := testAgent(t, func(n int) string {
+		switch n {
+		case 1:
+			return toolSSE("read_file", `{"path":"x.go"}`)
+		case 2:
+			return toolSSE("write_file", `{"path":"x.go","content":"new"}`)
+		case 3:
+			return toolSSE("read_file", `{"path":"x.go"}`)
+		case 4:
+			return textSSE("verified")
+		default:
+			return textSSE("done")
+		}
+	}, reg)
+	defer closeServer()
+	if err := ag.RunUserMessage(context.Background(), "inspect and update x.go", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	reader.mu.Lock()
+	readCalls := len(reader.calls)
+	reader.mu.Unlock()
+	writer.mu.Lock()
+	writeCalls := len(writer.calls)
+	writer.mu.Unlock()
+	if readCalls != 2 || writeCalls != 1 {
+		t.Fatalf("investigation after mutation was suppressed: reads=%d writes=%d", readCalls, writeCalls)
+	}
+}
+
 func TestAgentNoOpAlreadyCorrectStillVerifies(t *testing.T) {
 	reader := &scriptedTool{name: "read_file"}
 	writer := &scriptedTool{name: "write_file"}
