@@ -16,11 +16,12 @@ import (
 // text JSON instead of OpenAI tool_calls. Recover those so the agent loop runs.
 
 var (
-	reJSONObject   = regexp.MustCompile(`(?s)\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
-	reFencedJSON   = regexp.MustCompile("(?s)```(?:json|tool)?\\s*(\\{.*?\\})\\s*```")
-	reXMLToolCall  = regexp.MustCompile(`(?s)<tool_call>\s*<function=([A-Za-z0-9_]+)>\s*(.*?)\s*</tool_call>`)
-	reXMLFunction  = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_]+)>\s*(.*?)\s*</function>`)
-	reXMLParameter = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_]+)>\s*(.*?)\s*</parameter>`)
+	reJSONObject     = regexp.MustCompile(`(?s)\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
+	reFencedJSON     = regexp.MustCompile("(?s)```(?:json|tool)?\\s*(\\{.*?\\})\\s*```")
+	reXMLToolCall    = regexp.MustCompile(`(?s)<tool_call>\s*<function=([A-Za-z0-9_]+)>\s*(.*?)\s*</tool_call>`)
+	reXMLCompactCall = regexp.MustCompile(`(?s)<tool_call>\s*<function=([A-Za-z0-9_]+)>\s*(.*)$`)
+	reXMLFunction    = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_]+)>\s*(.*?)\s*</function>`)
+	reXMLParameter   = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_]+)>\s*(.*?)\s*</parameter>`)
 )
 
 // hasUnsupportedToolMarkup identifies common template tags that are not
@@ -128,6 +129,11 @@ func extractXMLToolCalls(content string, knownTools map[string]struct{}) ([]llm.
 		}
 	}
 	for _, found := range reXMLFunction.FindAllStringSubmatchIndex(content, -1) {
+		if len(found) >= 6 {
+			matches = append(matches, match{start: found[0], end: found[1], name: content[found[2]:found[3]], body: content[found[4]:found[5]]})
+		}
+	}
+	for _, found := range reXMLCompactCall.FindAllStringSubmatchIndex(content, -1) {
 		if len(found) >= 6 {
 			matches = append(matches, match{start: found[0], end: found[1], name: content[found[2]:found[3]], body: content[found[4]:found[5]]})
 		}

@@ -1314,7 +1314,9 @@ func capToolResult(s string, max int) string {
 	return s[:max] + "\n…[truncated for model; do not invent the rest]…"
 }
 
-const modelHistoryBudget = 18_000
+// Keep provider payloads below small local context windows after adding the
+// system prompt, tool schemas, control state, and the current request.
+const modelHistoryBudget = 10_000
 
 // modelHistoryForRequest returns a bounded view of the conversation. Session
 // persistence and the in-memory factual history remain lossless; only the

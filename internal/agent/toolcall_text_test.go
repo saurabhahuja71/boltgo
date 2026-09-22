@@ -77,6 +77,31 @@ func TestExtractCompactQwenXMLToolCalls(t *testing.T) {
 	}
 }
 
+func TestExtractCompactQwenXMLToolCallWithMultipleParameters(t *testing.T) {
+	raw := `<tool_call> <function=grep> <parameter=path> dboper/boltgo <parameter=pattern> type.*WorkerPool|func.*NewWorkerPool </tool_call>`
+	calls, rest := extractToolCallsFromContent(raw, map[string]struct{}{"grep": {}})
+	if len(calls) != 1 {
+		t.Fatalf("compact multi-parameter XML calls=%+v rest=%q", calls, rest)
+	}
+	if calls[0].Function.Arguments != `{"path":"dboper/boltgo","pattern":"type.*WorkerPool|func.*NewWorkerPool"}` {
+		t.Fatalf("compact multi-parameter arguments=%q", calls[0].Function.Arguments)
+	}
+	if rest != "" {
+		t.Fatalf("compact multi-parameter markup remained: %q", rest)
+	}
+}
+
+func TestExtractCompactQwenXMLToolCallWithoutClosingTag(t *testing.T) {
+	raw := `<tool_call> <function=grep> <parameter=path> dboper/boltgo <parameter=pattern> type.*WorkerPool|func.*NewWorkerPool`
+	calls, rest := extractToolCallsFromContent(raw, map[string]struct{}{"grep": {}})
+	if len(calls) != 1 || calls[0].Function.Name != "grep" {
+		t.Fatalf("unclosed compact XML calls=%+v rest=%q", calls, rest)
+	}
+	if calls[0].Function.Arguments != `{"path":"dboper/boltgo","pattern":"type.*WorkerPool|func.*NewWorkerPool"}` {
+		t.Fatalf("unclosed compact XML arguments=%q", calls[0].Function.Arguments)
+	}
+}
+
 func TestOrdinaryToolNameMentionIsNotRecovered(t *testing.T) {
 	known := map[string]struct{}{"str_replace": {}}
 	raw := "Use str_replace when an edit is required."
