@@ -490,6 +490,12 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 Do not answer with only a markdown plan or shell snippets.`,
 			})
 		}
+		// Unsupported actions do not consume the execution budget, but the
+		// model still needs an explicit recovery instruction. Otherwise a model
+		// can repeat the same safe refusal until the bounded loop stops.
+		if hint := unsupportedRecoveryHint(a.RunState); hint != "" {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: hint})
+		}
 
 		req := llm.ChatRequest{
 			Model:       a.Cfg.Model,
@@ -1101,6 +1107,18 @@ Rules:
 		base += "\n- This is a yes/no style question: start with Yes or No, then one short line of detail."
 	}
 	return base
+}
+
+func unsupportedRecoveryHint(state AgentRunState) string {
+	for i := len(state.Failures) - 1; i >= 0; i-- {
+		failure := state.Failures[i]
+		if failure.Category != tools.FailureUnsupported {
+			continue
+		}
+		return fmt.Sprintf(`The previous tool action was rejected as unsupported: %s
+Do not repeat that action. Choose a different legal action from the advertised tools. For repository inspection, prefer read_file, find_files, grep, list_dir, or repo_map, and keep every path inside the active workspace. The rejection is not evidence that the user's request is complete.`, failure.Summary)
+	}
+	return ""
 }
 
 // isLinkCheckRequest detects "check links" style tasks that models mishandle with shell.

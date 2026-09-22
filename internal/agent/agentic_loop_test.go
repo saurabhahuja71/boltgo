@@ -553,6 +553,35 @@ func TestAgentSafetyRejectionDoesNotConsumeToolExecutionBudget(t *testing.T) {
 	}
 }
 
+func TestAgentSafetyRejectionAddsRecoveryInstruction(t *testing.T) {
+	blocked := &scriptedTool{name: "run_shell", outputs: []scriptedOutcome{{out: "error: blocked xargs pipeline; use grep"}}}
+	reg := tools.NewRegistry()
+	reg.Register(blocked)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return toolSSE("run_shell", `{"command":"find . -type f | xargs grep TODO"}`)
+		}
+		return textSSE("I cannot continue")
+	}, reg)
+	defer closeServer()
+	if err := ag.RunUserMessage(context.Background(), "inspect the repository", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) < 2 {
+		t.Fatalf("expected recovery request, got %d requests", len(*requests))
+	}
+	var found bool
+	for _, message := range (*requests)[1].Messages {
+		if strings.Contains(message.Content, "Do not repeat that action") && strings.Contains(message.Content, "prefer read_file") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("recovery instruction missing from follow-up request: %+v", (*requests)[1].Messages)
+	}
+}
+
 func TestAgentNoOpAlreadyCorrectStillVerifies(t *testing.T) {
 	reader := &scriptedTool{name: "read_file"}
 	writer := &scriptedTool{name: "write_file"}
