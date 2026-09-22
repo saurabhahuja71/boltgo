@@ -425,6 +425,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	var workspaceGeneration uint64
 	consecutiveNoProgressRounds := 0
 	synthesisOnly := false
+	synthesisRetry := false
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -578,10 +579,6 @@ Do not answer with only a markdown plan or shell snippets.`,
 		} else if !attachTools && isTrivialChat(user) {
 			req.ToolChoice = "none"
 		}
-		// The synthesis opportunity applies to this request only. If the normal
-		// verification path needs another round, it may advertise its tools.
-		synthesisOnly = false
-
 		emit(Event{Kind: EventStatus, Text: fmt.Sprintf("calling %s (round %d)…", a.Cfg.Model, round+1)})
 		var msg llm.Message
 		var err error
@@ -798,6 +795,15 @@ Do not answer with only a markdown plan or shell snippets.`,
 		// A provider may emit a stale/ignored tool call even when the current
 		// request advertised no tools because a bound was reached.
 		if len(roundTools) == 0 {
+			if synthesisOnly && len(msg.ToolCalls) > 0 && !synthesisRetry {
+				synthesisRetry = true
+				a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Your previous synthesis response contained a tool call, but this is a text-only synthesis turn. Do not call tools. State only what the collected tool evidence proves, including if the requested implementation does not exist."})
+				continue
+			}
+			if synthesisOnly {
+				synthesisOnly = false
+				synthesisRetry = false
+			}
 			if a.compatibilityTerminalComplete(emit) {
 				emit(Event{Kind: EventDone})
 				return nil
