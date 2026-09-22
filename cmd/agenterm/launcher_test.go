@@ -53,6 +53,9 @@ func TestLauncherEnvironmentOverridesConfiguredValues(t *testing.T) {
 func TestBoltS1PolicyDefaultAndExplicitPolicy(t *testing.T) {
 	cfg := config.Default()
 	applyLauncherPreset(&cfg, "bolt-s1")
+	if cfg.Model != "Qwen3.6-27B-Q3_K_M.gguf" {
+		t.Fatalf("default bolt-s1 model = %q, want Qwen3.6-27B-Q3_K_M.gguf", cfg.Model)
+	}
 	if cfg.PermissionMode != "allow" {
 		t.Fatalf("default bolt-s1 policy = %q, want allow", cfg.PermissionMode)
 	}
@@ -61,6 +64,23 @@ func TestBoltS1PolicyDefaultAndExplicitPolicy(t *testing.T) {
 	applyLauncherPreset(&cfg, "bolt-s1")
 	if cfg.PermissionMode != "ask" {
 		t.Fatalf("explicit bolt-s1 policy was replaced: %q", cfg.PermissionMode)
+	}
+}
+
+func TestBoltS1PreservesExplicitModelAndEnvironmentOverride(t *testing.T) {
+	cfg := config.Default()
+	cfg.Model, cfg.ModelConfigured = "configured-model", true
+	applyLauncherPreset(&cfg, "bolt-s1")
+	if cfg.Model != "configured-model" {
+		t.Fatalf("explicit bolt-s1 model was replaced: %q", cfg.Model)
+	}
+
+	t.Setenv("BOLT_S1_MODEL", "environment-model")
+	cfg = config.Default()
+	applyLauncherEnvironment(&cfg, "bolt-s1")
+	applyLauncherPreset(&cfg, "bolt-s1")
+	if cfg.Model != "environment-model" {
+		t.Fatalf("BOLT_S1_MODEL was replaced: %q", cfg.Model)
 	}
 }
 

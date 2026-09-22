@@ -167,7 +167,14 @@ func launcherName() string {
 
 func applyLauncherPreset(cfg *config.Config, launcher string) {
 	switch launcher {
-	case "bolt-s1", "bolt-s2":
+	case "bolt-s1":
+		if !cfg.ModelConfigured && os.Getenv("BOLT_S1_MODEL") == "" {
+			cfg.Model = "Qwen3.6-27B-Q3_K_M.gguf"
+		}
+		if !cfg.PermissionModeConfigured && os.Getenv("BOLT_PERMISSION_MODE") == "" {
+			cfg.PermissionMode = "allow"
+		}
+	case "bolt-s2":
 		if !cfg.PermissionModeConfigured && os.Getenv("BOLT_PERMISSION_MODE") == "" {
 			cfg.PermissionMode = "allow"
 		}

@@ -15,7 +15,10 @@ type Config struct {
 	// PermissionModeConfigured distinguishes an explicit config value from the
 	// in-memory default so launcher policy defaults cannot replace user choice.
 	PermissionModeConfigured bool `toml:"-"`
-	VisionEnabled            bool `toml:"vision_enabled"`
+	// ModelConfigured distinguishes an explicit model from the in-memory default
+	// so launcher-specific model defaults can preserve user choice.
+	ModelConfigured bool `toml:"-"`
+	VisionEnabled   bool `toml:"vision_enabled"`
 	// Workspace is the user project root used by all filesystem and process tools.
 	// It is intentionally independent from the directory containing the Bolt binary.
 	Workspace string `toml:"workspace"`
@@ -201,6 +204,7 @@ func Load() (Config, string, error) {
 		return Config{}, path, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	cfg.PermissionModeConfigured = metadata.IsDefined("permission_mode")
+	cfg.ModelConfigured = metadata.IsDefined("model")
 	// Merge defaults for missing provider map / presets (e.g. older configs lack sglang).
 	if cfg.Providers == nil {
 		cfg.Providers = Default().Providers
