@@ -63,6 +63,20 @@ KUBECONFIG=/tmp/config kubectl get pods
 	}
 }
 
+func TestExtractCompactQwenXMLToolCalls(t *testing.T) {
+	raw := `<tool_call> <function=run_shell> <parameter=command> find /tmp -name "*.go" </tool_call> <tool_call> <function=run_shell> <parameter=command> find /tmp -type f </tool_call>`
+	calls, rest := extractToolCallsFromContent(raw, map[string]struct{}{"run_shell": {}})
+	if len(calls) != 2 {
+		t.Fatalf("compact XML calls=%+v rest=%q", calls, rest)
+	}
+	if calls[0].Function.Arguments != `{"command":"find /tmp -name \"*.go\""}` || calls[1].Function.Arguments != `{"command":"find /tmp -type f"}` {
+		t.Fatalf("compact XML arguments=%q,%q", calls[0].Function.Arguments, calls[1].Function.Arguments)
+	}
+	if rest != "" {
+		t.Fatalf("compact XML remained in response: %q", rest)
+	}
+}
+
 func TestOrdinaryToolNameMentionIsNotRecovered(t *testing.T) {
 	known := map[string]struct{}{"str_replace": {}}
 	raw := "Use str_replace when an edit is required."

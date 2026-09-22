@@ -18,6 +18,7 @@ import (
 var (
 	reJSONObject   = regexp.MustCompile(`(?s)\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
 	reFencedJSON   = regexp.MustCompile("(?s)```(?:json|tool)?\\s*(\\{.*?\\})\\s*```")
+	reXMLToolCall  = regexp.MustCompile(`(?s)<tool_call>\s*<function=([A-Za-z0-9_]+)>\s*(.*?)\s*</tool_call>`)
 	reXMLFunction  = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_]+)>\s*(.*?)\s*</function>`)
 	reXMLParameter = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_]+)>\s*(.*?)\s*</parameter>`)
 )
@@ -115,27 +116,36 @@ func extractToolCallsFromContent(content string, knownTools map[string]struct{})
 }
 
 func extractXMLToolCalls(content string, knownTools map[string]struct{}) ([]llm.ToolCall, string) {
+	type match struct {
+		start, end int
+		name       string
+		body       string
+	}
+	var matches []match
+	for _, found := range reXMLToolCall.FindAllStringSubmatchIndex(content, -1) {
+		if len(found) >= 6 {
+			matches = append(matches, match{start: found[0], end: found[1], name: content[found[2]:found[3]], body: content[found[4]:found[5]]})
+		}
+	}
+	for _, found := range reXMLFunction.FindAllStringSubmatchIndex(content, -1) {
+		if len(found) >= 6 {
+			matches = append(matches, match{start: found[0], end: found[1], name: content[found[2]:found[3]], body: content[found[4]:found[5]]})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].start < matches[j].start })
+
 	var calls []llm.ToolCall
 	var b strings.Builder
 	last := 0
-	for _, match := range reXMLFunction.FindAllStringSubmatchIndex(content, -1) {
-		if len(match) < 6 {
+	for _, found := range matches {
+		if found.start < last {
 			continue
 		}
-		name := content[match[2]:match[3]]
+		name := found.name
 		if _, ok := knownTools[name]; !ok {
 			continue
 		}
-		body := content[match[4]:match[5]]
-		args := map[string]string{}
-		for _, parameter := range reXMLParameter.FindAllStringSubmatchIndex(body, -1) {
-			if len(parameter) < 6 {
-				continue
-			}
-			key := body[parameter[2]:parameter[3]]
-			value := html.UnescapeString(strings.TrimSpace(body[parameter[4]:parameter[5]]))
-			args[key] = value
-		}
+		args := parseXMLParameters(found.body)
 		if len(args) == 0 {
 			continue
 		}
@@ -148,15 +158,50 @@ func extractXMLToolCalls(content string, knownTools map[string]struct{}) ([]llm.
 		if !ok {
 			continue
 		}
-		b.WriteString(content[last:match[0]])
+		b.WriteString(content[last:found.start])
 		calls = append(calls, tc)
-		last = match[1]
+		last = found.end
 	}
 	if len(calls) == 0 {
 		return nil, content
 	}
 	b.WriteString(content[last:])
 	return calls, strings.TrimSpace(strings.ReplaceAll(b.String(), "</tool_call>", ""))
+}
+
+// parseXMLParameters accepts both the fully closed template form and the
+// compact Qwen form, which closes parameters only at the enclosing tool_call.
+func parseXMLParameters(body string) map[string]string {
+	args := map[string]string{}
+	for pos := 0; pos < len(body); {
+		start := strings.Index(body[pos:], "<parameter=")
+		if start < 0 {
+			break
+		}
+		start += pos
+		keyEnd := strings.IndexByte(body[start+len("<parameter="):], '>')
+		if keyEnd < 0 {
+			break
+		}
+		keyStart := start + len("<parameter=")
+		keyEnd += keyStart
+		key := strings.TrimSpace(body[keyStart:keyEnd])
+		valueStart := keyEnd + 1
+		valueEnd := len(body)
+		for _, marker := range []string{"</parameter>", "<parameter=", "</function>", "</tool_call>"} {
+			if next := strings.Index(body[valueStart:], marker); next >= 0 && valueStart+next < valueEnd {
+				valueEnd = valueStart + next
+			}
+		}
+		if key != "" {
+			args[key] = html.UnescapeString(strings.TrimSpace(body[valueStart:valueEnd]))
+		}
+		pos = valueEnd
+		if strings.HasPrefix(body[pos:], "</parameter>") {
+			pos += len("</parameter>")
+		}
+	}
+	return args
 }
 
 // extractNamedToolCalls recovers the compact function-style form emitted by
