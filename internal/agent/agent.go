@@ -810,12 +810,42 @@ Do not answer with only a markdown plan or shell snippets.`,
 			a.History[n-1] = msg
 		}
 
-		// Execute tools sequentially (each tool has its own timeout inside the runner).
+		// Execute the contiguous read-only prefix in a bounded batch. All agent
+		// state, permission, event, and history updates remain sequential below.
 		a.RunState.Phase = PhaseAct
 		// New evidence invalidates the previous verification attempt; the next
 		// tool-free response must pass through the gate again.
 		verificationRequested = false
-		for _, tc := range msg.ToolCalls {
+		batchLen := 0
+		var batchResults []tools.ExecutionResult
+		if a.Scheduler == nil && !a.DailyMode && !a.CompatibilityMode {
+			batchLen = readOnlyBatchPrefix(a.Tools, msg.ToolCalls)
+			if batchLen < 2 {
+				batchLen = 0
+			}
+			if batchLen > 0 {
+				calls := make([]readOnlyBatchCall, batchLen)
+				for i := range calls {
+					index := i
+					name := msg.ToolCalls[i].Function.Name
+					args := msg.ToolCalls[i].Function.Arguments
+					calls[i] = readOnlyBatchCall{
+						index: index,
+						run: func(runCtx context.Context) tools.ExecutionResult {
+							return a.Tools.RunDetailed(runCtx, name, args)
+						},
+					}
+				}
+				var batchErr error
+				batchResults, batchErr = executeReadOnlyBatch(ctx, calls)
+				if batchErr != nil {
+					emit(Event{Kind: EventError, Text: "cancelled"})
+					emit(Event{Kind: EventDone})
+					return batchErr
+				}
+			}
+		}
+		for callIndex, tc := range msg.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				emit(Event{Kind: EventError, Text: "cancelled"})
 				emit(Event{Kind: EventDone})
@@ -830,6 +860,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 				a.persistDaily()
 			}
 			var result tools.ExecutionResult
+			batchedRead := callIndex < batchLen
+			if batchedRead {
+				result = batchResults[callIndex]
+			}
 			actionKey := ""
 			repeatedAction := false
 			if a.Scheduler != nil {
@@ -881,7 +915,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 				a.lastActionKey = actionKey
 				a.lastActionRevision = a.progressRevision
 				a.lastActionClass = GoalProgressScope
-			} else {
+			} else if !batchedRead {
 				level, capability := permissions.LevelForTool(name, args)
 				request := permissions.Request{Tool: name, Capability: capability, Level: level, Arguments: args}
 				if a.DailyMode && (name == "write_file" || name == "str_replace" || name == "git") {

@@ -71,6 +71,23 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+// ReadOnlyBatchEligible reports the concrete built-ins that may be executed
+// concurrently by the agent's per-response read batch. Keep this an explicit
+// type allowlist: a custom runner registered under one of these names must not
+// become concurrent merely because it shares a name with a built-in.
+func (r *Registry) ReadOnlyBatchEligible(name string) bool {
+	t, ok := r.runners[name]
+	if !ok {
+		return false
+	}
+	switch t.(type) {
+	case readFile, findFiles, grepTool, listDir, repoMap:
+		return true
+	default:
+		return false
+	}
+}
+
 // WithWorkspace rebuilds workspace-bound built-ins while preserving any
 // externally registered tools (for example MCP tools). It is used only after
 // an explicit user-approved workspace switch.
