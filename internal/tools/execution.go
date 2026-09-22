@@ -162,7 +162,9 @@ func classifyFailure(text string) FailureCategory {
 		return FailureInvalidInput
 	case strings.Contains(low, "exit status"), strings.Contains(low, "command failed"):
 		return FailureCommand
-	case strings.Contains(low, "blocked"):
+	case strings.Contains(low, "blocked"),
+		strings.Contains(low, "outside the active workspace"),
+		strings.Contains(low, "path traversal outside"):
 		return FailureUnsupported
 	default:
 		return FailureUnknown

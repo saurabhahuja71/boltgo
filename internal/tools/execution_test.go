@@ -26,6 +26,7 @@ func TestClassifyExecutionFailures(t *testing.T) {
 		{"error: fetch failed: context deadline exceeded", FailureTimeout, 0},
 		{"error: fetch failed: dial tcp: no such host", FailureNetwork, 0},
 		{"error: blocked xargs pipeline; use grep", FailureUnsupported, 0},
+		{"error: path /tmp/repo is outside the active workspace; use /workspace /absolute/path to switch explicitly", FailureUnsupported, 0},
 		{"exit status 1", FailureCommand, 0},
 	}
 	for _, tc := range tests {

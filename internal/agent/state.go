@@ -126,7 +126,9 @@ func (s *AgentRunState) beginIteration() {
 
 func (s *AgentRunState) addObservation(tool, args string, result tools.ExecutionResult) {
 	s.Phase = PhaseObserve
-	s.ToolCallsUsed++
+	if result.Category != tools.FailureUnsupported {
+		s.ToolCallsUsed++
+	}
 	record := ToolCallRecord{Name: tool, Arguments: compactStateText(args, 240), Outcome: result.Category}
 	if tool == "write_file" || tool == "str_replace" {
 		record.TargetPath = mutationTargetPath(args)

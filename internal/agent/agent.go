@@ -1016,7 +1016,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 				Content:    outForModel,
 				Name:       name,
 			})
-			toolsUsed++
+			if result.Category != tools.FailureUnsupported {
+				toolsUsed++
+			}
 		}
 		// loop: model continues with tool results
 	}
