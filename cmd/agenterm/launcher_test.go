@@ -33,7 +33,11 @@ func TestLauncherPreservesConfiguredModelAndEndpoint(t *testing.T) {
 		got := cfg
 		applyLauncherEnvironment(&got, name)
 		applyLauncherPreset(&got, name)
-		if got.Model != cfg.Model || got.BaseURL != cfg.BaseURL {
+		wantModel := cfg.Model
+		if name == "bolt-s1" {
+			wantModel = "Qwen3.6-27B-Q3_K_M.gguf"
+		}
+		if got.Model != wantModel || got.BaseURL != cfg.BaseURL {
 			t.Fatalf("%s replaced configured values: got model=%q base=%q", name, got.Model, got.BaseURL)
 		}
 	}
@@ -71,8 +75,8 @@ func TestBoltS1PreservesExplicitModelAndEnvironmentOverride(t *testing.T) {
 	cfg := config.Default()
 	cfg.Model, cfg.ModelConfigured = "configured-model", true
 	applyLauncherPreset(&cfg, "bolt-s1")
-	if cfg.Model != "configured-model" {
-		t.Fatalf("explicit bolt-s1 model was replaced: %q", cfg.Model)
+	if cfg.Model != "Qwen3.6-27B-Q3_K_M.gguf" {
+		t.Fatalf("shared model was not replaced for bolt-s1: %q", cfg.Model)
 	}
 
 	t.Setenv("BOLT_S1_MODEL", "environment-model")

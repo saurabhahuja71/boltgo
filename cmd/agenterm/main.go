@@ -168,7 +168,9 @@ func launcherName() string {
 func applyLauncherPreset(cfg *config.Config, launcher string) {
 	switch launcher {
 	case "bolt-s1":
-		if !cfg.ModelConfigured && os.Getenv("BOLT_S1_MODEL") == "" {
+		// S1 has its own backend/model contract. The shared config may name a
+		// model for the other launchers, but must not silently change S1.
+		if os.Getenv("BOLT_S1_MODEL") == "" {
 			cfg.Model = "Qwen3.6-27B-Q3_K_M.gguf"
 		}
 		if !cfg.PermissionModeConfigured && os.Getenv("BOLT_PERMISSION_MODE") == "" {
