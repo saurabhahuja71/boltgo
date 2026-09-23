@@ -346,15 +346,33 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
 	}
 
-	// @path mentions → attach file/dir context
+	workerPoolTask := workerPoolLifecycleTask(user) && isActionRequest(user)
+	// @path mentions → attach file/dir context.
 	payload, attached := expandMentions(user)
 	if attached != "" {
 		emit(Event{Kind: EventStatus, Text: "attached @" + attached})
+	}
+	// Point worker-pool action requests at the known implementation without
+	// embedding full file bodies (that blows small local context windows).
+	if workerPoolTask {
+		var existing []string
+		for _, rel := range workerPoolImplementationPaths() {
+			if resolveRepoRelativePath(rel) != "" {
+				existing = append(existing, rel)
+			}
+		}
+		if len(existing) > 0 {
+			payload += "\n\n[agenterm] Known worker-pool paths (read with read_file; do not rediscover):\n- " + strings.Join(existing, "\n- ")
+			emit(Event{Kind: EventStatus, Text: "worker-pool paths: " + strings.Join(existing, ", ")})
+		}
 	}
 
 	// Action requests: nudge the model in the same user turn so it executes tools.
 	if isActionRequest(user) {
 		payload = payload + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git/grep/run_tests). Do not only print steps."
+		if workerPoolTask {
+			payload += "\n[agenterm] " + workerPoolActionGuidance()
+		}
 		emit(Event{Kind: EventStatus, Text: "action mode: will apply changes via tools"})
 	}
 	if isLinkCheckRequest(user) && !a.PlanMode {
@@ -402,17 +420,30 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: "tools skipped (chat-only turn)"})
 	}
 
+	budgetRounds, budgetToolCalls, budgetToolCap := actionExecutionBudget(user)
 	maxRounds := a.MaxToolRounds
-	if isActionRequest(user) && maxRounds < 12 {
-		maxRounds = 12 // branch + edit + commit may need more steps
+	if maxRounds <= 0 {
+		maxRounds = budgetRounds
+	} else if isActionRequest(user) && maxRounds < budgetRounds && a.MaxToolRounds >= 8 {
+		// Raise production action budgets for end-to-end diagnose/fix/verify work.
+		// Explicit low caps set by tests (below the production default of 8) stay put.
+		maxRounds = budgetRounds
+	} else if isActionRequest(user) && maxRounds < 12 && a.MaxToolRounds >= 8 {
+		maxRounds = 12
 	}
 	maxIterations := a.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = maxRounds * 2
+	} else if isActionRequest(user) && maxIterations < maxRounds*2 && a.MaxIterations >= 16 {
+		// Only raise the production default iteration budget; keep explicit
+		// low test caps intact so autonomy bounds remain enforceable.
+		maxIterations = maxRounds * 2
 	}
 	maxToolCalls := a.MaxToolCalls
 	if maxToolCalls <= 0 {
-		maxToolCalls = maxRounds * 3
+		maxToolCalls = budgetToolCalls
+	} else if isActionRequest(user) && maxToolCalls < budgetToolCalls && a.MaxToolCalls >= 24 {
+		maxToolCalls = budgetToolCalls
 	}
 	maxRetries := a.MaxRetries
 	if maxRetries <= 0 {
@@ -431,6 +462,8 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	synthesisRetry := false
 	synthesisFallbackArmed := false
 	actionRecoveryNudged := false
+	knownPoolSourceRead := false
+	poolSourceMutated := false
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -487,8 +520,8 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		if synthesisOnly {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "Repeated investigation has produced no new evidence. Synthesize the evidence already collected now. Do not call tools, do not repeat searches, and do not claim an implementation exists unless tool results prove it."})
 		}
-		if actionRecoveryNudged && !a.RunState.hasMutation() {
-			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file, then run the requested tests. Do not make another read-only search."})
+		if actionRecoveryNudged && !(a.RunState.hasMutation() || poolSourceMutated) {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file on internal/agent/read_batch.go (surgical patch only), then run the requested tests. Do not make another read-only search."})
 		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
@@ -533,11 +566,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 		}
 
-		// Multi-step tools allowed; action tasks get more tool rounds before we force an answer.
-		toolCap := 4
-		if isActionRequest(user) {
-			toolCap = 12
-		}
+		// Multi-step tools allowed; heavy diagnose/fix/verify tasks keep tools
+		// longer so they do not die on "bounded autonomy limit reached".
+		toolCap := budgetToolCap
 		if a.CompatibilityMode && !a.compatibilityClosureActive &&
 			(toolsUsed >= toolCap || round >= toolCap) &&
 			a.compatibilityClosureEligible() && a.RunState.Retries < maxRetries &&
@@ -567,6 +598,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 		} else if round > 0 && a.Cfg.EnableTools && a.Tools != nil && toolsUsed < toolCap && round < toolCap {
 			roundTools = a.Tools.LLMTools()
 		}
+		if workerPoolTask && knownPoolSourceRead && !poolSourceMutated && len(roundTools) > 0 {
+			filtered := make([]llm.Tool, 0, len(roundTools))
+			for _, tool := range roundTools {
+				if workerPoolActionToolAllowed(tool.Function.Name) {
+					filtered = append(filtered, tool)
+				}
+			}
+			roundTools = filtered
+			emit(Event{Kind: EventStatus, Text: "worker-pool mode: edit/verify tools only"})
+		}
 		if synthesisOnly {
 			roundTools = nil
 			emit(Event{Kind: EventStatus, Text: "repeated investigation detected; requesting evidence-only synthesis"})
@@ -580,7 +621,15 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if len(roundTools) > 0 {
 			req.Tools = roundTools
 			req.ToolChoice = "auto"
-			if isActionRequest(user) && toolsUsed == 0 && round == 0 {
+			if workerPoolTask && round == 0 && !knownPoolSourceRead {
+				// Force the first model turn onto read_file so the known
+				// implementation is inspected before more repository discovery.
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
+			} else if workerPoolTask && knownPoolSourceRead && !poolSourceMutated {
+				// After the source is known, push the model onto an edit tool
+				// instead of another rediscovery loop.
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "str_replace"}}
+			} else if isActionRequest(user) && toolsUsed == 0 && round == 0 {
 				// Encourage tool use on first action turn (OpenAI-compatible; Ollama may ignore).
 				req.ToolChoice = "auto"
 			}
@@ -869,7 +918,8 @@ Do not answer with only a markdown plan or shell snippets.`,
 		verificationRequested = false
 		batchLen := 0
 		var batchResults []tools.ExecutionResult
-		if a.Scheduler == nil && !a.DailyMode && !a.CompatibilityMode {
+		if a.Scheduler == nil && !a.DailyMode && !a.CompatibilityMode &&
+			!(workerPoolTask && knownPoolSourceRead && !poolSourceMutated) {
 			batchLen = readOnlyBatchPrefix(a.Tools, msg.ToolCalls)
 			if batchLen < 2 {
 				batchLen = 0
@@ -954,7 +1004,13 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			scopeRejected := a.Scheduler != nil && !a.Scheduler.AllowsTool(name, args)
 			compatibilityRejected := a.CompatibilityMode && a.compatibilityClosureActive && !compatibilityVerificationAction(name, args)
-			if duplicateInvestigation {
+			poolRediscovery := workerPoolTask && knownPoolSourceRead && !poolSourceMutated && workerPoolRediscoveryTool(name, args)
+			if poolRediscovery {
+				result = tools.ExecutionResult{Output: workerPoolRediscoveryObservation(), Category: tools.FailureUnsupported}
+				a.RunState.addObservation(name, args, result)
+				roundHadInvestigation = true
+				duplicateInvestigation = true
+			} else if duplicateInvestigation {
 				result = tools.ExecutionResult{Output: repeatedInvestigationObservation(name), Category: tools.FailureUnsupported}
 				a.RunState.addObservation(name, args, result)
 			} else if repeatedAction {
@@ -1073,6 +1129,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 					// establishes a duplicate investigation fingerprint.
 					investigationGenerations[fingerprint] = workspaceGeneration
 				}
+				if workerPoolTask && workerPoolSourceRead(name, args) {
+					knownPoolSourceRead = true
+				}
+				if workerPoolTask && workerPoolTargetMutation(name, args) {
+					poolSourceMutated = true
+				}
 				if workspaceMutation(name) {
 					workspaceGeneration++
 				}
@@ -1122,6 +1184,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 						if !actionRecoveryNudged {
 							actionRecoveryNudged = true
 							recovery := "Use the evidence already collected and implement the requested change now. Inspect the most relevant source path already returned by the tools, then use str_replace or write_file and run the requested tests. Do not repeat grep, repo_map, list_dir, or find_files."
+							if workerPoolTask {
+								recovery = workerPoolRecoveryGuidance()
+							}
 							a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: recovery})
 						}
 						emit(Event{Kind: EventStatus, Text: "repeated investigation detected; keeping tools available within the bounded action budget"})

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -56,5 +57,65 @@ func TestActionRequestsKeepToolsAfterRepeatedInvestigation(t *testing.T) {
 	}
 	if keepActionToolsAfterNoProgress("explain how the worker pool works") {
 		t.Fatal("explanation request incorrectly retained action tools")
+	}
+}
+
+func TestWorkerPoolLifecycleTaskDetection(t *testing.T) {
+	if !workerPoolLifecycleTask("diagnose and fix the Go worker-pool implementation") {
+		t.Fatal("worker-pool action query was not detected")
+	}
+	if !workerPoolLifecycleTask("fix the worker pool lifecycle") {
+		t.Fatal("worker pool query was not detected")
+	}
+	if workerPoolLifecycleTask("explain the scheduler") {
+		t.Fatal("unrelated query was treated as a worker-pool task")
+	}
+}
+
+func TestActionExecutionBudgetRaisesHeavyEngineeringCaps(t *testing.T) {
+	rounds, calls, cap := actionExecutionBudget("diagnose and fix a production-safety issue in the existing Go worker-pool implementation\n\ngo test ./...\nCGO_ENABLED=1 go test -race ./...")
+	if rounds < 20 || calls < 48 || cap < 48 || cap != calls {
+		t.Fatalf("heavy worker-pool budget too small or soft-capped early: rounds=%d calls=%d cap=%d", rounds, calls, cap)
+	}
+	r2, c2, cap2 := actionExecutionBudget("implement a one-line typo fix")
+	if r2 != 12 || c2 != 24 || cap2 != 12 {
+		t.Fatalf("normal action budget = rounds=%d calls=%d cap=%d, want 12/24/12", r2, c2, cap2)
+	}
+	r3, c3, cap3 := actionExecutionBudget("explain the worker pool")
+	if r3 != 8 || c3 != 24 || cap3 != 4 {
+		t.Fatalf("non-action budget = rounds=%d calls=%d cap=%d, want 8/24/4", r3, c3, cap3)
+	}
+}
+
+func TestResolveRepoRelativePathFindsWorkerPoolSource(t *testing.T) {
+	got := resolveRepoRelativePath("internal/agent/read_batch.go")
+	if got == "" {
+		t.Fatal("did not resolve worker-pool implementation path from repository root")
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("resolved path %q is not readable: %v", got, err)
+	}
+}
+
+func TestDiscoveryShellCommandsAreFingerprinted(t *testing.T) {
+	first, ok := investigationFingerprint("run_shell", `{"command":"ls -la internal/agent/"}`)
+	if !ok {
+		t.Fatal("discovery shell was not fingerprinted")
+	}
+	second, ok := investigationFingerprint("run_shell", `{"command":"ls -la internal/agent/"}`)
+	if !ok || first != second {
+		t.Fatalf("equivalent shell listings produced different fingerprints: %q != %q", first, second)
+	}
+	if _, ok := investigationFingerprint("run_shell", `{"command":"go test ./..."}`); ok {
+		t.Fatal("go test shell command was treated as discovery")
+	}
+	if workspaceMutation("run_shell") {
+		t.Fatal("run_shell must not reset investigation generations as a workspace mutation")
+	}
+	if !workerPoolRediscoveryTool("run_shell", `{"command":"ls -la internal/agent/"}`) {
+		t.Fatal("worker-pool rediscovery did not catch shell listing")
+	}
+	if workerPoolRediscoveryTool("run_shell", `{"command":"go test ./internal/agent/ -run ReadOnlyBatch"}`) {
+		t.Fatal("verification shell was blocked as rediscovery")
 	}
 }

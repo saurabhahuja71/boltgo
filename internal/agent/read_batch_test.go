@@ -126,6 +126,126 @@ func TestReadOnlyBatchPoolSubmitAfterCloseAndConcurrentIdempotentClose(t *testin
 		go func() { defer closers.Done(); p.Close() }()
 	}
 	closers.Wait()
+	p.Close() // repeated Close must remain a no-op
+}
+
+func TestReadOnlyBatchPoolWorkersTerminateWithoutLeak(t *testing.T) {
+	const workers = 4
+	var alive atomic.Int32
+	started := make(chan struct{}, workers)
+	release := make(chan struct{})
+	p := newReadOnlyBatchPool(workers, workers, func(readOnlyBatchCall) {
+		alive.Add(1)
+		started <- struct{}{}
+		<-release
+		alive.Add(-1)
+	})
+	for i := 0; i < workers; i++ {
+		if err := p.Submit(context.Background(), readOnlyBatchCall{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < workers; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("workers did not start")
+		}
+	}
+	if got := alive.Load(); got != workers {
+		t.Fatalf("alive workers = %d, want %d", got, workers)
+	}
+	close(release)
+	p.Close()
+	if got := alive.Load(); got != 0 {
+		t.Fatalf("alive workers after Close = %d, want 0", got)
+	}
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); !errors.Is(err, errReadOnlyBatchClosed) {
+		t.Fatalf("submit after worker shutdown = %v, want closed", err)
+	}
+}
+
+func TestReadOnlyBatchPoolBlockingJobDrainsBeforeCloseReturns(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var startOnce sync.Once
+	p := newReadOnlyBatchPool(1, 1, func(readOnlyBatchCall) {
+		startOnce.Do(func() { close(started) })
+		<-release
+		close(finished)
+	})
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	closeRequested := make(chan struct{})
+	closed := make(chan struct{})
+	go func() {
+		close(closeRequested)
+		p.Close()
+		close(closed)
+	}()
+	<-closeRequested
+	select {
+	case <-closed:
+		t.Fatal("Close returned before the accepted blocking job finished")
+	default:
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking job did not finish")
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after the accepted job drained")
+	}
+}
+
+func TestReadOnlyBatchPoolCancelledContextDoesNotAcceptReadyQueue(t *testing.T) {
+	p := newReadOnlyBatchPool(1, 8, func(readOnlyBatchCall) {})
+	defer p.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 64; i++ {
+		if err := p.Submit(ctx, readOnlyBatchCall{}); !errors.Is(err, context.Canceled) {
+			t.Fatalf("submit with cancelled context = %v, want context.Canceled", err)
+		}
+	}
+}
+
+func TestReadOnlyBatchPoolNoSendOnClosedChannelPanic(t *testing.T) {
+	started := make(chan struct{}, 64)
+	release := make(chan struct{})
+	p := newReadOnlyBatchPool(2, 1, func(readOnlyBatchCall) {
+		started <- struct{}{}
+		<-release
+	})
+	var submitters sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		submitters.Add(1)
+		go func() {
+			defer submitters.Done()
+			_ = p.Submit(context.Background(), readOnlyBatchCall{})
+		}()
+	}
+	var closers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		closers.Add(1)
+		go func() {
+			defer closers.Done()
+			p.Close()
+		}()
+	}
+	close(release)
+	submitters.Wait()
+	closers.Wait()
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); !errors.Is(err, errReadOnlyBatchClosed) {
+		t.Fatalf("submit after concurrent close = %v, want closed", err)
+	}
 }
 
 func TestExecuteReadOnlyBatchIsConcurrentAndBounded(t *testing.T) {

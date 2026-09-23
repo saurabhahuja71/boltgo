@@ -67,6 +67,17 @@ func (p *readOnlyBatchPool) Submit(ctx context.Context, call readOnlyBatchCall) 
 	p.mu.Unlock()
 	defer p.activeSubmitters.Done()
 
+	// Prefer an already-cancelled context or shutdown signal over accepting
+	// work when the jobs channel also happens to be writable. Without this
+	// non-blocking check, a fair select can randomly enqueue after cancel.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.done:
+		return errReadOnlyBatchClosed
+	default:
+	}
+
 	select {
 	case p.jobs <- call:
 		return nil

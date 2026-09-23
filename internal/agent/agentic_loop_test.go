@@ -582,6 +582,57 @@ func TestAgentSafetyRejectionAddsRecoveryInstruction(t *testing.T) {
 	}
 }
 
+func TestAgentWorkerPoolActionHintsPathsAndForcesReadFile(t *testing.T) {
+	reader := &scriptedTool{name: "read_file", outputs: []scriptedOutcome{{out: "package agent\n"}}}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return toolSSE("read_file", `{"path":"internal/agent/read_batch.go"}`)
+		}
+		return textSSE("lifecycle fix verified")
+	}, reg)
+	defer closeServer()
+	var events []Event
+	prompt := "diagnose and fix a production-safety issue in the existing Go worker-pool implementation and run go test ./..."
+	if err := ag.RunUserMessage(context.Background(), prompt, func(event Event) {
+		events = append(events, event)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) == 0 {
+		t.Fatal("no model requests")
+	}
+	foundPathHint := false
+	for _, message := range (*requests)[0].Messages {
+		if strings.Contains(message.Content, "internal/agent/read_batch.go") && strings.Contains(message.Content, "Known worker-pool paths") {
+			foundPathHint = true
+			break
+		}
+	}
+	if !foundPathHint {
+		t.Fatalf("worker-pool path hint missing from first request: %+v", (*requests)[0].Messages)
+	}
+	choice, _ := (*requests)[0].ToolChoice.(map[string]any)
+	name := ""
+	switch fn := choice["function"].(type) {
+	case map[string]string:
+		name = fn["name"]
+	case map[string]any:
+		name, _ = fn["name"].(string)
+	}
+	if choice["type"] != "function" || name != "read_file" {
+		t.Fatalf("first worker-pool turn tool_choice = %#v, want forced read_file", (*requests)[0].ToolChoice)
+	}
+	foundStatus := false
+	for _, event := range events {
+		foundStatus = foundStatus || strings.Contains(event.Text, "worker-pool paths:")
+	}
+	if !foundStatus {
+		t.Fatalf("missing worker-pool path status event: %+v", events)
+	}
+}
+
 func TestAgentSuppressesRepeatedInvestigationAndAllowsActionRecovery(t *testing.T) {
 	reader := &scriptedTool{name: "read_file"}
 	reg := tools.NewRegistry()
