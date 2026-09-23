@@ -426,6 +426,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	consecutiveNoProgressRounds := 0
 	synthesisOnly := false
 	synthesisRetry := false
+	synthesisFallbackArmed := false
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -647,11 +648,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
-			if synthesisOnly && synthesisPlanningText(msg.Content) && !a.RunState.hasMutation() {
+			if synthesisFallbackArmed && synthesisPlanningText(msg.Content) && !a.RunState.hasMutation() {
 				a.RunState.Phase = PhaseBlocked
 				emit(Event{Kind: EventToken, Text: noProgressSynthesisFallback()})
 				emit(Event{Kind: EventDone})
 				return nil
+			}
+			if synthesisFallbackArmed {
+				synthesisFallbackArmed = false
+				synthesisOnly = false
+				synthesisRetry = false
 			}
 			if a.CompatibilityMode && a.compatibilityClosureActive {
 				if a.compatibilityCanComplete() {
@@ -806,7 +812,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 				a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Your previous synthesis response contained a tool call, but this is a text-only synthesis turn. Do not call tools. State only what the collected tool evidence proves, including if the requested implementation does not exist."})
 				continue
 			}
-			if synthesisOnly && synthesisRetry && !a.RunState.hasMutation() {
+			if synthesisFallbackArmed && synthesisRetry && !a.RunState.hasMutation() {
 				a.RunState.Phase = PhaseBlocked
 				emit(Event{Kind: EventToken, Text: noProgressSynthesisFallback()})
 				emit(Event{Kind: EventDone})
@@ -1090,6 +1096,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 				consecutiveNoProgressRounds++
 				if consecutiveNoProgressRounds >= 2 {
 					synthesisOnly = true
+					synthesisFallbackArmed = true
 					emit(Event{Kind: EventStatus, Text: "repeated investigation made no progress; evidence synthesis required"})
 				}
 			}
