@@ -46,6 +46,10 @@ type Config struct {
 	// EnableTools allows function/tool calling when the model supports it.
 	EnableTools bool `toml:"enable_tools"`
 
+	// DisableThinking asks compatible reasoning models to skip hidden thinking.
+	// This is useful for latency-sensitive remote coding endpoints.
+	DisableThinking bool `toml:"disable_thinking"`
+
 	// EnableShell allows run_shell (bash, curl, wget, scripts). Default true.
 	EnableShell bool `toml:"enable_shell"`
 
@@ -325,6 +329,14 @@ func applyEnv(c Config) Config {
 			c.EnableShell = false
 		case "1", "true", "yes", "on":
 			c.EnableShell = true
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("AGENTERM_DISABLE_THINKING")); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			c.DisableThinking = true
+		case "0", "false", "no", "off":
+			c.DisableThinking = false
 		}
 	}
 	return c

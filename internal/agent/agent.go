@@ -299,6 +299,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 			Temperature: a.Cfg.Temperature,
 			MaxTokens:   a.Cfg.MaxTokens,
 		}
+		if a.Cfg.DisableThinking {
+			req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+		}
 		// After tools: cooler sampling + shorter completion → less rambling / fake lists.
 		if toolsUsed > 0 {
 			if req.Temperature <= 0 || req.Temperature > 0.3 {
