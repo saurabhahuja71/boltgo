@@ -86,6 +86,21 @@ func TestAllowModeDoesNotBypassWorkspaceScope(t *testing.T) {
 	}
 }
 
+func TestShellAllowsTmpGoCachePathsForTests(t *testing.T) {
+	workspace := t.TempDir()
+	cache := "/tmp/boltgo-test-cache-path-check"
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cache) })
+	if reason := shellWorkspaceBlocked("GOCACHE="+cache+" go test ./...", workspace); reason != "" {
+		t.Fatalf("go test with /tmp GOCACHE was blocked: %s", reason)
+	}
+	if reason := shellWorkspaceBlocked("cd /scratch/sauahuja && ls", workspace); reason == "" {
+		t.Fatal("cd outside workspace should still be blocked")
+	}
+}
+
 func TestOperationalConfigPathsAreReadOnlyExceptions(t *testing.T) {
 	if !isOperationalConfigPath("/home/sauahuja/.kube/config-sidb1flannel") {
 		t.Fatal("sidb kubeconfig should be recognized as an operational config")

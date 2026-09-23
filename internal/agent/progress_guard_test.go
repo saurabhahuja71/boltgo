@@ -108,6 +108,18 @@ func TestResolveRepoRelativePathFindsWorkerPoolSource(t *testing.T) {
 	}
 }
 
+func TestOrderedChannelProcessRewriteAndRediscoveryGuards(t *testing.T) {
+	if !orderedChannelProcessFullRewrite("write_file", `{"path":"internal/worker/process.go","content":"package worker"}`) {
+		t.Fatal("full rewrite of process.go was not blocked")
+	}
+	if orderedChannelProcessFullRewrite("str_replace", `{"path":"internal/worker/process.go"}`) {
+		t.Fatal("surgical str_replace was incorrectly blocked")
+	}
+	if !orderedChannelProcessSourceRead("read_file", `{"path":"internal/worker/process.go"}`) {
+		t.Fatal("process source read was not detected")
+	}
+}
+
 func TestDiscoveryShellCommandsAreFingerprinted(t *testing.T) {
 	first, ok := investigationFingerprint("run_shell", `{"command":"ls -la internal/agent/"}`)
 	if !ok {
@@ -117,11 +129,14 @@ func TestDiscoveryShellCommandsAreFingerprinted(t *testing.T) {
 	if !ok || first != second {
 		t.Fatalf("equivalent shell listings produced different fingerprints: %q != %q", first, second)
 	}
-	if _, ok := investigationFingerprint("run_shell", `{"command":"go test ./..."}`); ok {
-		t.Fatal("go test shell command was treated as discovery")
+	if _, ok := investigationFingerprint("run_shell", `{"command":"go test ./..."}`); !ok {
+		t.Fatal("identical go test shell commands must be fingerprinted to prevent re-run loops")
 	}
-	if workspaceMutation("run_shell") {
-		t.Fatal("run_shell must not reset investigation generations as a workspace mutation")
+	if discoveryShellCommand(`{"command":"go test ./..."}`) {
+		t.Fatal("go test shell command was classified as discovery")
+	}
+	if workspaceMutation("run_shell") || workspaceMutation("run_tests") {
+		t.Fatal("verification tools must not reset investigation generations as workspace mutations")
 	}
 	if !workerPoolRediscoveryTool("run_shell", `{"command":"ls -la internal/agent/"}`) {
 		t.Fatal("worker-pool rediscovery did not catch shell listing")

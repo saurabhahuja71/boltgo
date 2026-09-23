@@ -13,12 +13,8 @@ import (
 // key ordering irrelevant while retaining paths, patterns, and other inputs.
 func investigationFingerprint(tool, args string) (string, bool) {
 	switch tool {
-	case "read_file", "find_files", "grep", "list_dir", "repo_map", "run_shell":
+	case "read_file", "find_files", "grep", "list_dir", "repo_map", "run_shell", "run_tests":
 	default:
-		return "", false
-	}
-	// Shell commands that execute builds/tests are verification, not discovery.
-	if tool == "run_shell" && !discoveryShellCommand(args) {
 		return "", false
 	}
 	var value any
@@ -33,7 +29,7 @@ func investigationFingerprint(tool, args string) (string, bool) {
 
 func workspaceMutation(tool string) bool {
 	switch tool {
-	case "write_file", "str_replace", "run_tests", "git":
+	case "write_file", "str_replace", "git":
 		return true
 	default:
 		return false
@@ -156,11 +152,48 @@ func orderedChannelProcessPaths() []string {
 }
 
 func orderedChannelProcessGuidance() string {
-	return "Ordered channel Process API lives at internal/worker/process.go (tests: internal/worker/process_test.go). Signature: func Process(ctx context.Context, jobs <-chan int) ([]int, error). Read or create that package first. Do not edit internal/agent/read_batch.go for this task. After implementation, run `go test ./internal/worker/ -count=1`, then `GOCACHE=/tmp/boltgo-test-cache go test ./...`, then `CGO_ENABLED=1 GOCACHE=/tmp/boltgo-race-cache go test -race ./...`."
+	return "Ordered channel Process API already lives at internal/worker/process.go (tests: internal/worker/process_test.go). Signature: func Process(ctx context.Context, jobs <-chan int) ([]int, error). Read that file once. Do not rewrite it with write_file unless a real defect exists; prefer surgical str_replace. Do not edit read_batch.go. Do not cd outside the workspace and do not use absolute paths like /scratch/... . Prefer the run_tests tool with command `go test ./internal/worker/ -count=1`, then `go test ./...`, then `CGO_ENABLED=1 go test -race ./...` (run_tests isolates GOCACHE automatically). Then write the final report."
 }
 
 func orderedChannelProcessRecoveryGuidance() string {
-	return "Stop repository rediscovery. Implement or patch func Process(ctx context.Context, jobs <-chan int) ([]int, error) in internal/worker/process.go with ordered results, bounded workers, and an explicit cancel/drain-accepted contract. Add tests in internal/worker/process_test.go, then run the Go test and race suites. Do not touch read_batch.go."
+	return "Stop rediscovery now. Process already exists in internal/worker/process.go with tests in process_test.go. Call run_tests with go test ./internal/worker/ immediately. Do not cd to /scratch or other absolute paths outside the workspace. Only use str_replace if a concrete failing test proves a defect. Never rewrite the whole file. Do not call grep, list_dir, repo_map, find_files, or discovery shell commands again."
+}
+
+func orderedChannelProcessRediscoveryObservation() string {
+	return "no progress: Process already exists at internal/worker/process.go. Stop rediscovery. Call run_tests / go test ./internal/worker/ now, or use surgical str_replace only if a real defect is proven."
+}
+
+func orderedChannelProcessSourceRead(tool, args string) bool {
+	if tool != "read_file" {
+		return false
+	}
+	low := strings.ToLower(args)
+	return strings.Contains(low, "process.go")
+}
+
+func orderedChannelProcessTargetMutation(tool, args string) bool {
+	switch tool {
+	case "str_replace", "write_file":
+	default:
+		return false
+	}
+	low := strings.ToLower(args)
+	return strings.Contains(low, "process.go") || strings.Contains(low, "process_test.go")
+}
+
+// orderedChannelProcessFullRewrite blocks whole-file write_file replacements of
+// an already-read Process implementation. Models otherwise burn the round budget
+// rewriting a working file into a broken one.
+func orderedChannelProcessFullRewrite(tool, args string) bool {
+	if tool != "write_file" {
+		return false
+	}
+	low := strings.ToLower(args)
+	return strings.Contains(low, "process.go")
+}
+
+func orderedChannelProcessRewriteObservation() string {
+	return "no progress: Process already exists. Do not rewrite internal/worker/process.go with write_file. Use surgical str_replace for a proven defect, or call run_tests / go test ./internal/worker/ to verify and finish."
 }
 
 func workerPoolActionGuidance() string {

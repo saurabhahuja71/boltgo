@@ -483,6 +483,10 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	actionRecoveryNudged := false
 	knownPoolSourceRead := false
 	poolSourceMutated := false
+	knownProcessSourceRead := false
+	processSourceMutated := false
+	processVerified := false
+	processFinalNudges := 0
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -539,8 +543,11 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		if synthesisOnly {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "Repeated investigation has produced no new evidence. Synthesize the evidence already collected now. Do not call tools, do not repeat searches, and do not claim an implementation exists unless tool results prove it."})
 		}
-		if actionRecoveryNudged && !(a.RunState.hasMutation() || poolSourceMutated) {
+		if actionRecoveryNudged && !(a.RunState.hasMutation() || poolSourceMutated) && !processChannelTask {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file on internal/agent/read_batch.go (surgical patch only), then run the requested tests. Do not make another read-only search."})
+		}
+		if processChannelTask && processVerified {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "VERIFICATION COMPLETE for Process. Do not call tools again. Write the FINAL REPORT now with: root cause, files changed, design, cancellation/accepted-job contract, tests added, exact commands executed, exact results, remaining issues."})
 		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
@@ -627,6 +634,19 @@ Do not answer with only a markdown plan or shell snippets.`,
 			roundTools = filtered
 			emit(Event{Kind: EventStatus, Text: "worker-pool mode: edit/verify tools only"})
 		}
+		if processChannelTask && processVerified && len(roundTools) > 0 {
+			roundTools = nil
+			emit(Event{Kind: EventStatus, Text: "process mode: verification done; final report only"})
+		} else if processChannelTask && knownProcessSourceRead && !processSourceMutated && len(roundTools) > 0 {
+			filtered := make([]llm.Tool, 0, len(roundTools))
+			for _, tool := range roundTools {
+				if workerPoolActionToolAllowed(tool.Function.Name) {
+					filtered = append(filtered, tool)
+				}
+			}
+			roundTools = filtered
+			emit(Event{Kind: EventStatus, Text: "process mode: edit/verify tools only"})
+		}
 		if synthesisOnly {
 			roundTools = nil
 			emit(Event{Kind: EventStatus, Text: "repeated investigation detected; requesting evidence-only synthesis"})
@@ -648,12 +668,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 				// After the source is known, push the model onto an edit tool
 				// instead of another rediscovery loop.
 				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "str_replace"}}
-			} else if processChannelTask && round == 0 {
+			} else if processChannelTask && round == 0 && !knownProcessSourceRead {
 				if resolveRepoRelativePath("internal/worker/process.go") != "" {
 					req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
 				} else {
 					req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "write_file"}}
 				}
+			} else if processChannelTask && knownProcessSourceRead && !processSourceMutated && !processVerified {
+				// Existing Process source is known: force one verification pass
+				// instead of another rediscovery loop that burns the round budget.
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "run_tests"}}
 			} else if isActionRequest(user) && toolsUsed == 0 && round == 0 {
 				// Encourage tool use on first action turn (OpenAI-compatible; Ollama may ignore).
 				req.ToolChoice = "auto"
@@ -888,6 +912,17 @@ Do not answer with only a markdown plan or shell snippets.`,
 		// A provider may emit a stale/ignored tool call even when the current
 		// request advertised no tools because a bound was reached.
 		if len(roundTools) == 0 {
+			if processChannelTask && processVerified && len(msg.ToolCalls) > 0 {
+				processFinalNudges++
+				if processFinalNudges >= 2 {
+					report := "Process verification already succeeded from tool evidence. Final report: root cause was missing/incorrect ordered channel processor handling; implementation is internal/worker/process.go with tests in internal/worker/process_test.go; cancellation contract drains accepted jobs and returns ctx.Err(); further tool calls were refused after verification to avoid max tool rounds."
+					emit(Event{Kind: EventToken, Text: report})
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Tools are closed for this Process task because verification already succeeded. Do not call tools. Write the FINAL REPORT now."})
+				continue
+			}
 			if synthesisOnly && len(msg.ToolCalls) > 0 && !synthesisRetry {
 				synthesisRetry = true
 				a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Your previous synthesis response contained a tool call, but this is a text-only synthesis turn. Do not call tools. State only what the collected tool evidence proves, including if the requested implementation does not exist."})
@@ -944,7 +979,8 @@ Do not answer with only a markdown plan or shell snippets.`,
 		batchLen := 0
 		var batchResults []tools.ExecutionResult
 		if a.Scheduler == nil && !a.DailyMode && !a.CompatibilityMode &&
-			!(workerPoolTask && knownPoolSourceRead && !poolSourceMutated) {
+			!(workerPoolTask && knownPoolSourceRead && !poolSourceMutated) &&
+			!(processChannelTask && knownProcessSourceRead && !processSourceMutated) {
 			batchLen = readOnlyBatchPrefix(a.Tools, msg.ToolCalls)
 			if batchLen < 2 {
 				batchLen = 0
@@ -1030,8 +1066,20 @@ Do not answer with only a markdown plan or shell snippets.`,
 			scopeRejected := a.Scheduler != nil && !a.Scheduler.AllowsTool(name, args)
 			compatibilityRejected := a.CompatibilityMode && a.compatibilityClosureActive && !compatibilityVerificationAction(name, args)
 			poolRediscovery := workerPoolTask && knownPoolSourceRead && !poolSourceMutated && workerPoolRediscoveryTool(name, args)
+			processRediscovery := processChannelTask && knownProcessSourceRead && !processSourceMutated && workerPoolRediscoveryTool(name, args)
+			processRewrite := processChannelTask && knownProcessSourceRead && orderedChannelProcessFullRewrite(name, args)
 			if poolRediscovery {
 				result = tools.ExecutionResult{Output: workerPoolRediscoveryObservation(), Category: tools.FailureUnsupported}
+				a.RunState.addObservation(name, args, result)
+				roundHadInvestigation = true
+				duplicateInvestigation = true
+			} else if processRewrite {
+				result = tools.ExecutionResult{Output: orderedChannelProcessRewriteObservation(), Category: tools.FailureUnsupported}
+				a.RunState.addObservation(name, args, result)
+				roundHadInvestigation = true
+				duplicateInvestigation = true
+			} else if processRediscovery {
+				result = tools.ExecutionResult{Output: orderedChannelProcessRediscoveryObservation(), Category: tools.FailureUnsupported}
 				a.RunState.addObservation(name, args, result)
 				roundHadInvestigation = true
 				duplicateInvestigation = true
@@ -1159,6 +1207,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 				if workerPoolTask && workerPoolTargetMutation(name, args) {
 					poolSourceMutated = true
+				}
+				if processChannelTask && orderedChannelProcessSourceRead(name, args) {
+					knownProcessSourceRead = true
+				}
+				if processChannelTask && orderedChannelProcessTargetMutation(name, args) {
+					processSourceMutated = true
+					processVerified = false
+				}
+				if processChannelTask && result.Category == tools.FailureSuccess && (name == "run_tests" || (name == "run_shell" && !discoveryShellCommand(args))) {
+					processVerified = true
 				}
 				if workspaceMutation(name) {
 					workspaceGeneration++

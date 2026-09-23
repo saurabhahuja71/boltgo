@@ -816,12 +816,33 @@ func shellWorkspaceBlocked(cmd, workspace string) string {
 			if isOperationalConfigPath(candidate) && operationalConfigCommand(cmd) {
 				continue
 			}
+			if isAllowedExternalTestCachePath(candidate, cmd) {
+				continue
+			}
 			if _, statErr := os.Stat(candidate); statErr == nil {
-				return err.Error()
+				return fmt.Sprintf("%s; stay inside the active workspace with relative paths, or call run_tests for Go tests", err.Error())
 			}
 		}
 	}
 	return ""
+}
+
+// isAllowedExternalTestCachePath permits /tmp Go cache dirs referenced by go
+// test/build commands. Those caches are intentionally outside the project tree
+// (and are also injected by run_tests); blocking them forces models into dead
+// "outside the active workspace" loops.
+func isAllowedExternalTestCachePath(path, cmd string) bool {
+	if !goTestCommandPattern.MatchString(cmd) &&
+		!strings.Contains(cmd, "go build") &&
+		!strings.Contains(cmd, "go env") &&
+		!strings.Contains(cmd, "GOCACHE=") {
+		return false
+	}
+	clean := filepath.Clean(path)
+	if clean == "/tmp" || strings.HasPrefix(clean, "/tmp"+string(filepath.Separator)) {
+		return true
+	}
+	return false
 }
 
 func isSafeSystemDiagnosticPath(path string) bool {

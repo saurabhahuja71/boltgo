@@ -582,6 +582,63 @@ func TestAgentSafetyRejectionAddsRecoveryInstruction(t *testing.T) {
 	}
 }
 
+func TestAgentProcessChannelForcesTestsAfterSourceRead(t *testing.T) {
+	reader := &scriptedTool{name: "read_file", outputs: []scriptedOutcome{{out: "package worker\nfunc Process("}}}
+	tester := &scriptedTool{name: "run_tests", outputs: []scriptedOutcome{{out: "ok"}}}
+	writer := &scriptedTool{name: "write_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	reg.Register(tester)
+	reg.Register(writer)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		switch n {
+		case 1:
+			return toolSSE("read_file", `{"path":"internal/worker/process.go"}`)
+		case 2:
+			return toolSSE("write_file", `{"path":"internal/worker/process.go","content":"package worker\n"}`)
+		case 3:
+			return toolSSE("run_tests", `{"command":"go test ./internal/worker/"}`)
+		case 4:
+			// Model tries to keep testing after verification; tools should be closed.
+			return toolSSE("run_tests", `{"command":"go test ./internal/worker/"}`)
+		default:
+			return textSSE("FINAL REPORT: Process verified")
+		}
+	}, reg)
+	defer closeServer()
+	var events []Event
+	prompt := "diagnose and fix func Process(ctx context.Context, jobs <-chan int) ([]int, error) and preserve input order"
+	if err := ag.RunUserMessage(context.Background(), prompt, func(event Event) {
+		events = append(events, event)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) < 2 {
+		t.Fatalf("expected multiple requests, got %d", len(*requests))
+	}
+	choice, _ := (*requests)[1].ToolChoice.(map[string]any)
+	name := ""
+	switch fn := choice["function"].(type) {
+	case map[string]string:
+		name = fn["name"]
+	case map[string]any:
+		name, _ = fn["name"].(string)
+	}
+	if choice["type"] != "function" || name != "run_tests" {
+		t.Fatalf("after Process source read, tool_choice = %#v, want forced run_tests", (*requests)[1].ToolChoice)
+	}
+	if len(writer.calls) != 0 {
+		t.Fatalf("full write_file rewrite was allowed: %v", writer.calls)
+	}
+	if len(tester.calls) == 0 {
+		t.Fatal("run_tests was never executed")
+	}
+	// After the first successful verification, identical re-tests must not keep consuming the budget.
+	if len(tester.calls) > 1 {
+		t.Fatalf("run_tests called too many times after verification: %d", len(tester.calls))
+	}
+}
+
 func TestAgentWorkerPoolActionHintsPathsAndForcesReadFile(t *testing.T) {
 	reader := &scriptedTool{name: "read_file", outputs: []scriptedOutcome{{out: "package agent\n"}}}
 	reg := tools.NewRegistry()
