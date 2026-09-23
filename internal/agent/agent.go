@@ -347,13 +347,14 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	}
 
 	workerPoolTask := workerPoolLifecycleTask(user) && isActionRequest(user)
+	processChannelTask := orderedChannelProcessTask(user) && isActionRequest(user)
 	// @path mentions → attach file/dir context.
 	payload, attached := expandMentions(user)
 	if attached != "" {
 		emit(Event{Kind: EventStatus, Text: "attached @" + attached})
 	}
-	// Point worker-pool action requests at the known implementation without
-	// embedding full file bodies (that blows small local context windows).
+	// Point known reliability tasks at their implementation without embedding
+	// full file bodies (that blows small local context windows).
 	if workerPoolTask {
 		var existing []string
 		for _, rel := range workerPoolImplementationPaths() {
@@ -366,12 +367,30 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 			emit(Event{Kind: EventStatus, Text: "worker-pool paths: " + strings.Join(existing, ", ")})
 		}
 	}
+	if processChannelTask {
+		var existing []string
+		for _, rel := range orderedChannelProcessPaths() {
+			if resolveRepoRelativePath(rel) != "" {
+				existing = append(existing, rel)
+			}
+		}
+		if len(existing) > 0 {
+			payload += "\n\n[agenterm] Known Process paths (read with read_file; do not rediscover):\n- " + strings.Join(existing, "\n- ")
+			emit(Event{Kind: EventStatus, Text: "process paths: " + strings.Join(existing, ", ")})
+		} else {
+			payload += "\n\n[agenterm] Create internal/worker/process.go with func Process(ctx context.Context, jobs <-chan int) ([]int, error) and tests in internal/worker/process_test.go."
+			emit(Event{Kind: EventStatus, Text: "process paths: create internal/worker/process.go"})
+		}
+	}
 
 	// Action requests: nudge the model in the same user turn so it executes tools.
 	if isActionRequest(user) {
 		payload = payload + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git/grep/run_tests). Do not only print steps."
 		if workerPoolTask {
 			payload += "\n[agenterm] " + workerPoolActionGuidance()
+		}
+		if processChannelTask {
+			payload += "\n[agenterm] " + orderedChannelProcessGuidance()
 		}
 		emit(Event{Kind: EventStatus, Text: "action mode: will apply changes via tools"})
 	}
@@ -629,6 +648,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 				// After the source is known, push the model onto an edit tool
 				// instead of another rediscovery loop.
 				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "str_replace"}}
+			} else if processChannelTask && round == 0 {
+				if resolveRepoRelativePath("internal/worker/process.go") != "" {
+					req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
+				} else {
+					req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "write_file"}}
+				}
 			} else if isActionRequest(user) && toolsUsed == 0 && round == 0 {
 				// Encourage tool use on first action turn (OpenAI-compatible; Ollama may ignore).
 				req.ToolChoice = "auto"
@@ -1186,6 +1211,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 							recovery := "Use the evidence already collected and implement the requested change now. Inspect the most relevant source path already returned by the tools, then use str_replace or write_file and run the requested tests. Do not repeat grep, repo_map, list_dir, or find_files."
 							if workerPoolTask {
 								recovery = workerPoolRecoveryGuidance()
+							}
+							if processChannelTask {
+								recovery = orderedChannelProcessRecoveryGuidance()
 							}
 							a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: recovery})
 						}

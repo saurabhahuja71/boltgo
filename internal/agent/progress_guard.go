@@ -95,10 +95,22 @@ func noProgressSynthesisFallback() string {
 	return "Investigation stopped after repeated searches produced no new evidence. No workspace mutation was performed, and no worker-pool implementation was located in the searched repository evidence. No fix was applied."
 }
 
-// workerPoolLifecycleTask identifies the production worker-pool reliability
-// query. That task has a single known implementation; bolt must not spend its
-// bounded action budget rediscovering the repository layout.
+// orderedChannelProcessTask identifies the Process(ctx, jobs <-chan int)
+// reliability query. It must not be confused with the read-only batch pool.
+func orderedChannelProcessTask(user string) bool {
+	low := strings.ToLower(user)
+	return strings.Contains(low, "jobs <-chan int") ||
+		strings.Contains(low, "func process(ctx") ||
+		(strings.Contains(low, "preserve input order") && strings.Contains(low, "jobs"))
+}
+
+// workerPoolLifecycleTask identifies the production read-batch worker-pool
+// reliability query. That task has a single known implementation; bolt must
+// not spend its bounded action budget rediscovering the repository layout.
 func workerPoolLifecycleTask(user string) bool {
+	if orderedChannelProcessTask(user) {
+		return false
+	}
 	low := strings.ToLower(user)
 	return strings.Contains(low, "worker-pool") || strings.Contains(low, "worker pool")
 }
@@ -114,6 +126,7 @@ func actionExecutionBudget(user string) (maxRounds, maxToolCalls, toolCap int) {
 	}
 	low := strings.ToLower(user)
 	heavy := workerPoolLifecycleTask(user) ||
+		orderedChannelProcessTask(user) ||
 		strings.Contains(low, "go test ./...") ||
 		strings.Contains(low, "end-to-end") ||
 		(strings.Contains(low, "diagnose") && strings.Contains(low, "fix")) ||
@@ -123,7 +136,7 @@ func actionExecutionBudget(user string) (maxRounds, maxToolCalls, toolCap int) {
 		// to recover from a failing verification pass. Keep the soft tool cap
 		// aligned with maxToolCalls so Bolt does not strip tools mid-run and
 		// then reject the model's next tool call as "bounded autonomy limit".
-		return 36, 96, 96
+		return 48, 120, 120
 	}
 	return maxRounds, maxToolCalls, toolCap
 }
@@ -133,6 +146,21 @@ func workerPoolImplementationPaths() []string {
 		"internal/agent/read_batch.go",
 		"internal/agent/read_batch_test.go",
 	}
+}
+
+func orderedChannelProcessPaths() []string {
+	return []string{
+		"internal/worker/process.go",
+		"internal/worker/process_test.go",
+	}
+}
+
+func orderedChannelProcessGuidance() string {
+	return "Ordered channel Process API lives at internal/worker/process.go (tests: internal/worker/process_test.go). Signature: func Process(ctx context.Context, jobs <-chan int) ([]int, error). Read or create that package first. Do not edit internal/agent/read_batch.go for this task. After implementation, run `go test ./internal/worker/ -count=1`, then `GOCACHE=/tmp/boltgo-test-cache go test ./...`, then `CGO_ENABLED=1 GOCACHE=/tmp/boltgo-race-cache go test -race ./...`."
+}
+
+func orderedChannelProcessRecoveryGuidance() string {
+	return "Stop repository rediscovery. Implement or patch func Process(ctx context.Context, jobs <-chan int) ([]int, error) in internal/worker/process.go with ordered results, bounded workers, and an explicit cancel/drain-accepted contract. Add tests in internal/worker/process_test.go, then run the Go test and race suites. Do not touch read_batch.go."
 }
 
 func workerPoolActionGuidance() string {

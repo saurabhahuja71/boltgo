@@ -70,12 +70,23 @@ func TestWorkerPoolLifecycleTaskDetection(t *testing.T) {
 	if workerPoolLifecycleTask("explain the scheduler") {
 		t.Fatal("unrelated query was treated as a worker-pool task")
 	}
+	processPrompt := "A worker-pool style processor is required:\n\n    func Process(ctx context.Context, jobs <-chan int) ([]int, error)\n\npreserve input order"
+	if !orderedChannelProcessTask(processPrompt) {
+		t.Fatal("Process channel query was not detected")
+	}
+	if workerPoolLifecycleTask(processPrompt) {
+		t.Fatal("Process channel query was misclassified as read-batch worker-pool task")
+	}
 }
 
 func TestActionExecutionBudgetRaisesHeavyEngineeringCaps(t *testing.T) {
 	rounds, calls, cap := actionExecutionBudget("diagnose and fix a production-safety issue in the existing Go worker-pool implementation\n\ngo test ./...\nCGO_ENABLED=1 go test -race ./...")
-	if rounds < 20 || calls < 48 || cap < 48 || cap != calls {
+	if rounds < 36 || calls < 96 || cap < 96 || cap != calls {
 		t.Fatalf("heavy worker-pool budget too small or soft-capped early: rounds=%d calls=%d cap=%d", rounds, calls, cap)
+	}
+	pr, pc, pcap := actionExecutionBudget("diagnose and fix func Process(ctx context.Context, jobs <-chan int) ([]int, error) and preserve input order")
+	if pr < 36 || pc < 96 || pcap != pc {
+		t.Fatalf("Process-channel budget too small: rounds=%d calls=%d cap=%d", pr, pc, pcap)
 	}
 	r2, c2, cap2 := actionExecutionBudget("implement a one-line typo fix")
 	if r2 != 12 || c2 != 24 || cap2 != 12 {
