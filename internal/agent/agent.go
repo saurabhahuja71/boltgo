@@ -647,6 +647,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
+			if synthesisOnly && synthesisPlanningText(msg.Content) && !a.RunState.hasMutation() {
+				a.RunState.Phase = PhaseBlocked
+				emit(Event{Kind: EventToken, Text: noProgressSynthesisFallback()})
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			if a.CompatibilityMode && a.compatibilityClosureActive {
 				if a.compatibilityCanComplete() {
 					a.RunState.Phase = PhaseComplete
@@ -799,6 +805,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 				synthesisRetry = true
 				a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Your previous synthesis response contained a tool call, but this is a text-only synthesis turn. Do not call tools. State only what the collected tool evidence proves, including if the requested implementation does not exist."})
 				continue
+			}
+			if synthesisOnly && synthesisRetry && !a.RunState.hasMutation() {
+				a.RunState.Phase = PhaseBlocked
+				emit(Event{Kind: EventToken, Text: noProgressSynthesisFallback()})
+				emit(Event{Kind: EventDone})
+				return nil
 			}
 			if synthesisOnly {
 				synthesisOnly = false

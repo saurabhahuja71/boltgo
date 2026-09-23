@@ -619,6 +619,33 @@ func TestAgentSuppressesRepeatedInvestigationAndSynthesizes(t *testing.T) {
 	}
 }
 
+func TestAgentNoProgressSynthesisFallsBackWithoutMutation(t *testing.T) {
+	reader := &scriptedTool{name: "read_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	ag, _, closeServer := testAgent(t, func(n int) string {
+		if n <= 3 {
+			return toolSSE("read_file", `{"path":"missing-worker-pool.go"}`)
+		}
+		return textSSE("I need to inspect the repository further.")
+	}, reg)
+	defer closeServer()
+	var text string
+	if err := ag.RunUserMessage(context.Background(), "find the worker-pool implementation", func(event Event) {
+		if event.Kind == EventToken {
+			text += event.Text
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "no worker-pool implementation was located") {
+		t.Fatalf("missing bounded evidence fallback: %q", text)
+	}
+	if ag.RunState.Phase != PhaseBlocked {
+		t.Fatalf("fallback did not remain fail-closed: %+v", ag.RunState)
+	}
+}
+
 func TestAgentAllowsInvestigationAfterMutation(t *testing.T) {
 	reader := &scriptedTool{name: "read_file"}
 	writer := &scriptedTool{name: "write_file"}

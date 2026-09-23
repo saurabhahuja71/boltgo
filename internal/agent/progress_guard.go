@@ -36,3 +36,20 @@ func workspaceMutation(tool string) bool {
 func repeatedInvestigationObservation(tool string) string {
 	return "no progress: " + tool + " was already executed with the same arguments and the relevant workspace state has not changed. Use the evidence already collected; do not repeat the same search or read. If the requested implementation does not exist, explicitly report that fact."
 }
+
+func synthesisPlanningText(text string) bool {
+	low := strings.ToLower(strings.TrimSpace(text))
+	if low == "" || strings.Contains(low, "<tool_call>") {
+		return true
+	}
+	for _, prefix := range []string{"i need to ", "let me ", "i'll ", "i will ", "first, let", "based on the request"} {
+		if strings.HasPrefix(low, prefix) && (strings.Contains(low, "inspect") || strings.Contains(low, "search") || strings.Contains(low, "find") || strings.Contains(low, "tool")) {
+			return true
+		}
+	}
+	return false
+}
+
+func noProgressSynthesisFallback() string {
+	return "Investigation stopped after repeated searches produced no new evidence. No workspace mutation was performed, and no worker-pool implementation was located in the searched repository evidence. No fix was applied."
+}
