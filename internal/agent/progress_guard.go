@@ -51,8 +51,8 @@ func synthesisPlanningText(text string) bool {
 	return false
 }
 
-func shouldAllowActionRecovery(user string, used bool) bool {
-	return !used && isActionRequest(user)
+func keepActionToolsAfterNoProgress(user string) bool {
+	return isActionRequest(user)
 }
 
 func noProgressSynthesisFallback() string {

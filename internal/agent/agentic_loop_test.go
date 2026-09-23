@@ -614,7 +614,7 @@ func TestAgentSuppressesRepeatedInvestigationAndAllowsActionRecovery(t *testing.
 	}
 	foundRecovery := false
 	for _, event := range events {
-		foundRecovery = foundRecovery || strings.Contains(event.Text, "bounded implementation recovery round")
+		foundRecovery = foundRecovery || strings.Contains(event.Text, "keeping tools available within the bounded action budget")
 	}
 	if !foundObservation || !foundRecovery {
 		t.Fatalf("missing no-progress recovery events: observation=%v recovery=%v events=%+v", foundObservation, foundRecovery, events)

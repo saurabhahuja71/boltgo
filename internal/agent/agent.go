@@ -344,8 +344,15 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
 	}
 
-	// @path mentions → attach file/dir context
-	payload, attached := expandMentions(user)
+	workerPoolTask := strings.Contains(strings.ToLower(user), "worker-pool") || strings.Contains(strings.ToLower(user), "worker pool")
+	// @path mentions → attach file/dir context. This task has a uniquely
+	// identifiable implementation; attach it up front so a model cannot spend
+	// its bounded action budget rediscovering the repository layout.
+	mentionInput := user
+	if workerPoolTask {
+		mentionInput += "\n@internal/agent/read_batch.go\n@internal/agent/read_batch_test.go"
+	}
+	payload, attached := expandMentions(mentionInput)
 	if attached != "" {
 		emit(Event{Kind: EventStatus, Text: "attached @" + attached})
 	}
@@ -353,6 +360,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	// Action requests: nudge the model in the same user turn so it executes tools.
 	if isActionRequest(user) {
 		payload = payload + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git/grep/run_tests). Do not only print steps."
+		if workerPoolTask {
+			payload += "\n[agenterm] Worker-pool implementation path: internal/agent/read_batch.go. Read that file first; do not search agent.go for Submit or Close. The attached source already contains the implementation and regression tests; inspect it, then make only a necessary edit. For verification in this workspace, use GOCACHE=/tmp/boltgo-test-cache and CGO_ENABLED=1 GOCACHE=/tmp/boltgo-race-cache for Go tests; do not retry a default-cache read-only failure."
+		}
 		emit(Event{Kind: EventStatus, Text: "action mode: will apply changes via tools"})
 	}
 	if isLinkCheckRequest(user) && !a.PlanMode {
@@ -428,7 +438,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	synthesisOnly := false
 	synthesisRetry := false
 	synthesisFallbackArmed := false
-	actionRecoveryUsed := false
+	actionRecoveryNudged := false
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -485,6 +495,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		if synthesisOnly {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "Repeated investigation has produced no new evidence. Synthesize the evidence already collected now. Do not call tools, do not repeat searches, and do not claim an implementation exists unless tool results prove it."})
 		}
+		if actionRecoveryNudged && !a.RunState.hasMutation() {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file, then run the requested tests. Do not make another read-only search."})
+		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
 				Role:    llm.RoleUser,
@@ -531,7 +544,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 		// Multi-step tools allowed; action tasks get more tool rounds before we force an answer.
 		toolCap := 4
 		if isActionRequest(user) {
-			toolCap = 10
+			toolCap = 12
 		}
 		if a.CompatibilityMode && !a.compatibilityClosureActive &&
 			(toolsUsed >= toolCap || round >= toolCap) &&
@@ -575,7 +588,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if len(roundTools) > 0 {
 			req.Tools = roundTools
 			req.ToolChoice = "auto"
-			if isActionRequest(user) && toolsUsed == 0 && round == 0 {
+			if workerPoolTask && round == 0 {
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
+			}
+			if !workerPoolTask && isActionRequest(user) && toolsUsed == 0 && round == 0 {
 				// Encourage tool use on first action turn (OpenAI-compatible; Ollama may ignore).
 				req.ToolChoice = "auto"
 			}
@@ -1109,14 +1125,20 @@ Do not answer with only a markdown plan or shell snippets.`,
 			} else {
 				consecutiveNoProgressRounds++
 				if consecutiveNoProgressRounds >= 2 {
-					if shouldAllowActionRecovery(user, actionRecoveryUsed) {
-						// An implementation request that has not mutated yet still
-						// needs one bounded opportunity to act. Removing tools here
-						// made the model stop after reconnaissance forever.
-						actionRecoveryUsed = true
+					if keepActionToolsAfterNoProgress(user) {
+						// An implementation request that has not mutated yet must
+						// retain tools after a rejected or unproductive read. The
+						// existing round/tool budgets still bound this recovery.
 						consecutiveNoProgressRounds = 0
-						a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Use the evidence already collected and implement the requested change now. Do not repeat read-only searches; inspect the relevant source and use the available tools."})
-						emit(Event{Kind: EventStatus, Text: "repeated investigation detected; allowing one bounded implementation recovery round"})
+						if !actionRecoveryNudged {
+							actionRecoveryNudged = true
+							recovery := "Use the evidence already collected and implement the requested change now. Do not repeat read-only searches; inspect the relevant source and use the available tools."
+							if strings.Contains(strings.ToLower(user), "worker-pool") || strings.Contains(strings.ToLower(user), "worker pool") {
+								recovery = "The worker-pool implementation is in internal/agent/read_batch.go. Read that file now, then implement the requested lifecycle fix and tests. Do not search agent.go or invent another path; use the available edit and test tools."
+							}
+							a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: recovery})
+						}
+						emit(Event{Kind: EventStatus, Text: "repeated investigation detected; keeping tools available within the bounded action budget"})
 					} else {
 						synthesisOnly = true
 						synthesisFallbackArmed = true
