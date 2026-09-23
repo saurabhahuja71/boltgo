@@ -30,6 +30,31 @@ func TestExtractToolCallsFromContent(t *testing.T) {
 	}
 }
 
+func TestExtractLlamaMarkupToolCalls(t *testing.T) {
+	known := map[string]struct{}{"list_dir": {}, "grep": {}}
+	raw := `<tool_call><function=list_dir><parameter=path>/home/sauahuja/covered_call_bot</parameter></tool_call>` +
+		`<tool_call><function=grep><parameter=pattern>2026-08-28</parameter><parameter=path>/home/sauahuja/covered_call_bot</parameter></tool_call>`
+	calls, rest := extractToolCallsFromContent(raw, known)
+	if len(calls) != 2 || rest != "" {
+		t.Fatalf("calls=%d rest=%q", len(calls), rest)
+	}
+	if calls[0].Function.Name != "list_dir" || !contains(calls[0].Function.Arguments, "covered_call_bot") {
+		t.Fatalf("first call=%+v", calls[0])
+	}
+	if calls[1].Function.Name != "grep" || !contains(calls[1].Function.Arguments, "2026-08-28") {
+		t.Fatalf("second call=%+v", calls[1])
+	}
+}
+
+func TestExtractLlamaMarkupWithoutFunctionClose(t *testing.T) {
+	known := map[string]struct{}{"list_dir": {}}
+	raw := `<tool_call><function=list_dir><parameter=path>/tmp</tool_call>`
+	calls, rest := extractToolCallsFromContent(raw, known)
+	if len(calls) != 1 || rest != "" || !contains(calls[0].Function.Arguments, `"path":"/tmp"`) {
+		t.Fatalf("calls=%d rest=%q args=%q", len(calls), rest, calls[0].Function.Arguments)
+	}
+}
+
 func TestUnsupportedToolMarkupIsDetectedWithoutChangingProtocol(t *testing.T) {
 	if !hasUnsupportedToolMarkup("<function=repo_map>\n</function>\n</tool_call>") {
 		t.Fatal("expected unsupported template markup to be detected")

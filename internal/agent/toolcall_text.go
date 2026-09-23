@@ -16,6 +16,12 @@ import (
 var (
 	reJSONObject = regexp.MustCompile(`(?s)\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}`)
 	reFencedJSON = regexp.MustCompile("(?s)```(?:json|tool)?\\s*(\\{.*?\\})\\s*```")
+	// llama.cpp/Qwen instruct templates may render OpenAI tools as XML-ish
+	// text instead of returning message.tool_calls. Accept only registered
+	// tools, and convert parameter values into the normal JSON argument shape.
+	reMarkupToolCall  = regexp.MustCompile(`(?is)<tool_call>\s*<function=([a-z0-9_.:-]+)>(.*?)(?:</function>\s*)?</tool_call>`)
+	reMarkupFunction  = regexp.MustCompile(`(?is)<function=([a-z0-9_.:-]+)>(.*?)</function>`)
+	reMarkupParameter = regexp.MustCompile(`(?is)<parameter=([a-z0-9_.-]+)>\s*([^<]*?)(?:</parameter>|$)`)
 )
 
 // hasUnsupportedToolMarkup identifies common template tags that are not
@@ -47,6 +53,13 @@ func extractToolCallsFromContent(content string, knownTools map[string]struct{})
 
 	var calls []llm.ToolCall
 	rest := content
+
+	// llama.cpp/Qwen markup, including the common truncated form without a
+	// closing </function>. Parse wrapped calls first, then standalone function
+	// blocks so a malformed first call cannot consume later calls.
+	if markupCalls, markupRest := extractMarkupToolCalls(content, knownTools); len(markupCalls) > 0 {
+		return markupCalls, markupRest
+	}
 
 	// Prefer fenced blocks first.
 	if locs := reFencedJSON.FindAllStringSubmatchIndex(content, -1); len(locs) > 0 {
@@ -100,6 +113,92 @@ func extractToolCallsFromContent(content string, knownTools map[string]struct{})
 		return nil, content
 	}
 	return calls, rest
+}
+
+func extractMarkupToolCalls(content string, knownTools map[string]struct{}) ([]llm.ToolCall, string) {
+	var calls []llm.ToolCall
+	rest := content
+	matched := false
+	consume := func(re *regexp.Regexp) {
+		locs := re.FindAllStringSubmatchIndex(rest, -1)
+		if len(locs) == 0 {
+			return
+		}
+		var b strings.Builder
+		last := 0
+		for _, loc := range locs {
+			if len(loc) < 6 {
+				continue
+			}
+			name := strings.TrimSpace(rest[loc[2]:loc[3]])
+			body := rest[loc[4]:loc[5]]
+			if tc, ok := parseMarkupToolCall(name, body, knownTools); ok {
+				b.WriteString(rest[last:loc[0]])
+				calls = append(calls, tc)
+				last = loc[1]
+				matched = true
+			}
+		}
+		if matched {
+			b.WriteString(rest[last:])
+			rest = strings.TrimSpace(b.String())
+		}
+	}
+	consume(reMarkupToolCall)
+	consume(reMarkupFunction)
+	if !matched {
+		return nil, content
+	}
+	return calls, rest
+}
+
+func parseMarkupToolCall(name, body string, knownTools map[string]struct{}) (llm.ToolCall, bool) {
+	name = normalizeMarkupToolName(name)
+	if _, ok := knownTools[name]; !ok {
+		return llm.ToolCall{}, false
+	}
+	if strings.TrimSpace(body) == "" {
+		return llm.ToolCall{}, false
+	}
+	args := map[string]string{}
+	for _, match := range reMarkupParameter.FindAllStringSubmatch(body, -1) {
+		if len(match) == 3 {
+			args[strings.TrimSpace(match[1])] = strings.TrimSpace(match[2])
+		}
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return llm.ToolCall{}, false
+	}
+	return llm.ToolCall{
+		ID:   fmt.Sprintf("markupcall_%d", time.Now().UnixNano()),
+		Type: "function",
+		Function: llm.FunctionCall{
+			Name:      name,
+			Arguments: string(encoded),
+		},
+	}, true
+}
+
+func normalizeMarkupToolName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "read", "readfile", "read-file":
+		return "read_file"
+	case "list", "listdir", "list-dir", "ls":
+		return "list_dir"
+	case "write", "writefile", "write-file":
+		return "write_file"
+	case "replace", "edit", "edit-file", "search-replace":
+		return "str_replace"
+	case "find", "findfiles", "find-files", "search":
+		return "find_files"
+	case "test", "tests":
+		return "run_tests"
+	case "http-get", "httpget", "download":
+		return "fetch"
+	default:
+		return strings.TrimSpace(name)
+	}
 }
 
 func parseOneToolJSON(raw string, knownTools map[string]struct{}) (llm.ToolCall, bool) {
