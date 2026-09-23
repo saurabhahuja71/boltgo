@@ -3354,9 +3354,6 @@ func (m model) View() string {
 		statusLabel = fmt.Sprintf("Working (%s • esc to interrupt)", formatElapsed(m.waitSecs))
 	}
 	workspaceText := "📁 " + displayCwdAt(workspace, max(20, w-24))
-	if summary := compactWorktreeSummary(m.worktree, w); summary != "" {
-		workspaceText += " · " + summary
-	}
 	workspaceText += " · " + statusLabel
 	// Put the state-changing shortcuts first so a narrow terminal does not
 	// truncate the controls behind the model name or workspace path.

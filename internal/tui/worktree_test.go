@@ -96,8 +96,8 @@ func TestCompactWorktreeSummaryAndView(t *testing.T) {
 		t.Fatalf("summary=%q", got)
 	}
 	view := m.View()
-	if strings.Count(view, "2 files · +42 -17") != 1 {
-		t.Fatalf("summary rendered more/less than once: %q", view)
+	if strings.Contains(view, "2 files · +42 -17") || strings.Contains(view, "M app.go") {
+		t.Fatalf("worktree details leaked into clean footer: %q", view)
 	}
 	if len(m.lines) != 0 {
 		t.Fatal("worktree summary entered transcript")
