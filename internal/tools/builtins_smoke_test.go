@@ -30,6 +30,10 @@ func TestBuiltinsBasic(t *testing.T) {
 	if err != nil || !strings.Contains(out, "go.mod") {
 		t.Fatalf("find_files: %v %q", err, out)
 	}
+	out, err = r.Run(context.Background(), "find_files", `{"path":"go.mod"}`)
+	if err != nil || !strings.Contains(out, "go.mod") {
+		t.Fatalf("find_files path alias: %v %q", err, out)
+	}
 	// Invented "repo/" prefix should still resolve when README.md exists at cwd.
 	out, err = r.Run(context.Background(), "read_file", `{"path":"repo/README.md"}`)
 	if err != nil || !strings.Contains(out, "agenterm") {

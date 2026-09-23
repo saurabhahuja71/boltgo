@@ -960,6 +960,10 @@ func (findFiles) Schema() map[string]any {
 				"type":        "string",
 				"description": "File or directory name / substring, e.g. README.md or oracle-database-operator",
 			},
+			"path": map[string]any{
+				"type":        "string",
+				"description": "Compatibility alias for name when locating a file or directory substring",
+			},
 			"root": map[string]any{
 				"type":        "string",
 				"description": "Search root relative to cwd (default .)",
@@ -974,10 +978,17 @@ func (findFiles) Schema() map[string]any {
 func (f findFiles) Run(_ context.Context, argsJSON string) (string, error) {
 	var in struct {
 		Name       string `json:"name"`
+		Path       string `json:"path"`
 		Root       string `json:"root"`
 		MaxResults int    `json:"max_results"`
 	}
-	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || strings.TrimSpace(in.Name) == "" {
+	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		in.Name = in.Path
+	}
+	if strings.TrimSpace(in.Name) == "" {
 		return "", fmt.Errorf("name required")
 	}
 	root, err := resolveWorkspacePathChecked(f.Workspace, in.Root)

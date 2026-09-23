@@ -229,6 +229,8 @@ Workspace (tool paths resolve here):
 - Do NOT invent prefixes like "repo/" or invent file names (no fake main.go/config.go lists).
 - Only report paths that appeared in tool results or @mentions.
 - Prefer grep / repo_map to explore; find_files to locate names; str_replace to edit; run_tests after code changes.
+- When grep or repo_map returns candidate source paths for an action request, inspect the most relevant returned path immediately; do not repeat repository-wide discovery or invent a filename.
+- If a named type is not found, search its lifecycle vocabulary (for example Submit, Close, WaitGroup, jobs, queue, batch) before concluding the implementation is absent.
 - Link checks: grep for https?:// in files, then fetch each URL (cap ~15). Never xargs+curl/wget crawls.
 - For "can you do it" / apply / implement: use tools. Do not only print a plan.
 `, cwd, root))
@@ -344,15 +346,8 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
 	}
 
-	workerPoolTask := strings.Contains(strings.ToLower(user), "worker-pool") || strings.Contains(strings.ToLower(user), "worker pool")
-	// @path mentions → attach file/dir context. This task has a uniquely
-	// identifiable implementation; attach it up front so a model cannot spend
-	// its bounded action budget rediscovering the repository layout.
-	mentionInput := user
-	if workerPoolTask {
-		mentionInput += "\n@internal/agent/read_batch.go\n@internal/agent/read_batch_test.go"
-	}
-	payload, attached := expandMentions(mentionInput)
+	// @path mentions → attach file/dir context
+	payload, attached := expandMentions(user)
 	if attached != "" {
 		emit(Event{Kind: EventStatus, Text: "attached @" + attached})
 	}
@@ -360,9 +355,6 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	// Action requests: nudge the model in the same user turn so it executes tools.
 	if isActionRequest(user) {
 		payload = payload + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git/grep/run_tests). Do not only print steps."
-		if workerPoolTask {
-			payload += "\n[agenterm] Worker-pool implementation path: internal/agent/read_batch.go. Read that file first; do not search agent.go for Submit or Close. The attached source already contains the implementation and regression tests; inspect it, then make only a necessary edit. For verification in this workspace, use GOCACHE=/tmp/boltgo-test-cache and CGO_ENABLED=1 GOCACHE=/tmp/boltgo-race-cache for Go tests; do not retry a default-cache read-only failure."
-		}
 		emit(Event{Kind: EventStatus, Text: "action mode: will apply changes via tools"})
 	}
 	if isLinkCheckRequest(user) && !a.PlanMode {
@@ -588,10 +580,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if len(roundTools) > 0 {
 			req.Tools = roundTools
 			req.ToolChoice = "auto"
-			if workerPoolTask && round == 0 {
-				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
-			}
-			if !workerPoolTask && isActionRequest(user) && toolsUsed == 0 && round == 0 {
+			if isActionRequest(user) && toolsUsed == 0 && round == 0 {
 				// Encourage tool use on first action turn (OpenAI-compatible; Ollama may ignore).
 				req.ToolChoice = "auto"
 			}
@@ -1132,10 +1121,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 						consecutiveNoProgressRounds = 0
 						if !actionRecoveryNudged {
 							actionRecoveryNudged = true
-							recovery := "Use the evidence already collected and implement the requested change now. Do not repeat read-only searches; inspect the relevant source and use the available tools."
-							if strings.Contains(strings.ToLower(user), "worker-pool") || strings.Contains(strings.ToLower(user), "worker pool") {
-								recovery = "The worker-pool implementation is in internal/agent/read_batch.go. Read that file now, then implement the requested lifecycle fix and tests. Do not search agent.go or invent another path; use the available edit and test tools."
-							}
+							recovery := "Use the evidence already collected and implement the requested change now. Inspect the most relevant source path already returned by the tools, then use str_replace or write_file and run the requested tests. Do not repeat grep, repo_map, list_dir, or find_files."
 							a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: recovery})
 						}
 						emit(Event{Kind: EventStatus, Text: "repeated investigation detected; keeping tools available within the bounded action budget"})
