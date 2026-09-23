@@ -422,6 +422,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 
 	toolsUsed := 0
 	investigationGenerations := make(map[string]uint64)
+	investigationEvidence := make(map[string]struct{})
 	var workspaceGeneration uint64
 	consecutiveNoProgressRounds := 0
 	synthesisOnly := false
@@ -1048,7 +1049,19 @@ Do not answer with only a markdown plan or shell snippets.`,
 				a.persistDaily()
 			}
 			if result.Category == tools.FailureSuccess {
-				roundHadProgress = true
+				newEvidence := true
+				if investigation {
+					if evidenceKey, ok := investigationEvidenceFingerprint(result.ModelOutput()); ok {
+						if _, seen := investigationEvidence[evidenceKey]; seen {
+							newEvidence = false
+						} else {
+							investigationEvidence[evidenceKey] = struct{}{}
+						}
+					} else {
+						newEvidence = false
+					}
+				}
+				roundHadProgress = roundHadProgress || newEvidence
 				if investigation && !duplicateInvestigation {
 					// Failed reads remain retryable. Only successful evidence
 					// establishes a duplicate investigation fingerprint.

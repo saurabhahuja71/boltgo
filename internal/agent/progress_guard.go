@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"strings"
 )
@@ -52,4 +53,13 @@ func synthesisPlanningText(text string) bool {
 
 func noProgressSynthesisFallback() string {
 	return "Investigation stopped after repeated searches produced no new evidence. No workspace mutation was performed, and no worker-pool implementation was located in the searched repository evidence. No fix was applied."
+}
+
+func investigationEvidenceFingerprint(output string) (string, bool) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return "", false
+	}
+	hash := sha256.Sum256([]byte(output))
+	return string(hash[:]), true
 }
