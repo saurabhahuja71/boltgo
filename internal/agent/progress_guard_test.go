@@ -49,3 +49,15 @@ func TestWorkspaceGenerationAllowsInvestigationAfterMutation(t *testing.T) {
 		t.Fatal("changed workspace generation still looked unchanged")
 	}
 }
+
+func TestActionRequestsGetOneRecoveryRoundAfterRepeatedInvestigation(t *testing.T) {
+	if !shouldAllowActionRecovery("implement the worker pool fix", false) {
+		t.Fatal("implementation request did not receive recovery permission")
+	}
+	if shouldAllowActionRecovery("implement the worker pool fix", true) {
+		t.Fatal("action recovery was allowed more than once")
+	}
+	if shouldAllowActionRecovery("explain how the worker pool works", false) {
+		t.Fatal("explanation request received an implementation recovery round")
+	}
+}

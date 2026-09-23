@@ -428,6 +428,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	synthesisOnly := false
 	synthesisRetry := false
 	synthesisFallbackArmed := false
+	actionRecoveryUsed := false
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -1108,9 +1109,19 @@ Do not answer with only a markdown plan or shell snippets.`,
 			} else {
 				consecutiveNoProgressRounds++
 				if consecutiveNoProgressRounds >= 2 {
-					synthesisOnly = true
-					synthesisFallbackArmed = true
-					emit(Event{Kind: EventStatus, Text: "repeated investigation made no progress; evidence synthesis required"})
+					if shouldAllowActionRecovery(user, actionRecoveryUsed) {
+						// An implementation request that has not mutated yet still
+						// needs one bounded opportunity to act. Removing tools here
+						// made the model stop after reconnaissance forever.
+						actionRecoveryUsed = true
+						consecutiveNoProgressRounds = 0
+						a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Use the evidence already collected and implement the requested change now. Do not repeat read-only searches; inspect the relevant source and use the available tools."})
+						emit(Event{Kind: EventStatus, Text: "repeated investigation detected; allowing one bounded implementation recovery round"})
+					} else {
+						synthesisOnly = true
+						synthesisFallbackArmed = true
+						emit(Event{Kind: EventStatus, Text: "repeated investigation made no progress; evidence synthesis required"})
+					}
 				}
 			}
 		} else if roundHadProgress {

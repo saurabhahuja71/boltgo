@@ -582,7 +582,7 @@ func TestAgentSafetyRejectionAddsRecoveryInstruction(t *testing.T) {
 	}
 }
 
-func TestAgentSuppressesRepeatedInvestigationAndSynthesizes(t *testing.T) {
+func TestAgentSuppressesRepeatedInvestigationAndAllowsActionRecovery(t *testing.T) {
 	reader := &scriptedTool{name: "read_file"}
 	reg := tools.NewRegistry()
 	reg.Register(reader)
@@ -609,13 +609,15 @@ func TestAgentSuppressesRepeatedInvestigationAndSynthesizes(t *testing.T) {
 		t.Fatalf("no bounded synthesis opportunity was reached: requests=%d", len(*requests))
 	}
 	foundObservation := false
-	foundSynthesis := false
 	for _, event := range events {
 		foundObservation = foundObservation || strings.Contains(event.Text, "no progress")
-		foundSynthesis = foundSynthesis || strings.Contains(event.Text, "evidence-only synthesis")
 	}
-	if !foundObservation || !foundSynthesis {
-		t.Fatalf("missing no-progress recovery events: observation=%v synthesis=%v events=%+v", foundObservation, foundSynthesis, events)
+	foundRecovery := false
+	for _, event := range events {
+		foundRecovery = foundRecovery || strings.Contains(event.Text, "bounded implementation recovery round")
+	}
+	if !foundObservation || !foundRecovery {
+		t.Fatalf("missing no-progress recovery events: observation=%v recovery=%v events=%+v", foundObservation, foundRecovery, events)
 	}
 }
 

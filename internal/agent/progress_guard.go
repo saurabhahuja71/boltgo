@@ -51,6 +51,10 @@ func synthesisPlanningText(text string) bool {
 	return false
 }
 
+func shouldAllowActionRecovery(user string, used bool) bool {
+	return !used && isActionRequest(user)
+}
+
 func noProgressSynthesisFallback() string {
 	return "Investigation stopped after repeated searches produced no new evidence. No workspace mutation was performed, and no worker-pool implementation was located in the searched repository evidence. No fix was applied."
 }
