@@ -31,6 +31,23 @@ func TestGoTestUsesPerWorkspaceCacheWhenInheritedCacheIsInvalid(t *testing.T) {
 	}
 }
 
+func TestRunShellGoTestUsesPerWorkspaceCacheWhenInheritedCacheIsInvalid(t *testing.T) {
+	workspace := writeGoFixture(t, false)
+	badCache := filepath.Join(t.TempDir(), "cache-file")
+	if err := os.WriteFile(badCache, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOCACHE", badCache)
+
+	out, err := (runShell{Workspace: workspace}).Run(context.Background(), `{"command":"go test ./..."}`)
+	if err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("run_shell go test with invalid inherited cache: err=%v out=%q", err, out)
+	}
+	if !writableCacheDir(filepath.Join(workspace, ".bolt", "go-cache")) {
+		t.Fatalf("isolated cache was not created in workspace: %s", workspace)
+	}
+}
+
 func TestWritableUserGoCacheIsPreserved(t *testing.T) {
 	workspace := writeGoFixture(t, false)
 	cache := t.TempDir()
@@ -55,6 +72,16 @@ func TestWritableUserGoCacheIsPreserved(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace, ".bolt")); !os.IsNotExist(err) {
 		t.Fatalf("isolated cache created during valid user-cache run: %v", err)
+	}
+}
+
+func TestRaceGoTestEnablesCGO(t *testing.T) {
+	env, err := testCommandEnvironmentWithEnv(context.Background(), t.TempDir(), "go test -race ./...", []string{"PATH=" + os.Getenv("PATH"), "CGO_ENABLED=0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lookupEnv(env, "CGO_ENABLED"); got != "1" {
+		t.Fatalf("race test CGO_ENABLED = %q, want 1", got)
 	}
 }
 

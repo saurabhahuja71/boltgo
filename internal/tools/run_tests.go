@@ -98,6 +98,9 @@ func testCommandEnvironmentWithEnv(ctx context.Context, workspace, command strin
 		cachePath = goDefaultCachePath(ctx, env)
 	}
 	if cachePath != "" && writableCacheDir(cachePath) {
+		if strings.Contains(command, "-race") {
+			return setEnv(env, "CGO_ENABLED", "1"), nil
+		}
 		return env, nil
 	}
 
@@ -122,7 +125,11 @@ func testCommandEnvironmentWithEnv(ctx context.Context, workspace, command strin
 	if !writableCacheDir(isolated) {
 		return nil, environmentFailure{err: fmt.Errorf("isolated Go cache is not writable: %s", isolated)}
 	}
-	return setEnv(env, "GOCACHE", isolated), nil
+	env = setEnv(env, "GOCACHE", isolated)
+	if strings.Contains(command, "-race") {
+		env = setEnv(env, "CGO_ENABLED", "1")
+	}
+	return env, nil
 }
 
 func lookupEnv(env []string, key string) string {

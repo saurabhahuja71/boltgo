@@ -559,13 +559,24 @@ func (sh runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	if reason := shellWorkspaceBlocked(cmdStr, sh.Workspace); reason != "" {
 		return "error: " + reason, nil
 	}
-	// Short timeout + kill whole process group (xargs/curl children included).
-	const shellTimeout = 25 * time.Second
+	// Keep ordinary shell commands short, but allow Go test commands the same
+	// bounded five-minute window as run_tests for first-build/toolchain work.
+	shellTimeout := 25 * time.Second
+	if goTestCommandPattern.MatchString(cmdStr) {
+		shellTimeout = 5 * time.Minute
+	}
 	ctx, cancel := context.WithTimeout(ctx, shellTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
 	cmd.Dir = sh.Workspace
 	cmd.Env = os.Environ()
+	if goTestCommandPattern.MatchString(cmdStr) {
+		env, err := testCommandEnvironment(ctx, sh.Workspace, cmdStr)
+		if err != nil {
+			return "error: " + err.Error(), nil
+		}
+		cmd.Env = env
+	}
 	// Unix: set process group so timeout kills children (xargs/curl). Windows: plain kill.
 	cmd.SysProcAttr = shellSysProcAttr()
 	go func() {
