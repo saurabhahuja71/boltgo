@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +13,120 @@ import (
 	"github.com/saurabhahuja71/agenterm/internal/llm"
 	"github.com/saurabhahuja71/agenterm/internal/tools"
 )
+
+func TestReadOnlyBatchPoolCloseDrainsAcceptedJobs(t *testing.T) {
+	const jobs = 32
+	var handled atomic.Int32
+	p := newReadOnlyBatchPool(3, jobs, func(readOnlyBatchCall) { handled.Add(1) })
+	for i := 0; i < jobs; i++ {
+		if err := p.Submit(context.Background(), readOnlyBatchCall{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.Close()
+	if got := handled.Load(); got != jobs {
+		t.Fatalf("handled jobs = %d, want %d", got, jobs)
+	}
+}
+
+func TestReadOnlyBatchPoolConcurrentSubmitAndClose(t *testing.T) {
+	p := newReadOnlyBatchPool(3, 4, func(readOnlyBatchCall) {})
+	var submitters sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		submitters.Add(1)
+		go func() {
+			defer submitters.Done()
+			_ = p.Submit(context.Background(), readOnlyBatchCall{})
+		}()
+	}
+	done := make(chan struct{})
+	go func() { p.Close(); close(done) }()
+	submitters.Wait()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent Close did not finish")
+	}
+}
+
+func TestReadOnlyBatchPoolCloseUnblocksFullQueueSubmit(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	p := newReadOnlyBatchPool(1, 1, func(readOnlyBatchCall) {
+		startOnce.Do(func() { close(started) })
+		<-release
+	})
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan error, 1)
+	go func() { blocked <- p.Submit(context.Background(), readOnlyBatchCall{}) }()
+	closed := make(chan struct{})
+	go func() { p.Close(); close(closed) }()
+	select {
+	case err := <-blocked:
+		if !errors.Is(err, errReadOnlyBatchClosed) {
+			t.Fatalf("blocked submit error = %v, want closed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not unblock a full-queue submit")
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not join workers after release")
+	}
+}
+
+func TestReadOnlyBatchPoolBlockedSubmitHonorsContextCancellation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	p := newReadOnlyBatchPool(1, 1, func(readOnlyBatchCall) {
+		startOnce.Do(func() { close(started) })
+		<-release
+	})
+	defer func() { close(release); p.Close() }()
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	blocked := make(chan error, 1)
+	go func() { blocked <- p.Submit(ctx, readOnlyBatchCall{}) }()
+	cancel()
+	select {
+	case err := <-blocked:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked submit error = %v, want cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked submit did not honor cancellation")
+	}
+}
+
+func TestReadOnlyBatchPoolSubmitAfterCloseAndConcurrentIdempotentClose(t *testing.T) {
+	p := newReadOnlyBatchPool(2, 2, func(readOnlyBatchCall) {})
+	p.Close()
+	if err := p.Submit(context.Background(), readOnlyBatchCall{}); !errors.Is(err, errReadOnlyBatchClosed) {
+		t.Fatalf("submit after close error = %v, want closed", err)
+	}
+	var closers sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		closers.Add(1)
+		go func() { defer closers.Done(); p.Close() }()
+	}
+	closers.Wait()
+}
 
 func TestExecuteReadOnlyBatchIsConcurrentAndBounded(t *testing.T) {
 	const calls = 8
