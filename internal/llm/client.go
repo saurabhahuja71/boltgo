@@ -17,11 +17,18 @@ import (
 // Client talks to any OpenAI-compatible Chat Completions API
 // (Ollama, xAI, OpenAI, vLLM, LocalAI, …).
 type Client struct {
-	BaseURL                  string
-	APIKey                   string
-	HTTPClient               *http.Client
+	BaseURL    string
+	APIKey     string
+	HTTPClient *http.Client
+	// StreamIdleTimeout bounds the time between bytes received from a
+	// streaming completion. It is not a generation deadline: a provider may
+	// stream for as long as it continues making progress. Zero uses the
+	// production default.
+	StreamIdleTimeout        time.Duration
 	modelDiscoveryCapability atomic.Uint32
 }
+
+const defaultStreamIdleTimeout = 2 * time.Minute
 
 func New(baseURL, apiKey string) *Client {
 	return NewWithModelDiscoveryCapability(baseURL, apiKey, ModelDiscoveryCapabilityUnknown)
@@ -72,6 +79,13 @@ func NewWithModelDiscoveryCapability(baseURL, apiKey string, capability ModelDis
 // capability remains potentially supported and is resolved by ListModels.
 func (c *Client) SupportsModelDiscovery() bool {
 	return ModelDiscoveryCapability(c.modelDiscoveryCapability.Load()) != ModelDiscoveryCapabilityUnsupported
+}
+
+func (c *Client) streamIdleTimeout() time.Duration {
+	if c.StreamIdleTimeout > 0 {
+		return c.StreamIdleTimeout
+	}
+	return defaultStreamIdleTimeout
 }
 
 type Role string
@@ -333,7 +347,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 	if err != nil {
 		return Message{}, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(body))
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return Message{}, err
 	}
@@ -379,6 +395,50 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 	}
 
 	msg := Message{Role: RoleAssistant}
+	// A response can have valid headers and then stop producing bytes forever.
+	// Keep the overall request unbounded for long generations, but cancel a
+	// stream that has made no progress for the configured idle interval.
+	idleTimeout := c.streamIdleTimeout()
+	idleProgress := make(chan struct{}, 1)
+	stopWatchdog := make(chan struct{})
+	watchdogDone := make(chan struct{})
+	var idleExpired atomic.Bool
+	go func() {
+		timer := time.NewTimer(idleTimeout)
+		defer timer.Stop()
+		defer close(watchdogDone)
+		for {
+			select {
+			case <-idleProgress:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idleTimeout)
+			case <-timer.C:
+				idleExpired.Store(true)
+				cancelStream()
+				return
+			case <-streamCtx.Done():
+				return
+			case <-stopWatchdog:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stopWatchdog)
+		cancelStream()
+		<-watchdogDone
+	}()
+	markStreamProgress := func() {
+		select {
+		case idleProgress <- struct{}{}:
+		default:
+		}
+	}
 	// Accumulate each call independently. Providers commonly omit IDs on
 	// continuation chunks, so the index is retained in ToolCall and used as a
 	// second identity. The order slice is only a fallback for providers that
@@ -394,6 +454,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 	sc.Buffer(buf, 1024*1024)
 
 	for sc.Scan() {
+		markStreamProgress()
 		if err := ctx.Err(); err != nil {
 			return msg, err
 		}
@@ -467,7 +528,13 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 			}
 		}
 	}
+	if idleExpired.Load() {
+		return msg, fmt.Errorf("chat stream idle timeout after %s", idleTimeout)
+	}
 	if err := sc.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
+			return msg, err
+		}
 		return Message{}, err
 	}
 

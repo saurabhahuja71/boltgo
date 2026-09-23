@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestChatRequestMarshalsChatTemplateKwargs(t *testing.T) {
@@ -249,6 +250,79 @@ func TestChatStreamAccumulatesSplitToolArgumentsBeforeReturning(t *testing.T) {
 	if len(message.ToolCalls) != 1 || message.ToolCalls[0].Function.Name != "read_file" ||
 		message.ToolCalls[0].Function.Arguments != `{"path":"main.py"}` {
 		t.Fatalf("assembled tool call: %+v", message.ToolCalls)
+	}
+}
+
+func TestChatStreamCancelsSilentBodyAfterIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client(), StreamIdleTimeout: 25 * time.Millisecond}
+	started := time.Now()
+	_, err := client.ChatStream(context.Background(), ChatRequest{Model: "silent"}, testStreamHandler{})
+	if err == nil || !strings.Contains(err.Error(), "idle timeout") {
+		t.Fatalf("ChatStream error = %v, want idle timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("silent stream took %s to terminate", elapsed)
+	}
+}
+
+func TestChatStreamAllowsLongGenerationWithContinuousProgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("test server does not support flushing")
+		}
+		for i := 0; i < 3; i++ {
+			_, _ = io.WriteString(w, ": progress\n\n")
+			f.Flush()
+			time.Sleep(50 * time.Millisecond)
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		f.Flush()
+	}))
+	defer server.Close()
+
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client(), StreamIdleTimeout: 300 * time.Millisecond}
+	if _, err := client.ChatStream(context.Background(), ChatRequest{Model: "progressing"}, testStreamHandler{}); err != nil {
+		t.Fatalf("continuous stream failed: %v", err)
+	}
+}
+
+func TestChatStreamCallerCancellationRemainsContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &Client{BaseURL: server.URL, HTTPClient: server.Client(), StreamIdleTimeout: time.Second}
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.ChatStream(ctx, ChatRequest{Model: "cancelled"}, testStreamHandler{})
+		result <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ChatStream error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ChatStream did not stop after caller cancellation")
 	}
 }
 
