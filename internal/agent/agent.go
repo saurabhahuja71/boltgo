@@ -257,6 +257,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	}
 
 	toolsUsed := 0
+	unsupportedMarkupRetries := 0
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -385,8 +386,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if len(msg.ToolCalls) == 0 {
 			if unsupportedToolMarkup && len(roundTools) > 0 {
 				emit(Event{Kind: EventStatus, Text: "unsupported tool-call format; expected structured tool calls"})
-				if toolsUsed == 0 && round == 0 {
-					a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "[agenterm] Your previous tool request used unsupported markup. Use the provided API tools and emit a structured tool call; do not print <function=...> or </tool_call>."})
+				if unsupportedMarkupRetries < maxRetries {
+					unsupportedMarkupRetries++
+					a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "[agenterm] Your previous response contained malformed tool markup and was not executed. Use the advertised API tools now. Emit a structured tool call; do not print <function=...>, <tool_call>, or </tool_call>. Do not answer the user's repository question until a real tool result is available."})
 					continue
 				}
 				a.RunState.Phase = PhaseBlocked
@@ -642,7 +644,7 @@ func (s *streamBridge) flushSafe() {
 }
 
 func nextMarkupStart(s string) int {
-	starts := []string{"<tool_call>", "<function="}
+	starts := []string{"<tool_call>", "<function=", "</tool_call>", "</function>"}
 	best := -1
 	for _, marker := range starts {
 		if i := strings.Index(strings.ToLower(s), marker); i >= 0 && (best < 0 || i < best) {
