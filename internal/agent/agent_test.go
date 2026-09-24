@@ -17,7 +17,14 @@ import (
 )
 
 func TestIsActionRequest(t *testing.T) {
-	yes := []string{"can you do it", "do it", "apply the changes", "please implement it", "fix it so Average(-4, -6) returns -5", "create a branch and commit"}
+	yes := []string{
+		"can you do it", "do it", "apply the changes", "please implement it",
+		"fix it so Average(-4, -6) returns -5", "create a branch and commit",
+		"Create a file named hello.txt containing exactly the text hello world",
+		"pls add mankind to covered ce strategy and do git push",
+		"add MANKIND to underlyings.txt",
+		"write a file named notes.md",
+	}
 	no := []string{"hi", "can you read the readme yes or no", "what is SEO", "explain SEO friendly docs"}
 	for _, s := range yes {
 		if !isActionRequest(s) {

@@ -201,6 +201,12 @@ func (s *AgentRunState) canVerify() bool {
 	if len(s.Failures) == 0 {
 		return true
 	}
+	// A successful mutation on a goal that never asked for verification should
+	// not stay blocked forever because of an unrelated unsupported/empty test
+	// invocation. Recorded verification criteria above still fail closed.
+	if !s.needsToolVerificationEvidence() && s.hasSuccessfulMutation() && len(s.VerificationCriteria) == 0 {
+		return true
+	}
 	// Non-verification failures retain the existing recovery behavior. A
 	// verification failure is handled above and cannot be cleared by a read.
 	return len(s.Observations) > 0 && s.Observations[len(s.Observations)-1].Success
@@ -217,6 +223,25 @@ func (s *AgentRunState) requiresVerification() bool {
 		}
 	}
 	return false
+}
+
+// needsToolVerificationEvidence is true when completion must wait for successful
+// test/build tool evidence. Named gates always require it. A generic "verify it"
+// criterion requires it after a mutation, while no-op already-correct paths may
+// still confirm in text. Goals with no verification criterion must not loop on
+// missing evidence after a successful create/edit.
+func (s *AgentRunState) needsToolVerificationEvidence() bool {
+	if s.requiresVerification() {
+		return true
+	}
+	hasGenericVerify := false
+	for _, criterion := range s.AcceptanceCriteriaState {
+		if criterion.Key == "verification" {
+			hasGenericVerify = true
+			break
+		}
+	}
+	return hasGenericVerify && s.hasMutation()
 }
 
 // canComplete is the final completion gate. Verification is necessary, but
@@ -304,6 +329,46 @@ func (s *AgentRunState) hasMutation() bool {
 	return false
 }
 
+func (s *AgentRunState) hasSuccessfulMutation() bool {
+	for _, call := range s.ToolCalls {
+		switch call.Name {
+		case "write_file", "str_replace", "git":
+			if call.Outcome == "" || call.Outcome == tools.FailureSuccess {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *AgentRunState) hasSuccessfulGitMutation() bool {
+	for _, call := range s.ToolCalls {
+		if call.Name == "git" && (call.Outcome == "" || call.Outcome == tools.FailureSuccess) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleMutationReadyToConfirm reports that a create/edit-style goal has landed
+// its on-disk change and does not still owe git commit/push work. Callers use
+// this to close tools and demand a short confirmation instead of cat/ls loops.
+func (s *AgentRunState) simpleMutationReadyToConfirm(user string) bool {
+	if !s.hasSuccessfulMutation() || s.needsToolVerificationEvidence() {
+		return false
+	}
+	low := strings.ToLower(user)
+	needsGit := strings.Contains(low, "git push") ||
+		strings.Contains(low, "git commit") ||
+		strings.Contains(low, "commit ") ||
+		strings.Contains(low, " and push") ||
+		strings.Contains(low, "do git")
+	if needsGit && !s.hasSuccessfulGitMutation() {
+		return false
+	}
+	return true
+}
+
 func (s *AgentRunState) hasVerificationEvidence() bool {
 	for _, call := range s.ToolCalls {
 		if call.Name == "run_tests" {
@@ -336,6 +401,12 @@ func (s *AgentRunState) recordVerification(tool, args string, result tools.Execu
 	if !ok {
 		return
 	}
+	// Empty/unconfigured test invocations are not verification evidence. Do not
+	// poison simple create/edit goals that never asked for tests.
+	if result.Category == tools.FailureUnsupported ||
+		strings.Contains(strings.ToLower(result.Output), "no test command configured") {
+		return
+	}
 	idx := -1
 	for i := range s.VerificationCriteria {
 		if s.VerificationCriteria[i].Key == key {
@@ -365,10 +436,10 @@ func (s *AgentRunState) refreshAcceptanceCriteria() {
 		criterion := &s.AcceptanceCriteriaState[i]
 		switch criterion.Key {
 		case "implementation":
-			// A successful non-verification observation establishes that the
-			// implementation was inspected/handled. Mutation is tracked when it
-			// occurs, but is not required for already-correct/no-op tasks.
-			criterion.Satisfied = len(s.Observations) > 0 && s.lastObservationSuccess()
+			// A successful mutation or non-verification observation establishes
+			// that the implementation was handled. A later unsupported/empty
+			// test invocation must not erase earlier successful work.
+			criterion.Satisfied = s.hasSuccessfulMutation() || (len(s.Observations) > 0 && s.lastObservationSuccess())
 		case "tests_added":
 			criterion.Satisfied = s.hasTestMutation()
 		case "verification":
@@ -414,7 +485,7 @@ func isTestPath(path string) bool {
 func acceptanceCriteriaForGoal(goal string) []AcceptanceCriterion {
 	low := strings.ToLower(goal)
 	criteria := make([]AcceptanceCriterion, 0, 3)
-	if isActionRequest(goal) || goalRequestsImplementation(low) {
+	if goalRequestsImplementation(low) || (isActionRequest(goal) && !testOnlyActionRequest(low)) {
 		criteria = append(criteria, AcceptanceCriterion{Key: "implementation", Description: "implementation handled"})
 	}
 	if (strings.Contains(low, "add") && strings.Contains(low, "test")) || strings.Contains(low, "regression test") || (strings.Contains(low, "update") && strings.Contains(low, "test")) || strings.Contains(low, "tests are") {
@@ -472,6 +543,18 @@ func goalRequestsImplementation(low string) bool {
 		}
 	}
 	return false
+}
+
+// testOnlyActionRequest detects prompts that only ask to add/update tests.
+// Those remain action requests for budgeting, but must not invent an
+// unrelated implementation acceptance criterion.
+func testOnlyActionRequest(low string) bool {
+	if goalRequestsImplementation(low) {
+		return false
+	}
+	hasTest := strings.Contains(low, "test")
+	hasAddOrUpdate := strings.Contains(low, "add ") || strings.Contains(low, "update ")
+	return hasTest && hasAddOrUpdate
 }
 
 func verificationCriterionKey(tool, args string) (string, bool) {

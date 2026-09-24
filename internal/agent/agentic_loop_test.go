@@ -890,3 +890,92 @@ func TestAgentPermissionCannotBeBypassedByLoop(t *testing.T) {
 		t.Fatalf("permission bypass: denied=%v calls=%d state=%+v", denied, calls, ag.RunState)
 	}
 }
+
+
+func TestAgentSimpleCreateCompletesWithoutVerificationEvidence(t *testing.T) {
+	writer := &scriptedTool{name: "write_file"}
+	shell := &scriptedTool{name: "run_shell"}
+	reg := tools.NewRegistry()
+	reg.Register(writer)
+	reg.Register(shell)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		switch n {
+		case 1:
+			return toolSSE("write_file", `{"path":"hello.txt","content":"hello world"}`)
+		case 2:
+			// One post-mutation inspection is allowed.
+			return toolSSE("run_shell", `{"command":"cat hello.txt"}`)
+		case 3:
+			// Further shell verification must be refused.
+			return toolSSE("run_shell", `{"command":"cat hello.txt"}`)
+		default:
+			return textSSE("created hello.txt with hello world")
+		}
+	}, reg)
+	defer closeServer()
+
+	var errText string
+	var sawConfirmOnly bool
+	if err := ag.RunUserMessage(context.Background(), "Create a file named hello.txt containing exactly the text hello world", func(event Event) {
+		if event.Kind == EventError {
+			errText += event.Text
+		}
+		if strings.Contains(event.Text, "mutation complete; final confirmation only") {
+			sawConfirmOnly = true
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(errText, "max tool rounds") {
+		t.Fatalf("simple create hit max tool rounds: %q requests=%d state=%+v", errText, len(*requests), ag.RunState)
+	}
+	if len(writer.calls) != 1 {
+		t.Fatalf("write_file calls=%d, want 1", len(writer.calls))
+	}
+	if len(shell.calls) != 1 {
+		t.Fatalf("post-mutation shell calls=%d, want exactly 1 before confirmation-only", len(shell.calls))
+	}
+	if !sawConfirmOnly {
+		t.Fatal("missing mutation-complete confirmation-only status")
+	}
+	if ag.RunState.Phase != PhaseComplete || ag.RunState.Verification != VerificationPassed {
+		t.Fatalf("simple create did not complete cleanly: requests=%d state=%+v", len(*requests), ag.RunState)
+	}
+	if len(*requests) > 6 {
+		t.Fatalf("simple create used too many model rounds: %d", len(*requests))
+	}
+}
+
+func TestAgentGenericActionRecoveryDoesNotTargetReadBatch(t *testing.T) {
+	reader := &scriptedTool{name: "read_file"}
+	writer := &scriptedTool{name: "write_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	reg.Register(writer)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		switch n {
+		case 1, 2, 3:
+			return toolSSE("read_file", `{"path":"underlyings.txt"}`)
+		case 4:
+			return toolSSE("write_file", `{"path":"underlyings.txt","content":"BEL\nMANKIND\n"}`)
+		default:
+			return textSSE("added MANKIND to underlyings.txt")
+		}
+	}, reg)
+	defer closeServer()
+
+	prompt := "pls add mankind to covered ce strategy and do git push"
+	if err := ag.RunUserMessage(context.Background(), prompt, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	for i, req := range *requests {
+		for _, message := range req.Messages {
+			if strings.Contains(message.Content, "ACTION RECOVERY") && strings.Contains(message.Content, "internal/agent/read_batch.go") {
+				t.Fatalf("generic action recovery pointed at read_batch.go on request %d: %q", i, message.Content)
+			}
+		}
+	}
+	if len(writer.calls) != 1 {
+		t.Fatalf("expected write after recovery, writes=%d requests=%d", len(writer.calls), len(*requests))
+	}
+}

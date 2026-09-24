@@ -488,6 +488,8 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	processSourceMutated := false
 	processVerified := false
 	processFinalNudges := 0
+	simpleConfirmNudges := 0
+	postMutationReadOnlyRounds := 0
 	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
@@ -545,10 +547,18 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "Repeated investigation has produced no new evidence. Synthesize the evidence already collected now. Do not call tools, do not repeat searches, and do not claim an implementation exists unless tool results prove it."})
 		}
 		if actionRecoveryNudged && !(a.RunState.hasMutation() || poolSourceMutated) && !processChannelTask {
-			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file on internal/agent/read_batch.go (surgical patch only), then run the requested tests. Do not make another read-only search."})
+			recovery := "ACTION RECOVERY: stop repeating read-only searches. Use evidence already collected, apply the requested change with str_replace or write_file on the relevant path, then run any requested verification. Do not repeat grep, repo_map, list_dir, find_files, or the same read_file."
+			if workerPoolTask {
+				recovery = "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file on internal/agent/read_batch.go (surgical patch only), then run the requested tests. Do not make another read-only search."
+			}
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: recovery})
 		}
 		if processChannelTask && processVerified {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "VERIFICATION COMPLETE for Process. Do not call tools again. Write the FINAL REPORT now with: root cause, files changed, design, cancellation/accepted-job contract, tests added, exact commands executed, exact results, remaining issues."})
+		}
+		forceSimpleConfirm := a.RunState.simpleMutationReadyToConfirm(user) && (verificationRequested || postMutationReadOnlyRounds >= 1)
+		if forceSimpleConfirm {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "The requested file/git change already succeeded. Do not call tools again. Confirm what changed in one short sentence."})
 		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
@@ -638,6 +648,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if processChannelTask && processVerified && len(roundTools) > 0 {
 			roundTools = nil
 			emit(Event{Kind: EventStatus, Text: "process mode: verification done; final report only"})
+		} else if forceSimpleConfirm && len(roundTools) > 0 {
+			roundTools = nil
+			emit(Event{Kind: EventStatus, Text: "mutation complete; final confirmation only"})
 		} else if processChannelTask && knownProcessSourceRead && !processSourceMutated && len(roundTools) > 0 {
 			filtered := make([]llm.Tool, 0, len(roundTools))
 			for _, tool := range roundTools {
@@ -845,7 +858,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 				continue
 			}
 			if toolsUsed > 0 {
-				if verificationRequested && a.RunState.hasMutation() && !a.RunState.hasSuccessfulVerificationEvidence() {
+				// Only require formal verification evidence when the goal asked
+				// for tests/verify. Simple create/edit/push tasks must complete
+				// after a successful mutation instead of looping until max rounds.
+				if verificationRequested && a.RunState.hasMutation() && a.RunState.needsToolVerificationEvidence() && !a.RunState.hasSuccessfulVerificationEvidence() {
 					a.RunState.Verification = VerificationBlocked
 					a.RunState.Phase = PhaseReplan
 					a.RunState.Retries++
@@ -914,6 +930,19 @@ Do not answer with only a markdown plan or shell snippets.`,
 		// A provider may emit a stale/ignored tool call even when the current
 		// request advertised no tools because a bound was reached.
 		if len(roundTools) == 0 {
+			if forceSimpleConfirm && len(msg.ToolCalls) > 0 {
+				simpleConfirmNudges++
+				if simpleConfirmNudges >= 2 {
+					a.RunState.Verification = VerificationPassed
+					a.RunState.Phase = PhaseComplete
+					emit(Event{Kind: EventToken, Text: "Requested change already succeeded on disk; further tool calls were refused to finish the turn."})
+					emit(Event{Kind: EventStatus, Text: stateStatus(PhaseComplete)})
+					emit(Event{Kind: EventDone})
+					return nil
+				}
+				a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "Tools are closed because the requested change already succeeded. Do not call tools. Confirm the completed change in one short sentence."})
+				continue
+			}
 			if processChannelTask && processVerified && len(msg.ToolCalls) > 0 {
 				processFinalNudges++
 				if processFinalNudges >= 2 {
@@ -1256,12 +1285,15 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 		}
 		if roundHadInvestigation {
+			if a.RunState.simpleMutationReadyToConfirm(user) {
+				postMutationReadOnlyRounds++
+			}
 			if roundHadProgress {
 				consecutiveNoProgressRounds = 0
 			} else {
 				consecutiveNoProgressRounds++
 				if consecutiveNoProgressRounds >= 2 {
-					if keepActionToolsAfterNoProgress(user) {
+					if keepActionToolsAfterNoProgress(user) && !a.RunState.simpleMutationReadyToConfirm(user) {
 						// An implementation request that has not mutated yet must
 						// retain tools after a rejected or unproductive read. The
 						// existing round/tool budgets still bound this recovery.
@@ -1278,6 +1310,8 @@ Do not answer with only a markdown plan or shell snippets.`,
 							a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: recovery})
 						}
 						emit(Event{Kind: EventStatus, Text: "repeated investigation detected; keeping tools available within the bounded action budget"})
+					} else if a.RunState.simpleMutationReadyToConfirm(user) {
+						emit(Event{Kind: EventStatus, Text: "mutation complete; stopping repeated post-mutation investigation"})
 					} else {
 						synthesisOnly = true
 						synthesisFallbackArmed = true
@@ -1503,11 +1537,12 @@ func isActionRequest(user string) bool {
 	}
 	needles := []string{
 		"do it", "apply the", "apply these", "apply this", "make the change",
-		"implement ", "implement it", "fix ", "write the", "update the readme", "update readme",
-		"edit the", "fix the", "create a branch", "create branch", "commit ",
-		"git commit", "git push", "push the", "refactor ", "add a section",
-		"improve the readme", "improve readme", "please apply", "go ahead and",
-		"make these changes", "make those changes",
+		"implement ", "implement it", "fix ", "write the", "write a file", "write file",
+		"update the readme", "update readme", "update the", "edit the", "edit ",
+		"fix the", "create a branch", "create branch", "create a file", "create file",
+		"create a ", "add a ", "add ", "commit ", "git commit", "git push", "push the",
+		"refactor ", "add a section", "improve the readme", "improve readme",
+		"please apply", "go ahead and", "make these changes", "make those changes",
 	}
 	for _, n := range needles {
 		if strings.Contains(s, n) {

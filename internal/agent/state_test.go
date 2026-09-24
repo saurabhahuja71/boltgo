@@ -400,3 +400,49 @@ func TestCommaIdentificationRequirementsAreIndependent(t *testing.T) {
 		t.Fatalf("identification requirements = %+v", reqs)
 	}
 }
+
+
+func TestOptionalUnsupportedRunTestsDoesNotPoisonSimpleCreate(t *testing.T) {
+	var state AgentRunState
+	state.reset("Create a file named hello.txt containing exactly the text hello world")
+	state.addObservation("write_file", `{"path":"hello.txt","content":"hello world"}`, tools.ExecutionResult{Output: "wrote 11 bytes", Category: tools.FailureSuccess})
+	state.addObservation("run_tests", `{}`, tools.ExecutionResult{Output: "no test command configured (set test_command in config or pass command)", Category: tools.FailureInvalidInput})
+	state.Verification = VerificationPassed
+	if state.needsToolVerificationEvidence() {
+		t.Fatalf("simple create unexpectedly needs tool verification evidence: %+v", state.AcceptanceCriteriaState)
+	}
+	if len(state.VerificationCriteria) != 0 {
+		t.Fatalf("empty run_tests recorded verification criteria: %+v", state.VerificationCriteria)
+	}
+	if !state.canVerify() {
+		t.Fatalf("empty run_tests blocked simple create verify: %+v", state)
+	}
+	if !state.canComplete() {
+		t.Fatalf("simple create could not complete after empty run_tests: %+v", state)
+	}
+}
+
+func TestGenericVerifyNeedsEvidenceOnlyAfterMutation(t *testing.T) {
+	var state AgentRunState
+	state.reset("change x.go and verify it")
+	if state.needsToolVerificationEvidence() {
+		t.Fatal("generic verify required tool evidence before mutation")
+	}
+	state.addObservation("str_replace", `{"path":"x.go","old_string":"a","new_string":"b"}`, tools.ExecutionResult{Output: "updated", Category: tools.FailureSuccess})
+	if !state.needsToolVerificationEvidence() {
+		t.Fatal("generic verify did not require tool evidence after mutation")
+	}
+}
+
+func TestSimpleMutationReadyToConfirmWaitsForGitWhenRequested(t *testing.T) {
+	var state AgentRunState
+	state.reset("pls add mankind to covered ce strategy and do git push")
+	state.addObservation("write_file", `{"path":"underlyings.txt","content":"BEL\nMANKIND\n"}`, tools.ExecutionResult{Output: "wrote", Category: tools.FailureSuccess})
+	if state.simpleMutationReadyToConfirm(state.OriginalGoal) {
+		t.Fatal("git push goal became confirmation-only before git succeeded")
+	}
+	state.addObservation("git", `{"action":"push"}`, tools.ExecutionResult{Output: "pushed", Category: tools.FailureSuccess})
+	if !state.simpleMutationReadyToConfirm(state.OriginalGoal) {
+		t.Fatal("git push goal did not become confirmation-only after git succeeded")
+	}
+}
