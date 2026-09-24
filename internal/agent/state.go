@@ -407,6 +407,10 @@ func (s *AgentRunState) addItemAlreadySatisfied(user string) bool {
 // simpleMutationReadyToConfirm reports that a create/edit-style goal has landed
 // its required on-disk/git work. Callers use this to close tools and demand a
 // short confirmation instead of cat/ls loops.
+//
+// Merely seeing an add-token already listed in underlyings.txt is not enough:
+// the user may still need workflow/decision_log diagnosis (for example CE not
+// selling) or an explicit git push.
 func (s *AgentRunState) simpleMutationReadyToConfirm(user string) bool {
 	if s.needsToolVerificationEvidence() {
 		return false
@@ -415,14 +419,9 @@ func (s *AgentRunState) simpleMutationReadyToConfirm(user string) bool {
 	wantsPush := strings.Contains(low, "push")
 	if goalRequestsGitAction(user) {
 		if wantsPush {
-			if s.hasSuccessfulGitPush() {
-				return true
-			}
-			// Add-item goals that are already satisfied on disk can finish
-			// without inventing a no-op push loop.
-			return s.addItemAlreadySatisfied(user)
+			return s.hasSuccessfulGitPush()
 		}
-		return s.hasSuccessfulGitMutation() || s.addItemAlreadySatisfied(user)
+		return s.hasSuccessfulGitMutation()
 	}
 	return s.hasSuccessfulMutation()
 }

@@ -24,6 +24,8 @@ func TestIsActionRequest(t *testing.T) {
 		"pls add mankind to covered ce strategy and do git push",
 		"add MANKIND to underlyings.txt",
 		"write a file named notes.md",
+		"but if u see github workflow runs today no ce sold for mankind",
+		"why is mankind skipping CE sells in decision_log",
 	}
 	no := []string{"hi", "can you read the readme yes or no", "what is SEO", "explain SEO friendly docs"}
 	for _, s := range yes {

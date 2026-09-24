@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -66,10 +67,16 @@ func classifyProviderError(err error) ProviderErrorClass {
 	if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 		return ProviderConnectionRefused
 	}
-	if errors.Is(err, syscall.ECONNRESET) || strings.Contains(strings.ToLower(err.Error()), "connection reset") || strings.Contains(strings.ToLower(err.Error()), "unexpected eof") {
+	low := strings.ToLower(err.Error())
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) ||
+		strings.Contains(low, "connection reset") ||
+		strings.Contains(low, "broken pipe") ||
+		strings.Contains(low, "unexpected eof") ||
+		strings.HasSuffix(low, ": eof") ||
+		low == "eof" ||
+		strings.Contains(low, "server closed idle connection") {
 		return ProviderReset
 	}
-	low := strings.ToLower(err.Error())
 	if strings.Contains(low, "401") || strings.Contains(low, "403") || strings.Contains(low, "unauthorized") || strings.Contains(low, "forbidden") {
 		return ProviderAuthentication
 	}
@@ -77,6 +84,17 @@ func classifyProviderError(err error) ProviderErrorClass {
 		return ProviderConfiguration
 	}
 	return ProviderUnavailableClass
+}
+
+// TransientProviderFailure reports whether the provider error is worth a short
+// reconnect/retry before failing the user-visible turn.
+func TransientProviderFailure(err error) bool {
+	switch ProviderErrorClassOf(err) {
+	case ProviderReset, ProviderConnectionRefused, ProviderTimeout, ProviderUnavailableClass:
+		return true
+	default:
+		return false
+	}
 }
 
 func wrapProviderError(err error) error {

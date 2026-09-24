@@ -451,15 +451,15 @@ func TestSimpleMutationReadyToConfirmWaitsForGitWhenRequested(t *testing.T) {
 	}
 }
 
-func TestAddItemAlreadyPresentCanConfirmWithoutPush(t *testing.T) {
+func TestAddItemAlreadyPresentDoesNotAutoComplete(t *testing.T) {
 	var state AgentRunState
 	state.reset("pls add mankind to covered ce strategy and do git push")
 	state.addObservation("read_file", `{"path":"underlyings.txt"}`, tools.ExecutionResult{Output: "BEL\nMANKIND\n", Category: tools.FailureSuccess})
 	if !state.addItemAlreadySatisfied(state.OriginalGoal) {
 		t.Fatal("existing MANKIND entry was not detected")
 	}
-	if !state.simpleMutationReadyToConfirm(state.OriginalGoal) {
-		t.Fatal("already-present add-item goal could not confirm")
+	if state.simpleMutationReadyToConfirm(state.OriginalGoal) {
+		t.Fatal("already-present underlyings entry incorrectly completed the goal before diagnosis/push")
 	}
 }
 

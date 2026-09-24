@@ -180,6 +180,9 @@ func applyLauncherPreset(cfg *config.Config, launcher string) {
 		if !cfg.PermissionModeConfigured && os.Getenv("BOLT_PERMISSION_MODE") == "" {
 			cfg.PermissionMode = "allow"
 		}
+		// Darwin/SGLang on S2 can spend the turn in hidden reasoning; keep the
+		// visible answer path so the TUI does not look idle/hung.
+		cfg.DisableThinking = true
 	case "bolt-s3":
 		if !cfg.PermissionModeConfigured && os.Getenv("BOLT_PERMISSION_MODE") == "" {
 			cfg.PermissionMode = "allow"

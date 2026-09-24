@@ -173,10 +173,10 @@ func TestAddItemActionHelpers(t *testing.T) {
 			t.Fatalf("recovery missing %q: %s", want, recovery)
 		}
 	}
-	if actionMutationToolAllowed("repo_map") || actionMutationToolAllowed("list_dir") || actionMutationToolAllowed("grep") {
-		t.Fatal("discovery tools incorrectly allowed during action recovery")
+	if actionMutationToolAllowed("repo_map") || actionMutationToolAllowed("list_dir") || actionMutationToolAllowed("find_files") {
+		t.Fatal("broad discovery tools incorrectly allowed during action recovery")
 	}
-	if !actionMutationToolAllowed("str_replace") || !actionMutationToolAllowed("git") || !actionMutationToolAllowed("read_file") {
-		t.Fatal("edit/git tools were blocked during action recovery")
+	if !actionMutationToolAllowed("str_replace") || !actionMutationToolAllowed("git") || !actionMutationToolAllowed("read_file") || !actionMutationToolAllowed("grep") {
+		t.Fatal("edit/git/diagnose tools were blocked during action recovery")
 	}
 }

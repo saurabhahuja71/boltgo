@@ -120,7 +120,7 @@ func goalRequestsGitAction(user string) bool {
 // repo_map/list_dir/grep loops.
 func actionMutationToolAllowed(name string) bool {
 	switch name {
-	case "str_replace", "write_file", "git", "read_file":
+	case "str_replace", "write_file", "git", "read_file", "grep":
 		return true
 	default:
 		return false
@@ -133,15 +133,15 @@ func addItemActionHint(user string) string {
 		return ""
 	}
 	hint := "ADD-ITEM TASK: read underlyings.txt first (also check similar list/config *.txt files if needed). "
-	hint += "If " + token + " is already present, do not rediscover the repo"
+	hint += "If " + token + " is already present, do not stop: inspect decision_log.csv and workflow/bot config for SKIP/HOLD/no-CE reasons"
 	if goalRequestsGitAction(user) {
-		hint += "; run the requested git commit/push next"
+		hint += ", and only then git commit/push if list membership was the actual missing piece"
 	}
 	hint += ". Otherwise add it with str_replace or write_file"
 	if goalRequestsGitAction(user) {
 		hint += ", then git add/commit/push"
 	}
-	hint += ". Prefer underlyings.txt over README exploration."
+	hint += ". Prefer underlyings.txt and decision_log.csv over README exploration."
 	return hint
 }
 

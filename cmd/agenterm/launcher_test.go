@@ -23,6 +23,9 @@ func TestLauncherPresetsShareOneRuntime(t *testing.T) {
 		if (name == "bolt-s1" || name == "bolt-s2" || name == "bolt-s3") && cfg.PermissionMode != "allow" {
 			t.Fatalf("%s permission mode = %q, want allow", name, cfg.PermissionMode)
 		}
+		if (name == "bolt-s2" || name == "bolt-s3") && !cfg.DisableThinking {
+			t.Fatalf("%s DisableThinking=false, want true for visible answers", name)
+		}
 	}
 }
 

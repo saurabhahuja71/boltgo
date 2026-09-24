@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"io"
+	"errors"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -43,5 +45,21 @@ func TestSamplingProfileFailsClosedForNonOllamaEndpoint(t *testing.T) {
 	defer server.Close()
 	if err := ValidateSamplingProfile(context.Background(), server.URL+"/v1", "model", LocalCodingReproducibleProfile); err == nil {
 		t.Fatal("profile validation unexpectedly accepted a non-Ollama endpoint")
+	}
+}
+
+func TestClassifyProviderErrorTreatsBareEOFAsReset(t *testing.T) {
+	cases := []error{
+		io.EOF,
+		errors.New(`Post "http://127.0.0.1:30002/v1/chat/completions": EOF`),
+		errors.New("read tcp 127.0.0.1:1->127.0.0.1:30002: read: connection reset by peer"),
+	}
+	for _, err := range cases {
+		if got := classifyProviderError(err); got != ProviderReset {
+			t.Fatalf("classifyProviderError(%v)=%q, want %q", err, got, ProviderReset)
+		}
+		if !TransientProviderFailure(err) {
+			t.Fatalf("TransientProviderFailure(%v)=false, want true", err)
+		}
 	}
 }

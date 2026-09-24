@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/saurabhahuja71/agenterm/internal/config"
 	"github.com/saurabhahuja71/agenterm/internal/llm"
@@ -563,14 +564,14 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		if processChannelTask && processVerified {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "VERIFICATION COMPLETE for Process. Do not call tools again. Write the FINAL REPORT now with: root cause, files changed, design, cancellation/accepted-job contract, tests added, exact commands executed, exact results, remaining issues."})
 		}
-		forceSimpleConfirm := a.RunState.simpleMutationReadyToConfirm(user) &&
-			(verificationRequested || postMutationReadOnlyRounds >= 1 || a.RunState.addItemAlreadySatisfied(user))
+		forceSimpleConfirm := a.RunState.simpleMutationReadyToConfirm(user) && (verificationRequested || postMutationReadOnlyRounds >= 1)
+		if a.RunState.addItemAlreadySatisfied(user) && !a.RunState.hasSuccessfulMutation() && !forceSimpleConfirm {
+			token := extractAddItemToken(user)
+			continueHint := "ADD-ITEM NOTE: " + token + " is already listed in underlyings.txt. Do not stop after that observation. Inspect decision_log.csv, bot.yml / workflow config, and recent SKIP/HOLD reasons to determine why CE was not sold, then fix the real gap or run the requested git push if list membership was the only missing piece."
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: continueHint})
+		}
 		if forceSimpleConfirm {
-			confirm := "The requested file/git change already succeeded. Do not call tools again. Confirm what changed in one short sentence."
-			if a.RunState.addItemAlreadySatisfied(user) && !a.RunState.hasSuccessfulMutation() {
-				confirm = "The requested item is already present on disk. Do not call tools again. Confirm that no file change was required (and whether git push was unnecessary or already up to date)."
-			}
-			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: confirm})
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "The requested file/git change already succeeded. Do not call tools again. Confirm what changed in one short sentence."})
 		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
@@ -716,15 +717,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 				// Existing Process source is known: force one verification pass
 				// instead of another rediscovery loop that burns the round budget.
 				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "run_tests"}}
-			} else if (actionEditOnly || (goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") && !a.RunState.hasSuccessfulGitPush() && !a.RunState.addItemAlreadySatisfied(user) && (a.RunState.hasSuccessfulMutation() || a.RunState.hasSuccessfulGitMutation()))) && !forceSimpleConfirm {
-				// After stalled rediscovery, force an edit/git tool so the remaining
-				// budget cannot be spent on another repo_map/list_dir loop. Also keep
-				// forcing git once a push goal has staged/committed but not pushed,
-				// unless the add-item target is already satisfied on disk.
+			} else if (actionEditOnly || (goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") && !a.RunState.hasSuccessfulGitPush() && (a.RunState.hasSuccessfulMutation() || a.RunState.hasSuccessfulGitMutation()))) && !forceSimpleConfirm {
+				// After stalled rediscovery, force an edit/git/diagnosis tool so the
+				// remaining budget cannot be spent on another repo_map/list_dir loop.
 				forceName := "str_replace"
 				if goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") && !a.RunState.hasSuccessfulGitPush() &&
-					!a.RunState.addItemAlreadySatisfied(user) &&
-					(a.RunState.hasSuccessfulMutation() || a.RunState.hasSuccessfulGitMutation()) {
+					a.RunState.hasSuccessfulMutation() {
 					forceName = "git"
 				} else if token := extractAddItemToken(user); token != "" && !a.RunState.hasSuccessfulMutation() {
 					forceName = "read_file"
@@ -739,16 +737,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 						forceName = "str_replace"
 						if i < len(a.RunState.Observations) &&
 							strings.Contains(strings.ToUpper(a.RunState.Observations[i].Summary), tokenUpper) {
-							if goalRequestsGitAction(user) && !strings.Contains(strings.ToLower(user), "push") {
-								forceName = "git"
-							} else if goalRequestsGitAction(user) {
-								// Already present: confirmation path handles completion.
-								forceName = "git"
-							}
+							// Listed already: diagnose sell/skip behavior next.
+							forceName = "grep"
 						}
 						break
 					}
-				} else if goalRequestsGitAction(user) && !a.RunState.hasSuccessfulGitMutation() && !a.RunState.addItemAlreadySatisfied(user) {
+				} else if goalRequestsGitAction(user) && !a.RunState.hasSuccessfulGitMutation() && a.RunState.hasSuccessfulMutation() {
 					forceName = "git"
 				}
 				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": forceName}}
@@ -770,18 +764,38 @@ Do not answer with only a markdown plan or shell snippets.`,
 		// would otherwise appear twice in the TUI/headless output.
 		quietModelText := verificationRequested || toolsUsed > 0
 		var stream *streamBridge
-		if a.DailyMode {
-			msg, err = a.dailyChatStream(ctx, req, emit, quietModelText)
-		} else {
-			stream = &streamBridge{emit: emit, quiet: quietModelText, deferUntilToolDecision: true}
-			msg, err = a.Client.ChatStream(ctx, req, stream)
+		const providerRetries = 3
+		for attempt := 0; attempt <= providerRetries; attempt++ {
+			if a.DailyMode {
+				msg, err = a.dailyChatStream(ctx, req, emit, quietModelText)
+			} else {
+				stream = &streamBridge{emit: emit, quiet: quietModelText, deferUntilToolDecision: true}
+				msg, err = a.Client.ChatStream(ctx, req, stream)
+			}
+			if err == nil || ctx.Err() != nil || !llm.TransientProviderFailure(err) || attempt == providerRetries {
+				break
+			}
+			emit(Event{Kind: EventStatus, Text: fmt.Sprintf("provider connection dropped (%s); retrying %d/%d…", llm.ProviderErrorClassOf(err), attempt+1, providerRetries)})
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 800 * time.Millisecond):
+			}
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				break
+			}
 		}
 		if err != nil {
 			a.RunState.Phase = PhaseBlocked
 			if ctx.Err() != nil {
 				emit(Event{Kind: EventError, Text: "cancelled"})
 			} else {
-				emit(Event{Kind: EventError, Text: err.Error()})
+				detail := err.Error()
+				if llm.TransientProviderFailure(err) {
+					detail = "provider unavailable after retries: " + detail + " — check that the model server is up (bolt-s2: Darwin/SGLang on the configured base URL), then /retry"
+				}
+				emit(Event{Kind: EventError, Text: detail})
 			}
 			emit(Event{Kind: EventDone})
 			return err
@@ -1605,6 +1619,8 @@ func isActionRequest(user string) bool {
 		"create a ", "add a ", "add ", "commit ", "git commit", "git push", "push the",
 		"refactor ", "add a section", "improve the readme", "improve readme",
 		"please apply", "go ahead and", "make these changes", "make those changes",
+		"workflow", "github action", "not sold", "no ce", "ce sold", "decision_log",
+		"diagnose", "why ", "skip_", "not working", "didn't sell", "did not sell",
 	}
 	for _, n := range needles {
 		if strings.Contains(s, n) {
