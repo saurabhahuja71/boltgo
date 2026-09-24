@@ -131,6 +131,27 @@ func decisionCodesForSymbol(summary, token string) []string {
 		}
 		return out
 	}
+	// When records are newline-delimited, restrict code extraction to the
+	// actual symbol record. The fallback window is only for compacted legacy
+	// observations that no longer retain record boundaries.
+	var symbolLines []string
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.Contains(strings.ToUpper(line), upperToken) {
+			symbolLines = append(symbolLines, line)
+		}
+	}
+	if len(symbolLines) > 0 {
+		for _, line := range symbolLines {
+			upperLine := strings.ToUpper(line)
+			for _, code := range codes {
+				if strings.Contains(upperLine, code) && !seen[code] {
+					seen[code] = true
+					out = append(out, code)
+				}
+			}
+		}
+		return out
+	}
 	// Observation summaries are often newline-flattened by compactStateText, so
 	// a whole decision_log dump becomes one blob with many symbols. Only keep
 	// codes that appear near the asked symbol token.
@@ -145,7 +166,9 @@ func decisionCodesForSymbol(summary, token string) []string {
 		if from < 0 {
 			from = 0
 		}
-		to := abs + len(upperToken) + 180
+		// Keep the complete symbol-scoped record. CSV rows and shell output often
+		// put the reason after the symbol, beyond the old 180-byte window.
+		to := abs + len(upperToken) + 900
 		if to > len(summary) {
 			to = len(summary)
 		}
@@ -161,10 +184,81 @@ func decisionCodesForSymbol(summary, token string) []string {
 	return out
 }
 
+func diagnosisEvidenceForSymbol(summary, token string) []string {
+	if strings.TrimSpace(token) == "" {
+		return nil
+	}
+	// Prefer complete newline-delimited records. This prevents evidence for BEL
+	// immediately before MANKIND from being attributed to MANKIND.
+	var lineEvidence []string
+	seenLines := map[string]bool{}
+	for _, line := range strings.Split(summary, "\n") {
+		if !strings.Contains(strings.ToUpper(line), strings.ToUpper(token)) {
+			continue
+		}
+		line = strings.Join(strings.Fields(line), " ")
+		if line != "" && !seenLines[line] {
+			seenLines[line] = true
+			lineEvidence = append(lineEvidence, line)
+		}
+		if len(lineEvidence) == 4 {
+			return lineEvidence
+		}
+	}
+	if len(lineEvidence) > 0 {
+		// Workflow metadata is often emitted on the line immediately before or
+		// after the symbol decision. Include only metadata-shaped lines, never
+		// another symbol's decision record.
+		for _, line := range strings.Split(summary, "\n") {
+			low := strings.ToLower(line)
+			if strings.Contains(low, "run_id=") || strings.Contains(low, "workflow=") || strings.Contains(low, "job=") || strings.Contains(low, "schedule=") {
+				line = strings.Join(strings.Fields(line), " ")
+				if line != "" && !seenLines[line] {
+					seenLines[line] = true
+					lineEvidence = append(lineEvidence, line)
+				}
+			}
+		}
+		return lineEvidence
+	}
+	upper := strings.ToUpper(summary)
+	want := strings.ToUpper(token)
+	var evidence []string
+	seen := map[string]bool{}
+	for start := 0; start < len(upper); {
+		rel := strings.Index(upper[start:], want)
+		if rel < 0 {
+			break
+		}
+		abs := start + rel
+		from := abs - 180
+		if from < 0 {
+			from = 0
+		}
+		to := abs + len(want) + 900
+		if to > len(summary) {
+			to = len(summary)
+		}
+		snippet := strings.Join(strings.Fields(summary[from:to]), " ")
+		if len(snippet) > 360 {
+			snippet = snippet[:360] + "…"
+		}
+		if snippet != "" && !seen[snippet] {
+			seen[snippet] = true
+			evidence = append(evidence, snippet)
+		}
+		start = abs + len(want)
+	}
+	return evidence
+}
+
 func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 	token := extractDiagnosisSymbol(user)
 	var reasons []string
+	var evidence []string
+	var functions []string
 	var files []string
+	sourceAuditRead := false
 	seenReason := map[string]bool{}
 	seenFile := map[string]bool{}
 	eqNone := false
@@ -177,6 +271,11 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 				reasons = append(reasons, code)
 			}
 		}
+		for _, snippet := range diagnosisEvidenceForSymbol(summary, token) {
+			if len(evidence) < 4 {
+				evidence = append(evidence, snippet)
+			}
+		}
 		upper := strings.ToUpper(summary)
 		if token != "" && strings.Contains(upper, token+" EQ: NONE") {
 			eqNone = true
@@ -184,14 +283,41 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 		if token != "" && strings.Contains(upper, token+" CE: NONE") {
 			ceNone = true
 		}
+		for _, function := range diagnosisFunctions(summary) {
+			found := false
+			for _, existing := range functions {
+				if existing == function {
+					found = true
+					break
+				}
+			}
+			if !found && len(functions) < 4 {
+				functions = append(functions, function)
+			}
+		}
 	}
 	for _, call := range state.ToolCalls {
 		arg := call.Arguments
-		for _, marker := range []string{"decision_log.csv", "underlyings.txt", "bot.py", "delivery_strategy.py", "decision_audit.py", "rocket_"} {
+		if strings.Contains(arg, "decision_audit.py") {
+			sourceAuditRead = true
+		}
+		for _, marker := range []string{"decision_log.csv", "underlyings.txt", "bot.py", "delivery_strategy.py", "decision_audit.py", "rocket_", ".github/workflows/bot.yml"} {
 			if strings.Contains(arg, marker) && !seenFile[marker] {
 				seenFile[marker] = true
 				files = append(files, marker)
 			}
+		}
+	}
+	if sourceAuditRead && seenReason["SKIP_ASSIGNMENT_NOT_REQUIRED"] {
+		found := false
+		for _, function := range functions {
+			if function == "resolve_exit_action_and_reason" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			functions = append([]string{"resolve_exit_action_and_reason"}, functions...)
 		}
 	}
 	var b strings.Builder
@@ -219,11 +345,83 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 	if len(files) > 0 {
 		b.WriteString("- files/tools touched: " + strings.Join(files, ", ") + "\n")
 	}
+	if len(evidence) > 0 {
+		b.WriteString("- symbol-scoped evidence:\n")
+		for _, snippet := range evidence {
+			b.WriteString("  - " + snippet + "\n")
+		}
+	} else if token != "" {
+		b.WriteString("- symbol-scoped evidence: missing; collected observations did not contain a readable " + token + " record\n")
+	}
+	if len(functions) > 0 {
+		b.WriteString("- responsible functions observed: " + strings.Join(functions, ", ") + "\n")
+	} else {
+		b.WriteString("- responsible functions observed: missing; source mapping was not collected\n")
+	}
+	if len(reasons) > 0 && diagnosisEvidenceReady(user, state) {
+		b.WriteString("- root-cause status: decision, source, and requested workflow evidence collected; no workflow scheduling failure proven\n")
+	} else if len(reasons) > 0 {
+		b.WriteString("- root-cause status: decision evidence found; source function and workflow outcome still require explicit matching evidence\n")
+	} else {
+		b.WriteString("- root-cause status: unproven; missing a symbol-scoped decision reason\n")
+	}
 	if token != "" && seenReason["SKIP_ASSIGNMENT_NOT_REQUIRED"] {
 		b.WriteString("- interpretation: SKIP_ASSIGNMENT_NOT_REQUIRED with HOLD means the exit/audit path recorded no assignment action; this is not a workflow schedule miss. Check whether " + token + " had an EQ/FUT cover and whether entry was skipped earlier (cash/support/eligibility).\n")
 	}
 	b.WriteString("- concrete code fix: not proven in this turn; do not rewrite workflow YAML without evidence.\n")
 	return b.String()
+}
+
+func diagnosisFunctions(summary string) []string {
+	var result []string
+	seen := map[string]bool{}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bdef\s+([A-Za-z_][A-Za-z0-9_]*)`),
+		regexp.MustCompile(`\b(resolve_[A-Za-z0-9_]+)\b`),
+	}
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllStringSubmatch(summary, -1) {
+			if len(match) > 1 && !seen[match[1]] {
+				seen[match[1]] = true
+				result = append(result, match[1])
+			}
+		}
+	}
+	return result
+}
+
+// diagnosisEvidenceReady reports whether the deterministic fallback has
+// enough independent evidence to answer a diagnosis request. Once this is
+// true, another model search is not useful: it only risks repeating reads or
+// inventing a fix. Workflow requests additionally require workflow evidence.
+func diagnosisEvidenceReady(user string, state AgentRunState) bool {
+	token := extractDiagnosisSymbol(user)
+	if token == "" {
+		return false
+	}
+	lowGoal := strings.ToLower(user)
+	decision := false
+	source := false
+	workflow := !strings.Contains(lowGoal, "workflow") && !strings.Contains(lowGoal, "github")
+	for _, obs := range state.Observations {
+		if len(decisionCodesForSymbol(obs.Summary, token)) > 0 {
+			decision = true
+		}
+		low := strings.ToLower(obs.Summary)
+		if strings.Contains(low, "def resolve_") || strings.Contains(low, "resolve_exit_action_and_reason") || strings.Contains(low, "return \"skip\"") {
+			source = true
+		}
+		if strings.Contains(low, "workflow") || strings.Contains(low, "github actions") || strings.Contains(low, "run:") || strings.Contains(low, "schedule:") {
+			workflow = true
+		}
+	}
+	for _, call := range state.ToolCalls {
+		low := strings.ToLower(call.Arguments)
+		if strings.Contains(low, ".github/workflows") || strings.Contains(low, "bot.yml") {
+			workflow = true
+		}
+	}
+	return decision && source && workflow
 }
 
 var addItemToPattern = regexp.MustCompile(`(?i)\badd\s+([A-Za-z0-9_./-]+)\s+to\b`)
@@ -319,11 +517,13 @@ func priorUserGoal(history []llm.Message) string {
 
 func diagnosisRecoveryGuidance(user string) string {
 	token := extractAddItemToken(user)
-	guidance := "DIAGNOSIS RECOVERY: stop broad rediscovery. Read decision_log.csv and the strategy code that emits SKIP/HOLD reasons"
+	guidance := "DIAGNOSIS RECOVERY: stop broad rediscovery and do not read a large decision log whole. First use grep with the exact symbol"
 	if token != "" {
-		guidance += " for " + token
+		guidance += " " + token
+	} else if symbol := extractDiagnosisSymbol(user); symbol != "" {
+		guidance += " " + symbol
 	}
-	guidance += ". Prefer grep/read_file on bot.py, common/decision_audit.py, common/delivery_strategy.py, and recent logs. Do not rewrite workflow YAML or other files until a concrete root cause is proven from tool evidence."
+	guidance += " in decision_log.csv; then read only the matching rows and grep the exact reason code in the decision-audit/strategy files. Read the workflow file and recent log lines only after the symbol rows are captured. Prefer grep/read_file on .github/workflows/bot.yml, bot.py, common/decision_audit.py, common/delivery_strategy.py, and recent logs. Do not rewrite workflow YAML or other files until a concrete root cause is proven from tool evidence."
 	return guidance
 }
 

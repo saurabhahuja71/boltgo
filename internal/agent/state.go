@@ -134,7 +134,18 @@ func (s *AgentRunState) addObservation(tool, args string, result tools.Execution
 		record.TargetPath = mutationTargetPath(args)
 	}
 	s.ToolCalls = append(s.ToolCalls, record)
-	s.Observations = append(s.Observations, Observation{Tool: tool, Summary: compactStateText(result.Output, 280), Success: result.Category == tools.FailureSuccess})
+	// Diagnosis synthesis needs enough of a log/read result to retain the
+	// symbol, its decision code, and the surrounding reason. The old 280-byte
+	// cap commonly preserved HOLD while truncating the paired SKIP reason.
+	observationLimit := 280
+	if diagnosisOriented(s.OriginalGoal) && tool != "" {
+		observationLimit = 1200
+	}
+	observation := compactStateText(result.Output, observationLimit)
+	if diagnosisOriented(s.OriginalGoal) {
+		observation = compactDiagnosisText(result.Output, observationLimit)
+	}
+	s.Observations = append(s.Observations, Observation{Tool: tool, Summary: observation, Success: result.Category == tools.FailureSuccess})
 	if result.Category != tools.FailureSuccess {
 		s.Failures = append(s.Failures, FailureRecord{Tool: tool, Category: result.Category, Retryable: result.Retryable, Summary: compactStateText(result.Output, 240)})
 		s.Plan = fmt.Sprintf("diagnose %s failure, choose a corrective action, then verify the original goal", result.Category)
@@ -742,6 +753,46 @@ func compactStateText(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// compactDiagnosisText keeps record boundaries intact. Flattening CSV/log
+// output makes a symbol window accidentally include the preceding symbol's
+// decision, which can create a false diagnosis.
+func compactDiagnosisText(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
+	if len(s) <= n {
+		return s
+	}
+	// Keep the beginning/end for file identity, plus source lines that carry
+	// the decision mapping. A large read of decision_audit.py otherwise drops
+	// the def/return pair and leaves only an unhelpful filename.
+	first := n / 3
+	last := n / 4
+	markers := []string{"def resolve_", "resolve_exit_action_and_reason", "SKIP_ASSIGNMENT_NOT_REQUIRED", "return \"SKIP\"", "workflow", "schedule"}
+	selected := make([]string, 0, 12)
+	seen := map[string]bool{}
+	for _, line := range strings.Split(s, "\n") {
+		low := strings.ToLower(line)
+		for _, marker := range markers {
+			if strings.Contains(low, strings.ToLower(marker)) {
+				line = strings.TrimSpace(line)
+				if line != "" && !seen[line] {
+					seen[line] = true
+					selected = append(selected, line)
+				}
+				break
+			}
+		}
+	}
+	result := s[:first] + "\n…\n"
+	for _, line := range selected {
+		if len(result)+len(line)+1+last > n {
+			break
+		}
+		result += line + "\n"
+	}
+	result += "…\n" + s[len(s)-last:]
+	return result
 }
 
 func verificationPrompt(goal string) string {

@@ -184,7 +184,6 @@ func TestAddItemActionHelpers(t *testing.T) {
 	}
 }
 
-
 func TestAddItemPushOnlyGoalVsDiagnosis(t *testing.T) {
 	pushOnly := "pls add mankind to covered ce strategy and do git push"
 	diag := "github workflow runs today show no ce sold for mankind; diagnose why"
@@ -224,6 +223,12 @@ func TestContinuationAndDiagnosisHelpers(t *testing.T) {
 	if !diagnosisOriented(prior) {
 		t.Fatal("prior diagnosis goal not detected")
 	}
+	recovery := diagnosisRecoveryGuidance("this is for mankind stock why all jobs missed it today")
+	for _, want := range []string{"exact symbol", "MANKIND", "decision_log.csv", "workflow file", "matching rows", "do not read a large decision log whole"} {
+		if !strings.Contains(strings.ToLower(recovery), strings.ToLower(want)) {
+			t.Fatalf("diagnosis recovery missing %q: %s", want, recovery)
+		}
+	}
 	if diagnosisToolAllowed("repo_map") || diagnosisToolAllowed("list_dir") || diagnosisToolAllowed("write_file") || diagnosisToolAllowed("find_files") || diagnosisToolAllowed("run_shell") {
 		t.Fatal("diagnosis recovery allowed unsafe rediscovery/write/shell tools")
 	}
@@ -245,7 +250,7 @@ func TestDiagnosisSynthesisScopesCodesToSymbol(t *testing.T) {
 		Category: tools.FailureSuccess,
 	})
 	state.addObservation("read_file", `{"path":"logs/rocket_2026-09-24.log"}`, tools.ExecutionResult{
-		Output: "ACTIVE UNDERLYINGS: ['BEL', 'MANKIND']\n  MANKIND EQ: none\n  MANKIND CE: none\n",
+		Output:   "ACTIVE UNDERLYINGS: ['BEL', 'MANKIND']\n  MANKIND EQ: none\n  MANKIND CE: none\n",
 		Category: tools.FailureSuccess,
 	})
 	out := diagnosisSynthesisFromState(state.OriginalGoal, state)
@@ -257,5 +262,109 @@ func TestDiagnosisSynthesisScopesCodesToSymbol(t *testing.T) {
 	}
 	if !strings.Contains(out, "MANKIND EQ: none") || !strings.Contains(out, "MANKIND CE: none") {
 		t.Fatalf("missing position evidence: %s", out)
+	}
+}
+
+func TestDiagnosisSynthesisComplexQueries(t *testing.T) {
+	tests := []struct {
+		name       string
+		goal       string
+		output     string
+		want       []string
+		mustNot    []string
+		wantStatus string
+	}{
+		{
+			name: "long csv record keeps paired reason",
+			goal: "this is for mankind stock why all jobs missed it today",
+			output: "header,header,header\n" +
+				"2026-09-24T12:01:38+05:30,MANKIND,SKIP,SKIP_ASSIGNMENT_NOT_REQUIRED,HOLD,entry=false,cover=false,delivery=STANDARD",
+			want: []string{"SKIP_ASSIGNMENT_NOT_REQUIRED", "symbol-scoped evidence", "MANKIND,SKIP"},
+		},
+		{
+			name:    "mixed symbols stay isolated",
+			goal:    "diagnose why MANKIND was missed in every workflow run",
+			output:  "BEL,SKIP,SKIP_NO_CASH\nMANKIND,SKIP,SKIP_ASSIGNMENT_NOT_REQUIRED,HOLD\nBEL,SKIP,SKIP_NO_SUPPORT",
+			want:    []string{"SKIP_ASSIGNMENT_NOT_REQUIRED", "MANKIND,SKIP"},
+			mustNot: []string{"SKIP_NO_CASH", "SKIP_NO_SUPPORT"},
+		},
+		{
+			name:   "free form hold reason is visible",
+			goal:   "deeply debug the MANKIND HOLD reason and responsible function",
+			output: "MANKIND decision=HOLD reason=NO_OPEN_CE_POSITION function=delivery_strategy.select_exit_candidate",
+			want:   []string{"HOLD", "NO_OPEN_CE_POSITION", "delivery_strategy.select_exit_candidate"},
+		},
+		{
+			name:   "workflow evidence is visible",
+			goal:   "inspect GitHub workflow logs and explain why MANKIND was missed",
+			output: "run_id=99127 job=covered_call status=success\nMANKIND decision=HOLD source=bot.py:418\nworkflow=bot.yml schedule=12:01+05:30",
+			want:   []string{"run_id=99127", "bot.py:418", "workflow=bot.yml"},
+		},
+		{
+			name:       "missing symbol evidence stays explicit",
+			goal:       "why did MANKIND miss today; diagnose from the collected logs",
+			output:     "BEL,SKIP,SKIP_NO_CASH\nworkflow run completed successfully",
+			want:       []string{"symbol-scoped evidence: missing", "root-cause status: unproven"},
+			mustNot:    []string{"BEL,SKIP"},
+			wantStatus: "unproven",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var state AgentRunState
+			state.reset(tt.goal)
+			state.addObservation("read_file", `{"path":"decision_log.csv"}`, tools.ExecutionResult{Output: tt.output, Category: tools.FailureSuccess})
+			got := diagnosisSynthesisFromState(tt.goal, state)
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("missing %q in diagnosis:\n%s", want, got)
+				}
+			}
+			for _, unwanted := range tt.mustNot {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("cross-symbol or unsupported evidence %q in diagnosis:\n%s", unwanted, got)
+				}
+			}
+			if tt.wantStatus != "" && !strings.Contains(got, "root-cause status: "+tt.wantStatus) {
+				t.Fatalf("missing status %q in diagnosis:\n%s", tt.wantStatus, got)
+			}
+		})
+	}
+}
+
+func TestDiagnosisEvidenceReadyRequiresIndependentEvidence(t *testing.T) {
+	var state AgentRunState
+	state.reset("inspect GitHub workflow logs and explain why MANKIND was missed")
+	state.addObservation("grep", `{"pattern":"MANKIND","path":"decision_log.csv"}`, tools.ExecutionResult{
+		Output:   "2026-09-24,MANKIND,SKIP,SKIP_ASSIGNMENT_NOT_REQUIRED,HOLD",
+		Category: tools.FailureSuccess,
+	})
+	if diagnosisEvidenceReady(state.OriginalGoal, state) {
+		t.Fatal("decision-only evidence incorrectly completed diagnosis")
+	}
+	state.addObservation("grep", `{"pattern":"SKIP_ASSIGNMENT_NOT_REQUIRED","path":"common/decision_audit.py"}`, tools.ExecutionResult{
+		Output:   `365: return "SKIP", "SKIP_ASSIGNMENT_NOT_REQUIRED", exit_type or "HOLD"`,
+		Category: tools.FailureSuccess,
+	})
+	state.addObservation("read_file", `{"path":".github/workflows/bot.yml"}`, tools.ExecutionResult{
+		Output:   "name: bot\n schedule: 31 10 * * 1-5",
+		Category: tools.FailureSuccess,
+	})
+	if !diagnosisEvidenceReady(state.OriginalGoal, state) {
+		t.Fatal("complete decision/source/workflow evidence was not recognized")
+	}
+}
+
+func TestCompactDiagnosisTextRetainsDecisionFunction(t *testing.T) {
+	input := strings.Repeat("unrelated source line\n", 100) +
+		"def resolve_exit_action_and_reason(ctx):\n" +
+		"    return \"SKIP\", \"SKIP_ASSIGNMENT_NOT_REQUIRED\", \"HOLD\"\n" +
+		strings.Repeat("trailing source line\n", 100)
+	got := compactDiagnosisText(input, 1200)
+	for _, want := range []string{"resolve_exit_action_and_reason", "SKIP_ASSIGNMENT_NOT_REQUIRED", "return \"SKIP\""} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("diagnostic compaction dropped %q:\n%s", want, got)
+		}
 	}
 }

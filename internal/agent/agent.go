@@ -1446,6 +1446,17 @@ Do not answer with only a markdown plan or shell snippets.`,
 				toolsUsed++
 			}
 		}
+		// A diagnosis is read-only. Once the symbol decision, responsible source
+		// branch, and requested workflow evidence are all observed, close the
+		// turn with the deterministic evidence report instead of allowing the
+		// model to repeat reads until bounded autonomy expires.
+		if diagnosisTask && !a.RunState.hasMutation() && diagnosisEvidenceReady(user, a.RunState) {
+			a.RunState.Phase = PhaseBlocked
+			emit(Event{Kind: EventStatus, Text: "diagnosis evidence complete; closing with authoritative report"})
+			emit(Event{Kind: EventToken, Text: diagnosisSynthesisFromState(user, a.RunState)})
+			emit(Event{Kind: EventDone})
+			return nil
+		}
 		// Finish immediately once a requested git push has succeeded. Extra
 		// verify rounds after push are what tip add-item tasks into
 		// "max tool rounds reached".
