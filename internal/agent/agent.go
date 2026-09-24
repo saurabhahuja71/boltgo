@@ -547,18 +547,30 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "Repeated investigation has produced no new evidence. Synthesize the evidence already collected now. Do not call tools, do not repeat searches, and do not claim an implementation exists unless tool results prove it."})
 		}
 		if actionRecoveryNudged && !(a.RunState.hasMutation() || poolSourceMutated) && !processChannelTask {
-			recovery := "ACTION RECOVERY: stop repeating read-only searches. Use evidence already collected, apply the requested change with str_replace or write_file on the relevant path, then run any requested verification. Do not repeat grep, repo_map, list_dir, find_files, or the same read_file."
+			recovery := actionRecoveryGuidance(user)
 			if workerPoolTask {
 				recovery = "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file on internal/agent/read_batch.go (surgical patch only), then run the requested tests. Do not make another read-only search."
 			}
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: recovery})
 		}
+		if hint := addItemActionHint(user); hint != "" && round == 0 {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: hint})
+		}
+		if goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") &&
+			!a.RunState.hasSuccessfulGitPush() && a.RunState.hasSuccessfulGitMutation() {
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "GIT PUSH REQUIRED: call git with command/args push now. Do not run git add again; finish with git push."})
+		}
 		if processChannelTask && processVerified {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "VERIFICATION COMPLETE for Process. Do not call tools again. Write the FINAL REPORT now with: root cause, files changed, design, cancellation/accepted-job contract, tests added, exact commands executed, exact results, remaining issues."})
 		}
-		forceSimpleConfirm := a.RunState.simpleMutationReadyToConfirm(user) && (verificationRequested || postMutationReadOnlyRounds >= 1)
+		forceSimpleConfirm := a.RunState.simpleMutationReadyToConfirm(user) &&
+			(verificationRequested || postMutationReadOnlyRounds >= 1 || a.RunState.addItemAlreadySatisfied(user))
 		if forceSimpleConfirm {
-			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "The requested file/git change already succeeded. Do not call tools again. Confirm what changed in one short sentence."})
+			confirm := "The requested file/git change already succeeded. Do not call tools again. Confirm what changed in one short sentence."
+			if a.RunState.addItemAlreadySatisfied(user) && !a.RunState.hasSuccessfulMutation() {
+				confirm = "The requested item is already present on disk. Do not call tools again. Confirm that no file change was required (and whether git push was unnecessary or already up to date)."
+			}
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: confirm})
 		}
 		if toolsUsed > 0 {
 			msgs = append(msgs, llm.Message{
@@ -645,6 +657,18 @@ Do not answer with only a markdown plan or shell snippets.`,
 			roundTools = filtered
 			emit(Event{Kind: EventStatus, Text: "worker-pool mode: edit/verify tools only"})
 		}
+		actionEditOnly := actionRecoveryNudged && !workerPoolTask && !processChannelTask &&
+			!(a.RunState.hasMutation() || poolSourceMutated) && len(roundTools) > 0
+		if actionEditOnly {
+			filtered := make([]llm.Tool, 0, len(roundTools))
+			for _, tool := range roundTools {
+				if actionMutationToolAllowed(tool.Function.Name) {
+					filtered = append(filtered, tool)
+				}
+			}
+			roundTools = filtered
+			emit(Event{Kind: EventStatus, Text: "action recovery: edit/git tools only"})
+		}
 		if processChannelTask && processVerified && len(roundTools) > 0 {
 			roundTools = nil
 			emit(Event{Kind: EventStatus, Text: "process mode: verification done; final report only"})
@@ -692,6 +716,44 @@ Do not answer with only a markdown plan or shell snippets.`,
 				// Existing Process source is known: force one verification pass
 				// instead of another rediscovery loop that burns the round budget.
 				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "run_tests"}}
+			} else if (actionEditOnly || (goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") && !a.RunState.hasSuccessfulGitPush() && !a.RunState.addItemAlreadySatisfied(user) && (a.RunState.hasSuccessfulMutation() || a.RunState.hasSuccessfulGitMutation()))) && !forceSimpleConfirm {
+				// After stalled rediscovery, force an edit/git tool so the remaining
+				// budget cannot be spent on another repo_map/list_dir loop. Also keep
+				// forcing git once a push goal has staged/committed but not pushed,
+				// unless the add-item target is already satisfied on disk.
+				forceName := "str_replace"
+				if goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") && !a.RunState.hasSuccessfulGitPush() &&
+					!a.RunState.addItemAlreadySatisfied(user) &&
+					(a.RunState.hasSuccessfulMutation() || a.RunState.hasSuccessfulGitMutation()) {
+					forceName = "git"
+				} else if token := extractAddItemToken(user); token != "" && !a.RunState.hasSuccessfulMutation() {
+					forceName = "read_file"
+					tokenUpper := strings.ToUpper(token)
+					for i, call := range a.RunState.ToolCalls {
+						if call.Name != "read_file" || call.Outcome != tools.FailureSuccess {
+							continue
+						}
+						if !strings.Contains(strings.ToLower(call.Arguments), "underlyings.txt") {
+							continue
+						}
+						forceName = "str_replace"
+						if i < len(a.RunState.Observations) &&
+							strings.Contains(strings.ToUpper(a.RunState.Observations[i].Summary), tokenUpper) {
+							if goalRequestsGitAction(user) && !strings.Contains(strings.ToLower(user), "push") {
+								forceName = "git"
+							} else if goalRequestsGitAction(user) {
+								// Already present: confirmation path handles completion.
+								forceName = "git"
+							}
+						}
+						break
+					}
+				} else if goalRequestsGitAction(user) && !a.RunState.hasSuccessfulGitMutation() && !a.RunState.addItemAlreadySatisfied(user) {
+					forceName = "git"
+				}
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": forceName}}
+			} else if addItemActionTask(user) && round == 0 && toolsUsed == 0 {
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
 			} else if isActionRequest(user) && toolsUsed == 0 && round == 0 {
 				// Encourage tool use on first action turn (OpenAI-compatible; Ollama may ignore).
 				req.ToolChoice = "auto"
@@ -1300,7 +1362,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 						consecutiveNoProgressRounds = 0
 						if !actionRecoveryNudged {
 							actionRecoveryNudged = true
-							recovery := "Use the evidence already collected and implement the requested change now. Inspect the most relevant source path already returned by the tools, then use str_replace or write_file and run the requested tests. Do not repeat grep, repo_map, list_dir, or find_files."
+							recovery := actionRecoveryGuidance(user)
 							if workerPoolTask {
 								recovery = workerPoolRecoveryGuidance()
 							}

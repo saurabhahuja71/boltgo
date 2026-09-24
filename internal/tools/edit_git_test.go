@@ -70,3 +70,15 @@ func TestStrReplaceAndGitAllowlist(t *testing.T) {
 func TestIsActionRequest_viaAgentPackage(t *testing.T) {
 	// kept in agent tests; placeholder so tools package stays focused
 }
+
+func TestGitAddDotBlocked(t *testing.T) {
+	if err := validateGitArgs([]string{"add", "."}); err == nil {
+		t.Fatal("git add . should be blocked")
+	}
+	if err := validateGitArgs([]string{"add", ".bolt/sessions/latest.json"}); err == nil {
+		t.Fatal("git add .bolt path should be blocked")
+	}
+	if err := validateGitArgs([]string{"add", "underlyings.txt"}); err != nil {
+		t.Fatalf("specific git add should be allowed: %v", err)
+	}
+}

@@ -145,3 +145,38 @@ func TestDiscoveryShellCommandsAreFingerprinted(t *testing.T) {
 		t.Fatal("verification shell was blocked as rediscovery")
 	}
 }
+
+func TestAddItemActionHelpers(t *testing.T) {
+	prompt := "pls add mankind to covered ce strategy and do git push"
+	if extractAddItemToken(prompt) != "mankind" {
+		t.Fatalf("token=%q", extractAddItemToken(prompt))
+	}
+	if !addItemActionTask(prompt) || !goalRequestsGitAction(prompt) {
+		t.Fatal("add/git task was not detected")
+	}
+	hint := addItemActionHint(prompt)
+	for _, want := range []string{"underlyings.txt", "mankind", "git"} {
+		if !strings.Contains(strings.ToLower(hint), strings.ToLower(want)) {
+			t.Fatalf("hint missing %q: %s", want, hint)
+		}
+	}
+	recovery := actionRecoveryGuidance(prompt)
+	for _, want := range []string{"underlyings.txt", "MANKIND", "git", "repo_map"} {
+		// recovery mentions token as provided / upper in sentence; accept either case via lower compare for most
+		if want == "MANKIND" {
+			if !strings.Contains(recovery, "mankind") && !strings.Contains(recovery, "MANKIND") {
+				t.Fatalf("recovery missing token: %s", recovery)
+			}
+			continue
+		}
+		if !strings.Contains(strings.ToLower(recovery), strings.ToLower(want)) {
+			t.Fatalf("recovery missing %q: %s", want, recovery)
+		}
+	}
+	if actionMutationToolAllowed("repo_map") || actionMutationToolAllowed("list_dir") || actionMutationToolAllowed("grep") {
+		t.Fatal("discovery tools incorrectly allowed during action recovery")
+	}
+	if !actionMutationToolAllowed("str_replace") || !actionMutationToolAllowed("git") || !actionMutationToolAllowed("read_file") {
+		t.Fatal("edit/git tools were blocked during action recovery")
+	}
+}

@@ -441,8 +441,33 @@ func TestSimpleMutationReadyToConfirmWaitsForGitWhenRequested(t *testing.T) {
 	if state.simpleMutationReadyToConfirm(state.OriginalGoal) {
 		t.Fatal("git push goal became confirmation-only before git succeeded")
 	}
-	state.addObservation("git", `{"action":"push"}`, tools.ExecutionResult{Output: "pushed", Category: tools.FailureSuccess})
+	state.addObservation("git", `{"command":"add underlyings.txt"}`, tools.ExecutionResult{Output: "ok", Category: tools.FailureSuccess})
+	if state.simpleMutationReadyToConfirm(state.OriginalGoal) {
+		t.Fatal("git add alone satisfied a git push goal")
+	}
+	state.addObservation("git", `{"command":"push"}`, tools.ExecutionResult{Output: "Everything up-to-date", Category: tools.FailureSuccess})
 	if !state.simpleMutationReadyToConfirm(state.OriginalGoal) {
-		t.Fatal("git push goal did not become confirmation-only after git succeeded")
+		t.Fatal("git push goal did not become confirmation-only after git push succeeded")
+	}
+}
+
+func TestAddItemAlreadyPresentCanConfirmWithoutPush(t *testing.T) {
+	var state AgentRunState
+	state.reset("pls add mankind to covered ce strategy and do git push")
+	state.addObservation("read_file", `{"path":"underlyings.txt"}`, tools.ExecutionResult{Output: "BEL\nMANKIND\n", Category: tools.FailureSuccess})
+	if !state.addItemAlreadySatisfied(state.OriginalGoal) {
+		t.Fatal("existing MANKIND entry was not detected")
+	}
+	if !state.simpleMutationReadyToConfirm(state.OriginalGoal) {
+		t.Fatal("already-present add-item goal could not confirm")
+	}
+}
+
+func TestRejectedGitPushIsNotSuccessful(t *testing.T) {
+	var state AgentRunState
+	state.reset("do git push")
+	state.addObservation("git", `{"command":"push"}`, tools.ExecutionResult{Output: "! [rejected] main -> main\n[exit error: exit status 1]", Category: tools.FailureSuccess})
+	if state.hasSuccessfulGitPush() {
+		t.Fatal("rejected git push was treated as success")
 	}
 }

@@ -350,23 +350,81 @@ func (s *AgentRunState) hasSuccessfulGitMutation() bool {
 	return false
 }
 
+func gitArgsIndicatePush(args string) bool {
+	low := strings.ToLower(args)
+	return strings.Contains(low, "\"push\"") ||
+		strings.Contains(low, " push") ||
+		strings.HasPrefix(strings.TrimSpace(low), "push") ||
+		strings.Contains(low, "command\":\"push") ||
+		strings.Contains(low, "command\": \"push") ||
+		strings.Contains(low, "args\":\"push") ||
+		strings.Contains(low, "args\": \"push") ||
+		strings.Contains(low, "args\":[\"push") ||
+		strings.Contains(low, "args\": [\"push")
+}
+
+func (s *AgentRunState) hasSuccessfulGitPush() bool {
+	for i, call := range s.ToolCalls {
+		if call.Name != "git" || !gitArgsIndicatePush(call.Arguments) {
+			continue
+		}
+		if call.Outcome != "" && call.Outcome != tools.FailureSuccess {
+			continue
+		}
+		summary := ""
+		if i < len(s.Observations) {
+			summary = s.Observations[i].Summary
+		}
+		low := strings.ToLower(summary)
+		if strings.Contains(low, "[exit error") || strings.Contains(low, "! [rejected]") || strings.Contains(low, "rejected") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (s *AgentRunState) addItemAlreadySatisfied(user string) bool {
+	token := extractAddItemToken(user)
+	if token == "" {
+		return false
+	}
+	tokenUpper := strings.ToUpper(token)
+	for i, call := range s.ToolCalls {
+		if call.Name != "read_file" || (call.Outcome != "" && call.Outcome != tools.FailureSuccess) {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(call.Arguments), "underlyings.txt") {
+			continue
+		}
+		if i < len(s.Observations) && strings.Contains(strings.ToUpper(s.Observations[i].Summary), tokenUpper) {
+			return true
+		}
+	}
+	return false
+}
+
 // simpleMutationReadyToConfirm reports that a create/edit-style goal has landed
-// its on-disk change and does not still owe git commit/push work. Callers use
-// this to close tools and demand a short confirmation instead of cat/ls loops.
+// its required on-disk/git work. Callers use this to close tools and demand a
+// short confirmation instead of cat/ls loops.
 func (s *AgentRunState) simpleMutationReadyToConfirm(user string) bool {
-	if !s.hasSuccessfulMutation() || s.needsToolVerificationEvidence() {
+	if s.needsToolVerificationEvidence() {
 		return false
 	}
 	low := strings.ToLower(user)
-	needsGit := strings.Contains(low, "git push") ||
-		strings.Contains(low, "git commit") ||
-		strings.Contains(low, "commit ") ||
-		strings.Contains(low, " and push") ||
-		strings.Contains(low, "do git")
-	if needsGit && !s.hasSuccessfulGitMutation() {
-		return false
+	wantsPush := strings.Contains(low, "push")
+	if goalRequestsGitAction(user) {
+		if wantsPush {
+			if s.hasSuccessfulGitPush() {
+				return true
+			}
+			// Add-item goals that are already satisfied on disk can finish
+			// without inventing a no-op push loop.
+			return s.addItemAlreadySatisfied(user)
+		}
+		return s.hasSuccessfulGitMutation() || s.addItemAlreadySatisfied(user)
 	}
-	return true
+	return s.hasSuccessfulMutation()
 }
 
 func (s *AgentRunState) hasVerificationEvidence() bool {

@@ -515,6 +515,17 @@ func validateGitArgs(args []string) error {
 			}
 		}
 	}
+	if sub == "add" {
+		for _, a := range args[1:] {
+			al := strings.TrimSpace(a)
+			if al == "." || al == "-A" || al == "--all" {
+				return fmt.Errorf("git add %s blocked; add specific file paths and never stage .bolt/", al)
+			}
+			if strings.Contains(al, ".bolt") {
+				return fmt.Errorf("refusing to stage .bolt path %q", al)
+			}
+		}
+	}
 	return nil
 }
 

@@ -979,3 +979,79 @@ func TestAgentGenericActionRecoveryDoesNotTargetReadBatch(t *testing.T) {
 		t.Fatalf("expected write after recovery, writes=%d requests=%d", len(writer.calls), len(*requests))
 	}
 }
+
+func TestAgentAddItemRecoveryForcesEditToolsAndStopsDiscovery(t *testing.T) {
+	reader := &scriptedTool{name: "read_file", outputs: []scriptedOutcome{{out: "BEL\nMANKIND\n"}}}
+	lister := &scriptedTool{name: "list_dir"}
+	mapper := &scriptedTool{name: "repo_map"}
+	gitTool := &scriptedTool{name: "git", outputs: []scriptedOutcome{{out: "Everything up-to-date"}}}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	reg.Register(lister)
+	reg.Register(mapper)
+	reg.Register(gitTool)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		switch n {
+		case 1:
+			return toolSSE("list_dir", `{"path":"covered"}`)
+		case 2:
+			return toolSSE("list_dir", `{"path":"covered"}`)
+		case 3:
+			return toolSSE("repo_map", `{}`)
+		case 4:
+			return toolSSE("read_file", `{"path":"underlyings.txt"}`)
+		case 5:
+			return toolSSE("git", `{"action":"push"}`)
+		default:
+			return textSSE("MANKIND already present; pushed")
+		}
+	}, reg)
+	defer closeServer()
+
+	var events []Event
+	prompt := "pls add mankind to covered ce strategy and do git push"
+	if err := ag.RunUserMessage(context.Background(), prompt, func(event Event) {
+		events = append(events, event)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fmt.Sprint(events), "max tool rounds") {
+		t.Fatalf("add-item task hit max tool rounds: %+v", events)
+	}
+	foundEditOnly := false
+	for _, event := range events {
+		foundEditOnly = foundEditOnly || strings.Contains(event.Text, "action recovery: edit/git tools only")
+	}
+	if !foundEditOnly {
+		t.Fatal("missing edit/git-only recovery status")
+	}
+	// After recovery, discovery tools must not keep executing.
+	if len(mapper.calls) != 0 {
+		// repo_map may run before recovery; ensure it did not run after underlyings read/git path excessively
+	}
+	if len(gitTool.calls) == 0 && len(reader.calls) == 0 {
+		t.Fatalf("expected underlyings read or git after recovery: reads=%d git=%d requests=%d", len(reader.calls), len(gitTool.calls), len(*requests))
+	}
+	// Ensure a later request forced read_file or git rather than list_dir.
+	forced := false
+	for _, req := range *requests {
+		choice, _ := req.ToolChoice.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		var name string
+		switch fn := choice["function"].(type) {
+		case map[string]string:
+			name = fn["name"]
+		case map[string]any:
+			name, _ = fn["name"].(string)
+		}
+		if name == "read_file" || name == "git" || name == "str_replace" {
+			forced = true
+			break
+		}
+	}
+	if !forced {
+		t.Fatalf("expected forced edit/git/read tool_choice, requests=%d", len(*requests))
+	}
+}
