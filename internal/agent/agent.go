@@ -364,6 +364,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	payload, attached := expandMentions(user)
 	if diagnosisTask {
 		payload += "\n\n[agenterm] Debug with evidence first: read decision_log.csv and strategy code for SKIP/HOLD reasons before editing. Do not rewrite workflow YAML unless the root cause is proven to be the workflow file."
+		if symbol := extractDiagnosisSymbol(user); symbol != "" {
+			payload += "\n[agenterm] Diagnosis order for " + symbol + ": first call grep for the exact symbol in decision_log.csv; next map the observed reason in common/decision_audit.py or common/delivery_strategy.py; then inspect the matching dated monitor/data/intraday/eod_*.json or logs/bot_*.log line; inspect .github/workflows/bot.yml or the URL last. Do not begin with the workflow URL."
+		}
 		emit(Event{Kind: EventStatus, Text: "diagnosis mode: inspect decision evidence before edits"})
 	}
 	if continued {
@@ -701,6 +704,36 @@ Do not answer with only a markdown plan or shell snippets.`,
 				filtered = append(filtered, tool)
 			}
 			roundTools = filtered
+			if round == 0 && toolsUsed == 0 {
+				// Some OpenAI-compatible local servers treat tool_choice as a
+				// preference. Expose only grep on the first diagnosis turn so a
+				// workflow URL cannot displace the symbol-scoped evidence search.
+				grepOnly := make([]llm.Tool, 0, 1)
+				for _, tool := range roundTools {
+					if tool.Function.Name == "grep" {
+						grepOnly = append(grepOnly, tool)
+					}
+				}
+				if len(grepOnly) > 0 {
+					roundTools = grepOnly
+				}
+			} else if round > 0 && (!diagnosisHasLogEvidence(user, a.RunState) || !diagnosisHasWorkflowEvidence(user, a.RunState)) {
+				// After the decision and source mapping are known, require the
+				// dated operational evidence before allowing more broad reads.
+				wanted := "grep"
+				if diagnosisHasLogEvidence(user, a.RunState) && !diagnosisHasWorkflowEvidence(user, a.RunState) {
+					wanted = "read_file"
+				}
+				focused := make([]llm.Tool, 0, 1)
+				for _, tool := range roundTools {
+					if tool.Function.Name == wanted {
+						focused = append(focused, tool)
+					}
+				}
+				if len(focused) > 0 {
+					roundTools = focused
+				}
+			}
 		}
 		actionEditOnly := actionRecoveryNudged && !workerPoolTask && !processChannelTask && !diagnosisTask &&
 			!(a.RunState.hasMutation() || poolSourceMutated) && len(roundTools) > 0
@@ -755,6 +788,13 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if len(roundTools) > 0 {
 			req.Tools = roundTools
 			req.ToolChoice = "auto"
+			diagnosisGrepAvailable := false
+			for _, tool := range roundTools {
+				if tool.Function.Name == "grep" {
+					diagnosisGrepAvailable = true
+					break
+				}
+			}
 			if workerPoolTask && round == 0 && !knownPoolSourceRead {
 				// Force the first model turn onto read_file so the known
 				// implementation is inspected before more repository discovery.
@@ -774,9 +814,25 @@ Do not answer with only a markdown plan or shell snippets.`,
 				// instead of another rediscovery loop that burns the round budget.
 				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "run_tests"}}
 			} else if diagnosisInspectOnly {
-				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "grep"}}
+				forceName := "grep"
+				if !diagnosisGrepAvailable {
+					forceName = "auto"
+				}
+				if forceName == "auto" {
+					req.ToolChoice = "auto"
+				} else {
+					req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": forceName}}
+				}
 			} else if diagnosisTask && round == 0 && toolsUsed == 0 {
-				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
+				// Start symbol diagnosis with a narrow search when available. A
+				// model-selected read_file often follows the workflow URL first,
+				// which can consume the first turn without collecting the local
+				// decision row that explains the outcome.
+				firstDiagnosisTool := "read_file"
+				if diagnosisGrepAvailable {
+					firstDiagnosisTool = "grep"
+				}
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": firstDiagnosisTool}}
 			} else if (actionEditOnly || (goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") && !a.RunState.hasSuccessfulGitPush() && (a.RunState.hasSuccessfulMutation() || a.RunState.hasSuccessfulGitMutation()))) && !forceSimpleConfirm {
 				// After stalled rediscovery, force an edit/git/diagnosis tool so the
 				// remaining budget cannot be spent on another repo_map/list_dir loop.
@@ -925,6 +981,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
+			if diagnosisTask && !a.RunState.hasMutation() && diagnosisHasLogEvidence(user, a.RunState) {
+				// A local model may emit an ignored tool call after the required
+				// decision/source/log evidence is already present. Close with the
+				// deterministic evidence report instead of returning an empty or
+				// generic "verified" response.
+				a.RunState.Phase = PhaseBlocked
+				emit(Event{Kind: EventToken, Text: diagnosisSynthesisFromState(user, a.RunState)})
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			if synthesisOnly && synthesisFallbackArmed && !a.RunState.hasMutation() {
 				a.RunState.Phase = PhaseBlocked
 				fallback := noProgressSynthesisFallback()
@@ -1160,6 +1226,18 @@ Do not answer with only a markdown plan or shell snippets.`,
 		for i := range msg.ToolCalls {
 			msg.ToolCalls[i].Function.Name = normalizeToolName(msg.ToolCalls[i].Function.Name, knownToolNames)
 			msg.ToolCalls[i].Function.Arguments = sanitizeToolArgsJSON(msg.ToolCalls[i].Function.Name, msg.ToolCalls[i].Function.Arguments)
+			if diagnosisTask && round == 0 && toolsUsed == 0 && msg.ToolCalls[i].Function.Name == "grep" {
+				msg.ToolCalls[i].Function.Arguments = forceDiagnosisSymbolSearch(msg.ToolCalls[i].Function.Arguments, user)
+			}
+			if diagnosisTask && round == 1 && msg.ToolCalls[i].Function.Name == "grep" {
+				msg.ToolCalls[i].Function.Arguments = forceDiagnosisSourceSearch(msg.ToolCalls[i].Function.Arguments)
+			}
+			if diagnosisTask && round >= 2 && msg.ToolCalls[i].Function.Name == "grep" && !diagnosisHasLogEvidence(user, a.RunState) {
+				msg.ToolCalls[i].Function.Arguments = forceDiagnosisLogSearch(msg.ToolCalls[i].Function.Arguments, user)
+			}
+			if diagnosisTask && round > 0 && msg.ToolCalls[i].Function.Name == "read_file" && diagnosisHasDecisionEvidence(user, a.RunState) && diagnosisHasSourceEvidence(a.RunState) && diagnosisHasLogEvidence(user, a.RunState) && !diagnosisHasWorkflowEvidence(user, a.RunState) {
+				msg.ToolCalls[i].Function.Arguments = forceDiagnosisWorkflowRead(msg.ToolCalls[i].Function.Arguments)
+			}
 			if msg.ToolCalls[i].ID == "" {
 				msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", round, i)
 			}
@@ -1561,6 +1639,62 @@ Do not answer with only a markdown plan or shell snippets.`,
 	emit(Event{Kind: EventError, Text: "max tool rounds reached"})
 	emit(Event{Kind: EventDone})
 	return nil
+}
+
+// forceDiagnosisSymbolSearch makes the first diagnosis search deterministic
+// for local OpenAI-compatible models that ignore tool_choice or paraphrase the
+// requested symbol into a broad grep pattern.
+func forceDiagnosisSymbolSearch(args, user string) string {
+	symbol := extractDiagnosisSymbol(user)
+	if symbol == "" {
+		return args
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(args), &payload); err != nil {
+		return args
+	}
+	payload["pattern"] = symbol
+	payload["path"] = "decision_log.csv"
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return args
+	}
+	return string(encoded)
+}
+
+func forceDiagnosisLogSearch(args, user string) string {
+	return forceDiagnosisSearchArgs(args, extractDiagnosisSymbol(user), "logs")
+}
+
+func forceDiagnosisSourceSearch(args string) string {
+	return forceDiagnosisSearchArgs(args, "SKIP_ASSIGNMENT_NOT_REQUIRED", "common")
+}
+
+func forceDiagnosisSearchArgs(args, pattern, path string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(args), &payload); err != nil {
+		return args
+	}
+	payload["pattern"] = pattern
+	payload["path"] = path
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return args
+	}
+	return string(encoded)
+}
+
+func forceDiagnosisWorkflowRead(args string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(args), &payload); err != nil {
+		return args
+	}
+	payload["path"] = ".github/workflows/bot.yml"
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return args
+	}
+	return string(encoded)
 }
 
 type streamBridge struct {

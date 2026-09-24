@@ -768,7 +768,7 @@ func compactDiagnosisText(s string, n int) string {
 	// the def/return pair and leaves only an unhelpful filename.
 	first := n / 3
 	last := n / 4
-	markers := []string{"def resolve_", "resolve_exit_action_and_reason", "SKIP_ASSIGNMENT_NOT_REQUIRED", "return \"SKIP\"", "workflow", "schedule"}
+	markers := []string{"def resolve_", "resolve_exit_action_and_reason", "SKIP_ASSIGNMENT_NOT_REQUIRED", "return \"SKIP\"", "DIAGONAL", "broker position disappeared", "No carried EQ", "workflow", "schedule"}
 	selected := make([]string, 0, 12)
 	seen := map[string]bool{}
 	for _, line := range strings.Split(s, "\n") {

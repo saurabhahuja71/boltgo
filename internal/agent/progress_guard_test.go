@@ -218,6 +218,15 @@ func TestNaturalMankindDiagnosisGetsBoundedSynthesis(t *testing.T) {
 	}
 }
 
+func TestDiagnosisRecoveryPrioritizesCoveredCallEvidence(t *testing.T) {
+	guidance := diagnosisRecoveryGuidance("check why mankind ce dont sell today ? https://github.com/Tradebots71/covered_call_bot/actions/workflows/bot.yml")
+	for _, want := range []string{"decision_log.csv", "common/decision_audit.py", "monitor/data/intraday/eod_*.json", "logs/bot_*.log"} {
+		if !strings.Contains(guidance, want) {
+			t.Fatalf("diagnosis guidance missing %q: %s", want, guidance)
+		}
+	}
+}
+
 func TestContinuationAndDiagnosisHelpers(t *testing.T) {
 	if !continuationRequest("proceed") || !continuationRequest("keep going") {
 		t.Fatal("continuationRequest missed proceed/keep going")
