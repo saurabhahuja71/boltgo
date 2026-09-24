@@ -527,6 +527,10 @@ func diagnosisRecoveryGuidance(user string) string {
 	return guidance
 }
 
+func diagnosisSynthesisInstruction() string {
+	return "DIAGNOSIS SYNTHESIS: stop calling tools. Using only evidence already collected, state the root cause for why the symbol was not sold, include observed SKIP/HOLD reason codes, identify the responsible file/function, and distinguish missing evidence from a proven workflow failure. Do not invent a fix or rewrite workflow YAML."
+}
+
 // addItemPushOnlyGoal is the narrow "add X … and git push" request without an
 // explicit diagnosis ask. Those should finish after list update/push, not after
 // a long decision_log tour.

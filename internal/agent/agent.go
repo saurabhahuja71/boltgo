@@ -925,6 +925,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
+			if synthesisOnly && synthesisFallbackArmed && !a.RunState.hasMutation() {
+				a.RunState.Phase = PhaseBlocked
+				fallback := noProgressSynthesisFallback()
+				if diagnosisTask {
+					fallback = diagnosisSynthesisFromState(user, a.RunState)
+				}
+				emit(Event{Kind: EventToken, Text: fallback})
+				emit(Event{Kind: EventDone})
+				return nil
+			}
 			if synthesisFallbackArmed && synthesisPlanningText(msg.Content) && !a.RunState.hasMutation() {
 				a.RunState.Phase = PhaseBlocked
 				fallback := noProgressSynthesisFallback()
@@ -1457,6 +1467,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 			emit(Event{Kind: EventDone})
 			return nil
 		}
+		// Keep read-only diagnosis from exhausting the whole autonomy budget when
+		// a provider keeps producing slightly different grep calls. The global
+		// action budget may be deliberately large, so use a fixed investigation
+		// ceiling and reserve the next model round for evidence-only synthesis.
+		if diagnosisTask && !synthesisOnly && !a.RunState.hasMutation() && round >= 7 {
+			synthesisOnly = true
+			synthesisFallbackArmed = true
+			a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: diagnosisSynthesisInstruction()})
+			emit(Event{Kind: EventStatus, Text: "diagnosis budget reached; requesting evidence-only synthesis"})
+		}
 		// Finish immediately once a requested git push has succeeded. Extra
 		// verify rounds after push are what tip add-item tasks into
 		// "max tool rounds reached".
@@ -1487,7 +1507,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 						// the remaining 40+ heavy-task rounds.
 						synthesisOnly = true
 						synthesisFallbackArmed = true
-						a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "DIAGNOSIS SYNTHESIS: stop calling tools. Using only evidence already collected, state the root cause for why the symbol was not sold (include SKIP/HOLD reason codes if seen), what file/function owns that decision, and the concrete fix. If evidence is insufficient, say exactly what is missing."})
+						a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: diagnosisSynthesisInstruction()})
 						emit(Event{Kind: EventStatus, Text: "diagnosis stall; synthesize root cause from collected evidence"})
 					} else if keepActionToolsAfterNoProgress(user) && !a.RunState.simpleMutationReadyToConfirm(user) {
 						// An implementation request that has not mutated yet must

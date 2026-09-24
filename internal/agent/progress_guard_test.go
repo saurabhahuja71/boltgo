@@ -202,6 +202,22 @@ func TestAddItemPushOnlyGoalVsDiagnosis(t *testing.T) {
 	}
 }
 
+func TestNaturalMankindDiagnosisGetsBoundedSynthesis(t *testing.T) {
+	query := "check why mankind ce dont sell today ? https://github.com/Tradebots71/covered_call_bot/actions/workflows/bot.yml"
+	if !diagnosisOriented(query) || !isActionRequest(query) {
+		t.Fatalf("natural-language workflow diagnosis was not classified: diagnosis=%v action=%v", diagnosisOriented(query), isActionRequest(query))
+	}
+	if rounds, _, _ := actionExecutionBudget(query); rounds < 8 {
+		t.Fatalf("natural-language diagnosis budget too small: %d", rounds)
+	}
+	text := diagnosisSynthesisInstruction()
+	for _, want := range []string{"stop calling tools", "SKIP/HOLD", "missing evidence", "workflow YAML"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("synthesis instruction missing %q: %s", want, text)
+		}
+	}
+}
+
 func TestContinuationAndDiagnosisHelpers(t *testing.T) {
 	if !continuationRequest("proceed") || !continuationRequest("keep going") {
 		t.Fatal("continuationRequest missed proceed/keep going")
