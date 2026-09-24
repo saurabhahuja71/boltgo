@@ -1104,3 +1104,51 @@ func TestAgentAddItemPushCompletesImmediatelyAfterGitPush(t *testing.T) {
 		t.Fatalf("used too many rounds after push: %d", len(*requests))
 	}
 }
+
+func TestAgentProceedContinuesPriorDiagnosisWithoutAsking(t *testing.T) {
+	reader := &scriptedTool{name: "read_file", outputs: []scriptedOutcome{{out: "2026-09-24,MANKIND,SKIP,SKIP_ASSIGNMENT_NOT_REQUIRED,HOLD"}}}
+	writer := &scriptedTool{name: "write_file"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	reg.Register(writer)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		if n == 1 {
+			return toolSSE("read_file", `{"path":"decision_log.csv"}`)
+		}
+		return textSSE("MANKIND skips with SKIP_ASSIGNMENT_NOT_REQUIRED because exit HOLD; no EQ cover open.")
+	}, reg)
+	defer closeServer()
+
+	ag.History = []llm.Message{
+		{Role: llm.RoleUser, Content: "its not about schedule why mankind was not sold; debug deeply and fix"},
+		{Role: llm.RoleAssistant, Content: "I will investigate."},
+	}
+	var out, errText string
+	var askedClarify bool
+	if err := ag.RunUserMessage(context.Background(), "proceed", func(event Event) {
+		if event.Kind == EventError {
+			errText += event.Text
+		}
+		if event.Kind == EventToken {
+			out += event.Text
+			low := strings.ToLower(event.Text)
+			if strings.Contains(low, "more context") || strings.Contains(low, "clarify") || strings.Contains(low, "what you'd like") {
+				askedClarify = true
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if askedClarify {
+		t.Fatalf("asked for clarification on proceed: %q", out)
+	}
+	if strings.Contains(errText, "max tool rounds") || strings.Contains(errText, "bounded autonomy") {
+		t.Fatalf("diagnosis proceed failed: %q", errText)
+	}
+	if len(reader.calls) == 0 {
+		t.Fatalf("expected decision_log read on proceed, requests=%d out=%q", len(*requests), out)
+	}
+	if len(writer.calls) != 0 {
+		t.Fatalf("diagnosis proceed wrote files without proven fix: %v", writer.calls)
+	}
+}

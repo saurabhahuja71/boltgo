@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/saurabhahuja71/agenterm/internal/llm"
 )
 
 func TestInvestigationFingerprintNormalizesEquivalentArguments(t *testing.T) {
@@ -197,5 +199,34 @@ func TestAddItemPushOnlyGoalVsDiagnosis(t *testing.T) {
 	hint := addItemActionHint(pushOnly)
 	if strings.Contains(strings.ToLower(hint), "decision_log") {
 		t.Fatalf("push-only hint should not force decision_log tour: %s", hint)
+	}
+}
+
+func TestContinuationAndDiagnosisHelpers(t *testing.T) {
+	if !continuationRequest("proceed") || !continuationRequest("keep going") {
+		t.Fatal("continuationRequest missed proceed/keep going")
+	}
+	if continuationRequest("pls add mankind to covered ce strategy") {
+		t.Fatal("normal request treated as continuation")
+	}
+	history := []llm.Message{
+		{Role: llm.RoleUser, Content: "pls add mankind to covered ce strategy and do git push"},
+		{Role: llm.RoleAssistant, Content: "done"},
+		{Role: llm.RoleUser, Content: "its not about schedule why mankind was not sold in all scheduled run we need to fix it after debugging it deeply"},
+		{Role: llm.RoleAssistant, Content: "ok"},
+		{Role: llm.RoleUser, Content: "ACTION RECOVERY: discovery tools are disabled"},
+	}
+	prior := priorUserGoal(history)
+	if !strings.Contains(strings.ToLower(prior), "not sold") {
+		t.Fatalf("priorUserGoal=%q, want diagnosis goal", prior)
+	}
+	if !diagnosisOriented(prior) {
+		t.Fatal("prior diagnosis goal not detected")
+	}
+	if diagnosisToolAllowed("repo_map") || diagnosisToolAllowed("list_dir") || diagnosisToolAllowed("write_file") || diagnosisToolAllowed("find_files") || diagnosisToolAllowed("run_shell") {
+		t.Fatal("diagnosis recovery allowed unsafe rediscovery/write/shell tools")
+	}
+	if !diagnosisToolAllowed("read_file") || !diagnosisToolAllowed("grep") || !diagnosisToolAllowed("str_replace") {
+		t.Fatal("diagnosis recovery blocked needed inspect/fix tools")
 	}
 }

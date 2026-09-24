@@ -347,10 +347,28 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: a.Scheduler.StatusSummary()})
 	}
 
+	// Short continuations like "proceed" inherit the previous real user goal so
+	// multi-turn debugging does not collapse into "what should I do?".
+	continued := false
+	if continuationRequest(user) {
+		if prior := priorUserGoal(a.History); prior != "" {
+			user = prior
+			continued = true
+			emit(Event{Kind: EventStatus, Text: "continuing prior task"})
+		}
+	}
+	diagnosisTask := diagnosisOriented(user)
 	workerPoolTask := workerPoolLifecycleTask(user) && isActionRequest(user)
 	processChannelTask := orderedChannelProcessTask(user) && isActionRequest(user)
 	// @path mentions → attach file/dir context.
 	payload, attached := expandMentions(user)
+	if diagnosisTask {
+		payload += "\n\n[agenterm] Debug with evidence first: read decision_log.csv and strategy code for SKIP/HOLD reasons before editing. Do not rewrite workflow YAML unless the root cause is proven to be the workflow file."
+		emit(Event{Kind: EventStatus, Text: "diagnosis mode: inspect decision evidence before edits"})
+	}
+	if continued {
+		payload += "\n\n[agenterm] The user said proceed/continue — resume this task immediately with tools. Do not ask what to do."
+	}
 	if attached != "" {
 		emit(Event{Kind: EventStatus, Text: "attached @" + attached})
 	}
@@ -384,8 +402,8 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		}
 	}
 
-	// Action requests: nudge the model in the same user turn so it executes tools.
-	if isActionRequest(user) {
+	// Action/diagnosis requests: nudge the model in the same user turn so it executes tools.
+	if isActionRequest(user) || diagnosisTask || continued {
 		payload = payload + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git/grep/run_tests). Do not only print steps."
 		if workerPoolTask {
 			payload += "\n[agenterm] " + workerPoolActionGuidance()
@@ -431,7 +449,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	var toolSchemas []llm.Tool
 	attachTools := a.Cfg.EnableTools && a.Tools != nil && !isTrivialChat(user) && !a.PlanMode
 	// @mentions or action → always allow tools (unless plan mode)
-	if a.Cfg.EnableTools && a.Tools != nil && !a.PlanMode && (attached != "" || isActionRequest(user)) {
+	if a.Cfg.EnableTools && a.Tools != nil && !a.PlanMode && (attached != "" || isActionRequest(user) || diagnosisTask || continued) {
 		attachTools = true
 	}
 	if attachTools {
@@ -440,21 +458,28 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: "tools skipped (chat-only turn)"})
 	}
 
-	budgetRounds, budgetToolCalls, budgetToolCap := actionExecutionBudget(user)
+	budgetUser := user
+	if diagnosisTask || continued {
+		// Ensure diagnosis/continuation turns get action budgets even when the
+		// short follow-up text alone would look like chat.
+		budgetUser = user + " diagnose and fix"
+	}
+	budgetRounds, budgetToolCalls, budgetToolCap := actionExecutionBudget(budgetUser)
 	maxRounds := a.MaxToolRounds
+	raiseBudgets := isActionRequest(user) || diagnosisTask || continued
 	if maxRounds <= 0 {
 		maxRounds = budgetRounds
-	} else if isActionRequest(user) && maxRounds < budgetRounds && a.MaxToolRounds >= 8 {
+	} else if raiseBudgets && maxRounds < budgetRounds && a.MaxToolRounds >= 8 {
 		// Raise production action budgets for end-to-end diagnose/fix/verify work.
 		// Explicit low caps set by tests (below the production default of 8) stay put.
 		maxRounds = budgetRounds
-	} else if isActionRequest(user) && maxRounds < 12 && a.MaxToolRounds >= 8 {
+	} else if raiseBudgets && maxRounds < 12 && a.MaxToolRounds >= 8 {
 		maxRounds = 12
 	}
 	maxIterations := a.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = maxRounds * 2
-	} else if isActionRequest(user) && maxIterations < maxRounds*2 && a.MaxIterations >= 16 {
+	} else if raiseBudgets && maxIterations < maxRounds*2 && a.MaxIterations >= 16 {
 		// Only raise the production default iteration budget; keep explicit
 		// low test caps intact so autonomy bounds remain enforceable.
 		maxIterations = maxRounds * 2
@@ -462,7 +487,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	maxToolCalls := a.MaxToolCalls
 	if maxToolCalls <= 0 {
 		maxToolCalls = budgetToolCalls
-	} else if isActionRequest(user) && maxToolCalls < budgetToolCalls && a.MaxToolCalls >= 24 {
+	} else if raiseBudgets && maxToolCalls < budgetToolCalls && a.MaxToolCalls >= 24 {
 		maxToolCalls = budgetToolCalls
 	}
 	maxRetries := a.MaxRetries
@@ -549,6 +574,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		}
 		if actionRecoveryNudged && !(a.RunState.hasMutation() || poolSourceMutated) && !processChannelTask {
 			recovery := actionRecoveryGuidance(user)
+			if diagnosisTask {
+				recovery = diagnosisRecoveryGuidance(user)
+			}
 			if workerPoolTask {
 				recovery = "ACTION RECOVERY: stop rereading the same source. Implement the requested change now with str_replace or write_file on internal/agent/read_batch.go (surgical patch only), then run the requested tests. Do not make another read-only search."
 			}
@@ -662,7 +690,21 @@ Do not answer with only a markdown plan or shell snippets.`,
 			roundTools = filtered
 			emit(Event{Kind: EventStatus, Text: "worker-pool mode: edit/verify tools only"})
 		}
-		actionEditOnly := actionRecoveryNudged && !workerPoolTask && !processChannelTask &&
+		if diagnosisTask && len(roundTools) > 0 {
+			// Diagnosis must not wholesale rewrite files like workflow YAML.
+			// Surgical str_replace remains available after evidence is gathered.
+			filtered := make([]llm.Tool, 0, len(roundTools))
+			for _, tool := range roundTools {
+				if tool.Function.Name == "write_file" {
+					continue
+				}
+				filtered = append(filtered, tool)
+			}
+			roundTools = filtered
+		}
+		actionEditOnly := actionRecoveryNudged && !workerPoolTask && !processChannelTask && !diagnosisTask &&
+			!(a.RunState.hasMutation() || poolSourceMutated) && len(roundTools) > 0
+		diagnosisInspectOnly := actionRecoveryNudged && diagnosisTask && !workerPoolTask && !processChannelTask &&
 			!(a.RunState.hasMutation() || poolSourceMutated) && len(roundTools) > 0
 		if actionEditOnly {
 			filtered := make([]llm.Tool, 0, len(roundTools))
@@ -673,6 +715,16 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			roundTools = filtered
 			emit(Event{Kind: EventStatus, Text: "action recovery: edit/git tools only"})
+		}
+		if diagnosisInspectOnly {
+			filtered := make([]llm.Tool, 0, len(roundTools))
+			for _, tool := range roundTools {
+				if diagnosisToolAllowed(tool.Function.Name) {
+					filtered = append(filtered, tool)
+				}
+			}
+			roundTools = filtered
+			emit(Event{Kind: EventStatus, Text: "diagnosis recovery: inspect/fix tools only"})
 		}
 		if processChannelTask && processVerified && len(roundTools) > 0 {
 			roundTools = nil
@@ -721,6 +773,10 @@ Do not answer with only a markdown plan or shell snippets.`,
 				// Existing Process source is known: force one verification pass
 				// instead of another rediscovery loop that burns the round budget.
 				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "run_tests"}}
+			} else if diagnosisInspectOnly {
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "grep"}}
+			} else if diagnosisTask && round == 0 && toolsUsed == 0 {
+				req.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": "read_file"}}
 			} else if (actionEditOnly || (goalRequestsGitAction(user) && strings.Contains(strings.ToLower(user), "push") && !a.RunState.hasSuccessfulGitPush() && (a.RunState.hasSuccessfulMutation() || a.RunState.hasSuccessfulGitMutation()))) && !forceSimpleConfirm {
 				// After stalled rediscovery, force an edit/git/diagnosis tool so the
 				// remaining budget cannot be spent on another repo_map/list_dir loop.
@@ -838,6 +894,25 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 			}
 		}
+		// Drop tool calls that are outside the current allow-list. Text-tool
+		// recovery can otherwise reintroduce list_dir/repo_map/write_file during
+		// diagnosis recovery and undo the filter above.
+		if len(msg.ToolCalls) > 0 && (diagnosisInspectOnly || actionEditOnly) {
+			allowed := map[string]bool{}
+			for _, tool := range roundTools {
+				allowed[tool.Function.Name] = true
+			}
+			filteredCalls := msg.ToolCalls[:0]
+			for _, call := range msg.ToolCalls {
+				name := call.Function.Name
+				if allowed[name] {
+					filteredCalls = append(filteredCalls, call)
+					continue
+				}
+				emit(Event{Kind: EventStatus, Text: "ignored out-of-policy tool call: " + name})
+			}
+			msg.ToolCalls = filteredCalls
+		}
 		unsupportedToolMarkup := hasUnsupportedToolMarkup(msg.Content)
 		if unsupportedToolMarkup {
 			a.compatibilityMalformedToolMarkup = true
@@ -852,7 +927,11 @@ Do not answer with only a markdown plan or shell snippets.`,
 		if len(msg.ToolCalls) == 0 {
 			if synthesisFallbackArmed && synthesisPlanningText(msg.Content) && !a.RunState.hasMutation() {
 				a.RunState.Phase = PhaseBlocked
-				emit(Event{Kind: EventToken, Text: noProgressSynthesisFallback()})
+				fallback := noProgressSynthesisFallback()
+				if diagnosisTask {
+					fallback = diagnosisSynthesisFromState(user, a.RunState)
+				}
+				emit(Event{Kind: EventToken, Text: fallback})
 				emit(Event{Kind: EventDone})
 				return nil
 			}
@@ -1391,7 +1470,15 @@ Do not answer with only a markdown plan or shell snippets.`,
 			} else {
 				consecutiveNoProgressRounds++
 				if consecutiveNoProgressRounds >= 2 {
-					if keepActionToolsAfterNoProgress(user) && !a.RunState.simpleMutationReadyToConfirm(user) {
+					if diagnosisTask && actionRecoveryNudged && !a.RunState.hasMutation() {
+						// One recovery pass is enough for diagnosis. Further
+						// identical searches must synthesize instead of burning
+						// the remaining 40+ heavy-task rounds.
+						synthesisOnly = true
+						synthesisFallbackArmed = true
+						a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "DIAGNOSIS SYNTHESIS: stop calling tools. Using only evidence already collected, state the root cause for why the symbol was not sold (include SKIP/HOLD reason codes if seen), what file/function owns that decision, and the concrete fix. If evidence is insufficient, say exactly what is missing."})
+						emit(Event{Kind: EventStatus, Text: "diagnosis stall; synthesize root cause from collected evidence"})
+					} else if keepActionToolsAfterNoProgress(user) && !a.RunState.simpleMutationReadyToConfirm(user) {
 						// An implementation request that has not mutated yet must
 						// retain tools after a rejected or unproductive read. The
 						// existing round/tool budgets still bound this recovery.
@@ -1399,6 +1486,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 						if !actionRecoveryNudged {
 							actionRecoveryNudged = true
 							recovery := actionRecoveryGuidance(user)
+							if diagnosisTask {
+								recovery = diagnosisRecoveryGuidance(user)
+							}
 							if workerPoolTask {
 								recovery = workerPoolRecoveryGuidance()
 							}
@@ -1642,7 +1732,8 @@ func isActionRequest(user string) bool {
 		"refactor ", "add a section", "improve the readme", "improve readme",
 		"please apply", "go ahead and", "make these changes", "make those changes",
 		"workflow", "github action", "not sold", "no ce", "ce sold", "decision_log",
-		"diagnose", "why ", "skip_", "not working", "didn't sell", "did not sell",
+		"diagnose", "debug", "why ", "skip_", "not working", "didn't sell", "did not sell",
+		"missed", "deeply", "root cause", "proceed", "continue",
 	}
 	for _, n := range needles {
 		if strings.Contains(s, n) {

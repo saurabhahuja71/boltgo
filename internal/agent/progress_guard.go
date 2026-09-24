@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/saurabhahuja71/agenterm/internal/llm"
 )
 
 // investigationFingerprint identifies read-only investigation actions whose
@@ -92,6 +94,73 @@ func noProgressSynthesisFallback() string {
 	return "Investigation stopped after repeated searches produced no new evidence. No workspace mutation was performed, and no worker-pool implementation was located in the searched repository evidence. No fix was applied."
 }
 
+func diagnosisSynthesisFallback() string {
+	return "Diagnosis stopped after repeated searches produced no new evidence. Report any SKIP/HOLD reason codes already observed (for example SKIP_ASSIGNMENT_NOT_REQUIRED), which files were inspected, and that a concrete code fix was not proven. Do not rewrite workflow YAML without evidence."
+}
+
+func diagnosisSynthesisFromState(user string, state AgentRunState) string {
+	token := strings.ToUpper(extractAddItemToken(user))
+	if token == "" {
+		// Best-effort token extraction from free-form diagnosis prompts.
+		low := strings.ToLower(user)
+		for _, candidate := range []string{"mankind", "bel", "bpcl"} {
+			if strings.Contains(low, candidate) {
+				token = strings.ToUpper(candidate)
+				break
+			}
+		}
+	}
+	var reasons []string
+	var files []string
+	seenReason := map[string]bool{}
+	seenFile := map[string]bool{}
+	for _, obs := range state.Observations {
+		summary := obs.Summary
+		if obs.Tool != "" && !seenFile[obs.Tool] {
+			// keep tool names separately below
+		}
+		for _, code := range []string{
+			"SKIP_ASSIGNMENT_NOT_REQUIRED", "SKIP_NO_CASH", "SKIP_DUPLICATE",
+			"SKIP_NO_SUPPORT", "SKIP_ENTRY_LOCKED", "SKIP_NO_OPPORTUNITY", "HOLD",
+		} {
+			if strings.Contains(summary, code) && !seenReason[code] {
+				seenReason[code] = true
+				reasons = append(reasons, code)
+			}
+		}
+		if token != "" && strings.Contains(strings.ToUpper(summary), token) && !seenReason["token:"+token] {
+			seenReason["token:"+token] = true
+		}
+	}
+	for _, call := range state.ToolCalls {
+		arg := call.Arguments
+		for _, marker := range []string{"decision_log.csv", "underlyings.txt", "bot.py", "delivery_strategy.py", "decision_audit.py", "rocket_"} {
+			if strings.Contains(arg, marker) && !seenFile[marker] {
+				seenFile[marker] = true
+				files = append(files, marker)
+			}
+		}
+	}
+	var b strings.Builder
+	b.WriteString("Diagnosis summary from collected tool evidence:\n")
+	if token != "" {
+		b.WriteString("- symbol: " + token + "\n")
+	}
+	if len(reasons) > 0 {
+		b.WriteString("- observed decision codes: " + strings.Join(reasons, ", ") + "\n")
+	} else {
+		b.WriteString("- observed decision codes: none extracted from tool output\n")
+	}
+	if len(files) > 0 {
+		b.WriteString("- files/tools touched: " + strings.Join(files, ", ") + "\n")
+	}
+	if token != "" && seenReason["SKIP_ASSIGNMENT_NOT_REQUIRED"] {
+		b.WriteString("- interpretation: SKIP_ASSIGNMENT_NOT_REQUIRED with HOLD means the exit/audit path recorded no assignment action; this is not a workflow schedule miss. Check whether " + token + " had an EQ/FUT cover and whether entry was skipped earlier (cash/support/eligibility).\n")
+	}
+	b.WriteString("- concrete code fix: not proven in this turn; do not rewrite workflow YAML without evidence.\n")
+	return b.String()
+}
+
 var addItemToPattern = regexp.MustCompile(`(?i)\badd\s+([A-Za-z0-9_./-]+)\s+to\b`)
 
 func extractAddItemToken(user string) string {
@@ -119,14 +188,78 @@ func diagnosisOriented(user string) bool {
 	low := strings.ToLower(user)
 	for _, needle := range []string{
 		"workflow", "github action", "not sold", "no ce", "ce sold", "decision_log",
-		"diagnose", "why ", "skip_", "not working", "didn't sell", "did not sell",
-		"skip assignment", "hold",
+		"diagnose", "debug", "why ", "skip_", "not working", "didn't sell", "did not sell",
+		"skip assignment", "missed", "deeply", "root cause",
 	} {
 		if strings.Contains(low, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+func continuationRequest(user string) bool {
+	s := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(user))), " ")
+	switch s {
+	case "proceed", "continue", "go ahead", "keep going", "keep going please",
+		"yes proceed", "ok proceed", "please proceed", "continue please",
+		"yes continue", "ok continue", "do that", "carry on":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAgentInternalUserMessage(content string) bool {
+	c := strings.TrimSpace(content)
+	if c == "" {
+		return true
+	}
+	prefixes := []string{
+		"ACTION RECOVERY:", "ADD-ITEM", "GIT PUSH REQUIRED:", "[agenterm]",
+		"ADD-ITEM NOTE:", "ADD-ITEM TASK:", "The requested file/git change already succeeded",
+		"The requested item is already present", "VERIFICATION COMPLETE",
+		"Repeated investigation", "Your previous", "Tools are closed",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// priorUserGoal returns the most recent real user task from history so short
+// follow-ups like "proceed" can continue debugging instead of asking for
+// clarification.
+func priorUserGoal(history []llm.Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != llm.RoleUser {
+			continue
+		}
+		content := strings.TrimSpace(history[i].Content)
+		if isAgentInternalUserMessage(content) {
+			continue
+		}
+		// Drop injected execute-now suffixes from earlier turns.
+		if idx := strings.Index(content, "\n\n[agenterm]"); idx > 0 {
+			content = strings.TrimSpace(content[:idx])
+		}
+		if content != "" {
+			return content
+		}
+	}
+	return ""
+}
+
+func diagnosisRecoveryGuidance(user string) string {
+	token := extractAddItemToken(user)
+	guidance := "DIAGNOSIS RECOVERY: stop broad rediscovery. Read decision_log.csv and the strategy code that emits SKIP/HOLD reasons"
+	if token != "" {
+		guidance += " for " + token
+	}
+	guidance += ". Prefer grep/read_file on bot.py, common/decision_audit.py, common/delivery_strategy.py, and recent logs. Do not rewrite workflow YAML or other files until a concrete root cause is proven from tool evidence."
+	return guidance
 }
 
 // addItemPushOnlyGoal is the narrow "add X … and git push" request without an
@@ -142,6 +275,17 @@ func addItemPushOnlyGoal(user string) bool {
 func actionMutationToolAllowed(name string) bool {
 	switch name {
 	case "str_replace", "write_file", "git", "read_file", "grep":
+		return true
+	default:
+		return false
+	}
+}
+
+// diagnosisToolAllowed keeps inspection tools available while still blocking
+// sprawling rediscovery and destructive rewrite loops after a stall.
+func diagnosisToolAllowed(name string) bool {
+	switch name {
+	case "read_file", "grep", "run_tests", "str_replace", "git":
 		return true
 	default:
 		return false
@@ -237,6 +381,9 @@ func actionExecutionBudget(user string) (maxRounds, maxToolCalls, toolCap int) {
 		strings.Contains(low, "go test ./...") ||
 		strings.Contains(low, "end-to-end") ||
 		(strings.Contains(low, "diagnose") && strings.Contains(low, "fix")) ||
+		(strings.Contains(low, "debug") && strings.Contains(low, "fix")) ||
+		(strings.Contains(low, "deeply") && strings.Contains(low, "fix")) ||
+		(diagnosisOriented(user) && strings.Contains(low, "fix")) ||
 		(strings.Contains(low, "race") && strings.Contains(low, "test"))
 	if heavy {
 		// Inspect + edit + focused tests + full suite + race suite, with room
