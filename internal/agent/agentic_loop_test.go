@@ -1055,3 +1055,52 @@ func TestAgentAddItemRecoveryForcesEditToolsAndStopsDiscovery(t *testing.T) {
 		t.Fatalf("expected forced edit/git/read tool_choice, requests=%d", len(*requests))
 	}
 }
+
+func TestAgentAddItemPushCompletesImmediatelyAfterGitPush(t *testing.T) {
+	reader := &scriptedTool{name: "read_file", outputs: []scriptedOutcome{{out: "BEL\nMANKIND\n"}}}
+	gitTool := &scriptedTool{name: "git", outputs: []scriptedOutcome{{out: "Everything up-to-date"}}}
+	grepTool := &scriptedTool{name: "grep"}
+	reg := tools.NewRegistry()
+	reg.Register(reader)
+	reg.Register(gitTool)
+	reg.Register(grepTool)
+	ag, requests, closeServer := testAgent(t, func(n int) string {
+		switch n {
+		case 1:
+			return toolSSE("read_file", `{"path":"underlyings.txt"}`)
+		case 2:
+			return toolSSE("git", `{"command":"push"}`)
+		default:
+			return textSSE("should not need another model round")
+		}
+	}, reg)
+	defer closeServer()
+
+	var errText, out string
+	prompt := "pls add mankind to covered ce strategy and do git push"
+	if err := ag.RunUserMessage(context.Background(), prompt, func(event Event) {
+		if event.Kind == EventError {
+			errText += event.Text
+		}
+		if event.Kind == EventToken {
+			out += event.Text
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(errText, "max tool rounds") {
+		t.Fatalf("hit max tool rounds: %q requests=%d", errText, len(*requests))
+	}
+	if len(gitTool.calls) == 0 {
+		t.Fatal("expected git push")
+	}
+	if len(grepTool.calls) != 0 {
+		t.Fatalf("push-only goal started diagnosis grep: %v", grepTool.calls)
+	}
+	if ag.RunState.Phase != PhaseComplete {
+		t.Fatalf("phase=%s, want complete; out=%q requests=%d", ag.RunState.Phase, out, len(*requests))
+	}
+	if len(*requests) > 4 {
+		t.Fatalf("used too many rounds after push: %d", len(*requests))
+	}
+}

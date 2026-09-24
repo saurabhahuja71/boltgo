@@ -115,6 +115,27 @@ func goalRequestsGitAction(user string) bool {
 		strings.Contains(low, "do git")
 }
 
+func diagnosisOriented(user string) bool {
+	low := strings.ToLower(user)
+	for _, needle := range []string{
+		"workflow", "github action", "not sold", "no ce", "ce sold", "decision_log",
+		"diagnose", "why ", "skip_", "not working", "didn't sell", "did not sell",
+		"skip assignment", "hold",
+	} {
+		if strings.Contains(low, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// addItemPushOnlyGoal is the narrow "add X … and git push" request without an
+// explicit diagnosis ask. Those should finish after list update/push, not after
+// a long decision_log tour.
+func addItemPushOnlyGoal(user string) bool {
+	return addItemActionTask(user) && goalRequestsGitAction(user) && !diagnosisOriented(user)
+}
+
 // actionMutationToolAllowed is the post-recovery allow-list. Discovery tools are
 // excluded so stalled add/edit tasks cannot burn the remaining round budget on
 // repo_map/list_dir/grep loops.
@@ -133,15 +154,25 @@ func addItemActionHint(user string) string {
 		return ""
 	}
 	hint := "ADD-ITEM TASK: read underlyings.txt first (also check similar list/config *.txt files if needed). "
-	hint += "If " + token + " is already present, do not stop: inspect decision_log.csv and workflow/bot config for SKIP/HOLD/no-CE reasons"
+	if diagnosisOriented(user) {
+		hint += "If " + token + " is already present, inspect decision_log.csv and workflow/bot config for SKIP/HOLD/no-CE reasons"
+		if goalRequestsGitAction(user) {
+			hint += ", then git commit/push only if needed"
+		}
+		hint += ". Prefer underlyings.txt and decision_log.csv over README exploration."
+		return hint
+	}
+	hint += "If " + token + " is already present"
 	if goalRequestsGitAction(user) {
-		hint += ", and only then git commit/push if list membership was the actual missing piece"
+		hint += ", call git push next (or report already up to date)"
+	} else {
+		hint += ", confirm no file change is required"
 	}
 	hint += ". Otherwise add it with str_replace or write_file"
 	if goalRequestsGitAction(user) {
 		hint += ", then git add/commit/push"
 	}
-	hint += ". Prefer underlyings.txt and decision_log.csv over README exploration."
+	hint += ". Prefer underlyings.txt over README exploration."
 	return hint
 }
 
@@ -150,7 +181,9 @@ func actionRecoveryGuidance(user string) string {
 		guidance := "ACTION RECOVERY: discovery tools are disabled. Read underlyings.txt if you have not already. "
 		guidance += "If " + token + " is already present"
 		if goalRequestsGitAction(user) {
-			guidance += ", call git to commit/push as requested"
+			guidance += ", call git push now"
+		} else if diagnosisOriented(user) {
+			guidance += ", inspect decision_log.csv for SKIP/HOLD reasons"
 		} else {
 			guidance += ", confirm that no file change is required"
 		}
@@ -158,7 +191,7 @@ func actionRecoveryGuidance(user string) string {
 		if goalRequestsGitAction(user) {
 			guidance += " and then git add/commit/push"
 		}
-		guidance += ". Do not call repo_map, list_dir, grep, or find_files again."
+		guidance += ". Do not call repo_map, list_dir, or find_files again."
 		return guidance
 	}
 	guidance := "ACTION RECOVERY: discovery tools are disabled. Use evidence already collected and apply the requested change with str_replace or write_file on the relevant path"

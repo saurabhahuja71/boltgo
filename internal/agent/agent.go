@@ -564,11 +564,15 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		if processChannelTask && processVerified {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "VERIFICATION COMPLETE for Process. Do not call tools again. Write the FINAL REPORT now with: root cause, files changed, design, cancellation/accepted-job contract, tests added, exact commands executed, exact results, remaining issues."})
 		}
-		forceSimpleConfirm := a.RunState.simpleMutationReadyToConfirm(user) && (verificationRequested || postMutationReadOnlyRounds >= 1)
+		forceSimpleConfirm := a.RunState.simpleMutationReadyToConfirm(user) && (verificationRequested || postMutationReadOnlyRounds >= 1 || a.RunState.hasSuccessfulGitPush())
 		if a.RunState.addItemAlreadySatisfied(user) && !a.RunState.hasSuccessfulMutation() && !forceSimpleConfirm {
 			token := extractAddItemToken(user)
-			continueHint := "ADD-ITEM NOTE: " + token + " is already listed in underlyings.txt. Do not stop after that observation. Inspect decision_log.csv, bot.yml / workflow config, and recent SKIP/HOLD reasons to determine why CE was not sold, then fix the real gap or run the requested git push if list membership was the only missing piece."
-			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: continueHint})
+			if diagnosisOriented(user) {
+				continueHint := "ADD-ITEM NOTE: " + token + " is already listed in underlyings.txt. Inspect decision_log.csv, bot.yml / workflow config, and recent SKIP/HOLD reasons to determine why CE was not sold, then fix the real gap."
+				msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: continueHint})
+			} else if addItemPushOnlyGoal(user) {
+				msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "ADD-ITEM NOTE: " + token + " is already listed in underlyings.txt. Call git push now (or report already up to date). Do not start a broad rediscovery/diagnosis tour."})
+			}
 		}
 		if forceSimpleConfirm {
 			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: "The requested file/git change already succeeded. Do not call tools again. Confirm what changed in one short sentence."})
@@ -737,8 +741,11 @@ Do not answer with only a markdown plan or shell snippets.`,
 						forceName = "str_replace"
 						if i < len(a.RunState.Observations) &&
 							strings.Contains(strings.ToUpper(a.RunState.Observations[i].Summary), tokenUpper) {
-							// Listed already: diagnose sell/skip behavior next.
-							forceName = "grep"
+							if diagnosisOriented(user) {
+								forceName = "grep"
+							} else if goalRequestsGitAction(user) {
+								forceName = "git"
+							}
 						}
 						break
 					}
@@ -1359,6 +1366,21 @@ Do not answer with only a markdown plan or shell snippets.`,
 			if result.Category != tools.FailureUnsupported {
 				toolsUsed++
 			}
+		}
+		// Finish immediately once a requested git push has succeeded. Extra
+		// verify rounds after push are what tip add-item tasks into
+		// "max tool rounds reached".
+		if a.RunState.hasSuccessfulGitPush() {
+			a.RunState.Verification = VerificationPassed
+			a.RunState.Phase = PhaseComplete
+			summary := "Requested git push completed (or already up to date)."
+			if token := extractAddItemToken(user); token != "" && a.RunState.addItemAlreadySatisfied(user) {
+				summary = token + " is already listed in underlyings.txt; git push completed (or already up to date)."
+			}
+			emit(Event{Kind: EventToken, Text: summary})
+			emit(Event{Kind: EventStatus, Text: stateStatus(PhaseComplete)})
+			emit(Event{Kind: EventDone})
+			return nil
 		}
 		if roundHadInvestigation {
 			if a.RunState.simpleMutationReadyToConfirm(user) {

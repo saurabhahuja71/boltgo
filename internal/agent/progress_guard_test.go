@@ -180,3 +180,22 @@ func TestAddItemActionHelpers(t *testing.T) {
 		t.Fatal("edit/git/diagnose tools were blocked during action recovery")
 	}
 }
+
+
+func TestAddItemPushOnlyGoalVsDiagnosis(t *testing.T) {
+	pushOnly := "pls add mankind to covered ce strategy and do git push"
+	diag := "github workflow runs today show no ce sold for mankind; diagnose why"
+	if !addItemPushOnlyGoal(pushOnly) {
+		t.Fatal("push-only add-item goal not detected")
+	}
+	if addItemPushOnlyGoal(diag) {
+		t.Fatal("diagnosis goal incorrectly treated as push-only")
+	}
+	if !diagnosisOriented(diag) || diagnosisOriented(pushOnly) {
+		t.Fatal("diagnosisOriented mismatch")
+	}
+	hint := addItemActionHint(pushOnly)
+	if strings.Contains(strings.ToLower(hint), "decision_log") {
+		t.Fatalf("push-only hint should not force decision_log tour: %s", hint)
+	}
+}
