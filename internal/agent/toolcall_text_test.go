@@ -55,12 +55,49 @@ func TestExtractLlamaMarkupWithoutFunctionClose(t *testing.T) {
 	}
 }
 
+func TestExtractQwenMarkupWithOpenParametersAndRepeatedCalls(t *testing.T) {
+	known := map[string]struct{}{"read_file": {}, "list_dir": {}}
+	raw := `No, I haven't found any reference yet.
+<tool_call> <function=read_file> <parameter=path> covered/README.md </tool_call> <tool_call>
+<function=read_file> <parameter=path> .github/workflows/covered_call.yml </tool_call> <tool_call>
+<function=list_dir> <parameter=path> covered/scripts </tool_call>`
+	calls, rest := extractToolCallsFromContent(raw, known)
+	if len(calls) != 3 {
+		t.Fatalf("calls=%d rest=%q", len(calls), rest)
+	}
+	if !contains(calls[0].Function.Arguments, `"path":"covered/README.md"`) ||
+		!contains(calls[1].Function.Arguments, `"path":".github/workflows/covered_call.yml"`) ||
+		!contains(calls[2].Function.Arguments, `"path":"covered/scripts"`) {
+		t.Fatalf("unexpected args: %q, %q, %q", calls[0].Function.Arguments, calls[1].Function.Arguments, calls[2].Function.Arguments)
+	}
+	if rest != "No, I haven't found any reference yet." {
+		t.Fatalf("rest=%q", rest)
+	}
+}
+
 func TestUnsupportedToolMarkupIsDetectedWithoutChangingProtocol(t *testing.T) {
 	if !hasUnsupportedToolMarkup("<function=repo_map>\n</function>\n</tool_call>") {
 		t.Fatal("expected unsupported template markup to be detected")
 	}
 	if hasUnsupportedToolMarkup("ordinary answer mentioning tool_calls") {
 		t.Fatal("ordinary prose was misclassified as tool markup")
+	}
+}
+
+func TestStreamBridgeSuppressesTextToolMarkup(t *testing.T) {
+	var got string
+	bridge := &streamBridge{emit: func(ev Event) {
+		if ev.Kind == EventToken {
+			got += ev.Text
+		}
+	}}
+	bridge.OnToken("Before ")
+	bridge.OnToken("<tool_call><function=read_file>")
+	bridge.OnToken("<parameter=path>main.go</tool_call>")
+	bridge.OnToken(" after")
+	bridge.Flush()
+	if got != "Before  after" {
+		t.Fatalf("visible stream=%q", got)
 	}
 }
 

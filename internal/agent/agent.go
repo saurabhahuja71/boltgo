@@ -349,6 +349,7 @@ Do not answer with only a markdown plan or shell snippets.`,
 			emit(Event{Kind: EventDone})
 			return err
 		}
+		handler.Flush()
 		if msg.Usage != nil {
 			usage := *msg.Usage
 			emit(Event{Kind: EventUsage, Usage: &usage})
@@ -580,15 +581,109 @@ Do not answer with only a markdown plan or shell snippets.`,
 }
 
 type streamBridge struct {
-	emit  func(Event)
-	quiet bool
+	emit     func(Event)
+	quiet    bool
+	pending  string
+	suppress bool
 }
 
 func (s *streamBridge) OnToken(token string) {
 	if s.quiet {
 		return
 	}
-	s.emit(Event{Kind: EventToken, Text: token})
+	s.pending += token
+	s.flushSafe()
+}
+
+// Flush emits any ordinary text held back while checking whether a provider
+// token stream is about to start pseudo-XML tool markup. The complete message
+// is still parsed after ChatStream returns; this only keeps raw <tool_call>
+// text out of the visible transcript.
+func (s *streamBridge) Flush() {
+	if s.quiet {
+		s.pending = ""
+		return
+	}
+	if !s.suppress && s.pending != "" {
+		s.emit(Event{Kind: EventToken, Text: s.pending})
+	}
+	s.pending = ""
+	s.suppress = false
+}
+
+func (s *streamBridge) flushSafe() {
+	for {
+		if s.suppress {
+			end := nextMarkupEnd(s.pending)
+			if end < 0 {
+				return
+			}
+			s.pending = s.pending[end:]
+			s.suppress = false
+			continue
+		}
+		start := nextMarkupStart(s.pending)
+		if start >= 0 {
+			if start > 0 {
+				s.emit(Event{Kind: EventToken, Text: s.pending[:start]})
+			}
+			s.pending = s.pending[start:]
+			s.suppress = true
+			continue
+		}
+		// Retain a possible split marker suffix; emit everything else now.
+		keep := markupPrefixSuffixLen(s.pending)
+		if len(s.pending) > keep {
+			s.emit(Event{Kind: EventToken, Text: s.pending[:len(s.pending)-keep]})
+			s.pending = s.pending[len(s.pending)-keep:]
+		}
+		return
+	}
+}
+
+func nextMarkupStart(s string) int {
+	starts := []string{"<tool_call>", "<function="}
+	best := -1
+	for _, marker := range starts {
+		if i := strings.Index(strings.ToLower(s), marker); i >= 0 && (best < 0 || i < best) {
+			best = i
+		}
+	}
+	return best
+}
+
+func nextMarkupEnd(s string) int {
+	ends := []string{"</tool_call>", "</function>"}
+	low := strings.ToLower(s)
+	best := -1
+	for _, marker := range ends {
+		if i := strings.Index(low, marker); i >= 0 {
+			i += len(marker)
+			if best < 0 || i < best {
+				best = i
+			}
+		}
+	}
+	return best
+}
+
+func markupPrefixSuffixLen(s string) int {
+	low := strings.ToLower(s)
+	markers := []string{"<tool_call>", "<function=", "</tool_call>", "</function>"}
+	best := 0
+	for _, marker := range markers {
+		max := len(marker) - 1
+		if len(low) < max {
+			max = len(low)
+		}
+		for n := max; n > best; n-- {
+			if strings.HasSuffix(low, marker[:n]) {
+				best = n
+				break
+			}
+		}
+	}
+	return best
 }
 
 func (s *streamBridge) OnToolCallDelta(index int, tc llm.ToolCall) {
