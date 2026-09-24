@@ -98,38 +98,91 @@ func diagnosisSynthesisFallback() string {
 	return "Diagnosis stopped after repeated searches produced no new evidence. Report any SKIP/HOLD reason codes already observed (for example SKIP_ASSIGNMENT_NOT_REQUIRED), which files were inspected, and that a concrete code fix was not proven. Do not rewrite workflow YAML without evidence."
 }
 
-func diagnosisSynthesisFromState(user string, state AgentRunState) string {
-	token := strings.ToUpper(extractAddItemToken(user))
-	if token == "" {
-		// Best-effort token extraction from free-form diagnosis prompts.
-		low := strings.ToLower(user)
-		for _, candidate := range []string{"mankind", "bel", "bpcl"} {
-			if strings.Contains(low, candidate) {
-				token = strings.ToUpper(candidate)
-				break
-			}
+func extractDiagnosisSymbol(user string) string {
+	if token := extractAddItemToken(user); token != "" {
+		return strings.ToUpper(token)
+	}
+	low := strings.ToLower(user)
+	// Prefer explicit "for SYMBOL stock/symbol" phrasing over any ticker substring.
+	if m := regexp.MustCompile(`(?i)\b(?:for|on|about)\s+([a-z][a-z0-9_.-]{1,15})\s+(?:stock|symbol|underlying)\b`).FindStringSubmatch(low); len(m) == 2 {
+		return strings.ToUpper(m[1])
+	}
+	for _, candidate := range []string{"mankind", "bel", "bpcl"} {
+		if strings.Contains(low, candidate) {
+			return strings.ToUpper(candidate)
 		}
 	}
+	return ""
+}
+
+func decisionCodesForSymbol(summary, token string) []string {
+	codes := []string{
+		"SKIP_ASSIGNMENT_NOT_REQUIRED", "SKIP_NO_CASH", "SKIP_DUPLICATE",
+		"SKIP_NO_SUPPORT", "SKIP_ENTRY_LOCKED", "SKIP_NO_OPPORTUNITY", "HOLD",
+	}
+	var out []string
+	seen := map[string]bool{}
+	upperToken := strings.ToUpper(strings.TrimSpace(token))
+	if upperToken == "" {
+		for _, code := range codes {
+			if strings.Contains(summary, code) {
+				out = append(out, code)
+			}
+		}
+		return out
+	}
+	// Observation summaries are often newline-flattened by compactStateText, so
+	// a whole decision_log dump becomes one blob with many symbols. Only keep
+	// codes that appear near the asked symbol token.
+	upper := strings.ToUpper(summary)
+	for start := 0; start < len(upper); {
+		rel := strings.Index(upper[start:], upperToken)
+		if rel < 0 {
+			break
+		}
+		abs := start + rel
+		from := abs - 48
+		if from < 0 {
+			from = 0
+		}
+		to := abs + len(upperToken) + 180
+		if to > len(summary) {
+			to = len(summary)
+		}
+		window := summary[from:to]
+		for _, code := range codes {
+			if strings.Contains(window, code) && !seen[code] {
+				seen[code] = true
+				out = append(out, code)
+			}
+		}
+		start = abs + len(upperToken)
+	}
+	return out
+}
+
+func diagnosisSynthesisFromState(user string, state AgentRunState) string {
+	token := extractDiagnosisSymbol(user)
 	var reasons []string
 	var files []string
 	seenReason := map[string]bool{}
 	seenFile := map[string]bool{}
+	eqNone := false
+	ceNone := false
 	for _, obs := range state.Observations {
 		summary := obs.Summary
-		if obs.Tool != "" && !seenFile[obs.Tool] {
-			// keep tool names separately below
-		}
-		for _, code := range []string{
-			"SKIP_ASSIGNMENT_NOT_REQUIRED", "SKIP_NO_CASH", "SKIP_DUPLICATE",
-			"SKIP_NO_SUPPORT", "SKIP_ENTRY_LOCKED", "SKIP_NO_OPPORTUNITY", "HOLD",
-		} {
-			if strings.Contains(summary, code) && !seenReason[code] {
+		for _, code := range decisionCodesForSymbol(summary, token) {
+			if !seenReason[code] {
 				seenReason[code] = true
 				reasons = append(reasons, code)
 			}
 		}
-		if token != "" && strings.Contains(strings.ToUpper(summary), token) && !seenReason["token:"+token] {
-			seenReason["token:"+token] = true
+		upper := strings.ToUpper(summary)
+		if token != "" && strings.Contains(upper, token+" EQ: NONE") {
+			eqNone = true
+		}
+		if token != "" && strings.Contains(upper, token+" CE: NONE") {
+			ceNone = true
 		}
 	}
 	for _, call := range state.ToolCalls {
@@ -147,9 +200,21 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 		b.WriteString("- symbol: " + token + "\n")
 	}
 	if len(reasons) > 0 {
-		b.WriteString("- observed decision codes: " + strings.Join(reasons, ", ") + "\n")
+		b.WriteString("- observed decision codes for " + token + ": " + strings.Join(reasons, ", ") + "\n")
+	} else if token != "" {
+		b.WriteString("- observed decision codes for " + token + ": none extracted on symbol-scoped lines\n")
 	} else {
 		b.WriteString("- observed decision codes: none extracted from tool output\n")
+	}
+	if eqNone || ceNone {
+		b.WriteString("- position evidence:")
+		if eqNone {
+			b.WriteString(" " + token + " EQ: none;")
+		}
+		if ceNone {
+			b.WriteString(" " + token + " CE: none;")
+		}
+		b.WriteString("\n")
 	}
 	if len(files) > 0 {
 		b.WriteString("- files/tools touched: " + strings.Join(files, ", ") + "\n")

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/saurabhahuja71/agenterm/internal/llm"
+	"github.com/saurabhahuja71/agenterm/internal/tools"
 )
 
 func TestInvestigationFingerprintNormalizesEquivalentArguments(t *testing.T) {
@@ -228,5 +229,33 @@ func TestContinuationAndDiagnosisHelpers(t *testing.T) {
 	}
 	if !diagnosisToolAllowed("read_file") || !diagnosisToolAllowed("grep") || !diagnosisToolAllowed("str_replace") {
 		t.Fatal("diagnosis recovery blocked needed inspect/fix tools")
+	}
+}
+
+func TestDiagnosisSynthesisScopesCodesToSymbol(t *testing.T) {
+	var state AgentRunState
+	state.reset("this is for mankind stock why all jobs missed it today")
+	state.addObservation("read_file", `{"path":"decision_log.csv"}`, tools.ExecutionResult{
+		Output: strings.Join([]string{
+			"2026-09-24T10:00:00+05:30,BEL,SKIP,SKIP_NO_CASH,weak,,,,,,,,,,,,False,False,True,,,DELIVERY",
+			"2026-09-24T10:00:01+05:30,BEL,SKIP,SKIP_NO_SUPPORT,,,,,,,,,,,,False,False,True,,,DELIVERY",
+			"2026-09-24T10:31:47+05:30,MANKIND,SKIP,SKIP_ASSIGNMENT_NOT_REQUIRED,HOLD,,,,,,,,,,,,False,False,True,,,STANDARD",
+			"2026-09-24T12:01:38+05:30,MANKIND,SKIP,SKIP_ASSIGNMENT_NOT_REQUIRED,HOLD,,,,,,,,,,,,False,False,True,,,STANDARD",
+		}, "\n"),
+		Category: tools.FailureSuccess,
+	})
+	state.addObservation("read_file", `{"path":"logs/rocket_2026-09-24.log"}`, tools.ExecutionResult{
+		Output: "ACTIVE UNDERLYINGS: ['BEL', 'MANKIND']\n  MANKIND EQ: none\n  MANKIND CE: none\n",
+		Category: tools.FailureSuccess,
+	})
+	out := diagnosisSynthesisFromState(state.OriginalGoal, state)
+	if !strings.Contains(out, "SKIP_ASSIGNMENT_NOT_REQUIRED") {
+		t.Fatalf("missing MANKIND code: %s", out)
+	}
+	if strings.Contains(out, "SKIP_NO_CASH") || strings.Contains(out, "SKIP_NO_SUPPORT") {
+		t.Fatalf("attributed BEL codes to MANKIND: %s", out)
+	}
+	if !strings.Contains(out, "MANKIND EQ: none") || !strings.Contains(out, "MANKIND CE: none") {
+		t.Fatalf("missing position evidence: %s", out)
 	}
 }
