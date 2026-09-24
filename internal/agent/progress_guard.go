@@ -261,9 +261,6 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 	sourceAuditRead := false
 	seenReason := map[string]bool{}
 	seenFile := map[string]bool{}
-	eqNone := false
-	ceNone := false
-	brokerPositionBlocked := false
 	for _, obs := range state.Observations {
 		summary := obs.Summary
 		for _, code := range decisionCodesForSymbol(summary, token) {
@@ -276,16 +273,6 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 			if len(evidence) < 4 {
 				evidence = append(evidence, snippet)
 			}
-		}
-		upper := strings.ToUpper(summary)
-		if token != "" && strings.Contains(upper, token+" EQ: NONE") {
-			eqNone = true
-		}
-		if token != "" && strings.Contains(upper, token+" CE: NONE") {
-			ceNone = true
-		}
-		if token != "" && strings.Contains(upper, "DIAGONAL "+token+" BLOCKED: BROKER POSITION DISAPPEARED WITHOUT BOT-RECORDED CLOSE") {
-			brokerPositionBlocked = true
 		}
 		for _, function := range diagnosisFunctions(summary) {
 			found := false
@@ -336,16 +323,6 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 	} else {
 		b.WriteString("- observed decision codes: none extracted from tool output\n")
 	}
-	if eqNone || ceNone {
-		b.WriteString("- position evidence:")
-		if eqNone {
-			b.WriteString(" " + token + " EQ: none;")
-		}
-		if ceNone {
-			b.WriteString(" " + token + " CE: none;")
-		}
-		b.WriteString("\n")
-	}
 	if len(files) > 0 {
 		b.WriteString("- files/tools touched: " + strings.Join(files, ", ") + "\n")
 	}
@@ -362,13 +339,8 @@ func diagnosisSynthesisFromState(user string, state AgentRunState) string {
 	} else {
 		b.WriteString("- responsible functions observed: missing; source mapping was not collected\n")
 	}
-	if brokerPositionBlocked {
-		b.WriteString("- runtime outcome: the dated bot log records " + token + " as blocked because the broker position disappeared without a bot-recorded close; this explains why a new CE was not sold.\n")
-	}
 	if len(reasons) > 0 && diagnosisEvidenceReady(user, state) {
 		b.WriteString("- root-cause status: decision, source, and requested workflow evidence collected; no workflow scheduling failure proven\n")
-	} else if brokerPositionBlocked && len(reasons) > 0 {
-		b.WriteString("- root-cause status: decision, source, and runtime log evidence collected; workflow scheduling failure was not proven\n")
 	} else if len(reasons) > 0 {
 		b.WriteString("- root-cause status: decision evidence found; source function and workflow outcome still require explicit matching evidence\n")
 	} else {
@@ -431,59 +403,6 @@ func diagnosisEvidenceReady(user string, state AgentRunState) bool {
 		}
 	}
 	return decision && source && workflow
-}
-
-func diagnosisHasSourceEvidence(state AgentRunState) bool {
-	for _, obs := range state.Observations {
-		low := strings.ToLower(obs.Summary)
-		if strings.Contains(low, "def resolve_") || strings.Contains(low, "resolve_exit_action_and_reason") || strings.Contains(low, "return \"skip\"") {
-			return true
-		}
-	}
-	return false
-}
-
-func diagnosisHasDecisionEvidence(user string, state AgentRunState) bool {
-	token := extractDiagnosisSymbol(user)
-	if token == "" {
-		return false
-	}
-	for _, obs := range state.Observations {
-		if len(decisionCodesForSymbol(obs.Summary, token)) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func diagnosisHasLogEvidence(user string, state AgentRunState) bool {
-	token := strings.ToLower(extractDiagnosisSymbol(user))
-	for _, obs := range state.Observations {
-		low := strings.ToLower(obs.Summary)
-		if (strings.Contains(low, "logs/") || strings.Contains(low, "monitor/data/intraday")) && (token == "" || strings.Contains(low, token)) {
-			return true
-		}
-	}
-	return false
-}
-
-func diagnosisHasWorkflowEvidence(user string, state AgentRunState) bool {
-	if !strings.Contains(strings.ToLower(user), "workflow") && !strings.Contains(strings.ToLower(user), "github") {
-		return true
-	}
-	for _, obs := range state.Observations {
-		low := strings.ToLower(obs.Summary)
-		if strings.Contains(low, "workflow") || strings.Contains(low, "github actions") || strings.Contains(low, "run:") || strings.Contains(low, "schedule:") {
-			return true
-		}
-	}
-	for _, call := range state.ToolCalls {
-		low := strings.ToLower(call.Arguments)
-		if strings.Contains(low, ".github/workflows") || strings.Contains(low, "bot.yml") {
-			return true
-		}
-	}
-	return false
 }
 
 var addItemToPattern = regexp.MustCompile(`(?i)\badd\s+([A-Za-z0-9_./-]+)\s+to\b`)
@@ -585,7 +504,7 @@ func diagnosisRecoveryGuidance(user string) string {
 	} else if symbol := extractDiagnosisSymbol(user); symbol != "" {
 		guidance += " " + symbol
 	}
-	guidance += " in decision_log.csv; then read only the matching rows and grep the exact reason code in the decision-audit/strategy files. For covered-call diagnosis, inspect common/decision_audit.py and common/delivery_strategy.py, then the matching dated monitor/data/intraday/eod_*.json or logs/bot_*.log entry. Read the workflow file only after the symbol rows and source mapping are captured. Prefer grep/read_file on .github/workflows/bot.yml, bot.py, common/decision_audit.py, common/delivery_strategy.py, monitor/data/intraday, and recent logs. Do not rewrite workflow YAML or other files until a concrete root cause is proven from tool evidence."
+	guidance += " in the workspace; then read only the matching records and follow any source/file references returned by that search. Inspect related runtime reports or logs before the supplied workflow URL/configuration. Do not rewrite files until a concrete root cause is proven from tool evidence."
 	return guidance
 }
 

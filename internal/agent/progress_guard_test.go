@@ -218,9 +218,9 @@ func TestNaturalMankindDiagnosisGetsBoundedSynthesis(t *testing.T) {
 	}
 }
 
-func TestDiagnosisRecoveryPrioritizesCoveredCallEvidence(t *testing.T) {
+func TestDiagnosisRecoveryPrioritizesRepositoryEvidence(t *testing.T) {
 	guidance := diagnosisRecoveryGuidance("check why mankind ce dont sell today ? https://github.com/Tradebots71/covered_call_bot/actions/workflows/bot.yml")
-	for _, want := range []string{"decision_log.csv", "common/decision_audit.py", "monitor/data/intraday/eod_*.json", "logs/bot_*.log"} {
+	for _, want := range []string{"exact symbol", "matching records", "source/file references", "runtime reports or logs", "supplied workflow URL"} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("diagnosis guidance missing %q: %s", want, guidance)
 		}
@@ -249,7 +249,7 @@ func TestContinuationAndDiagnosisHelpers(t *testing.T) {
 		t.Fatal("prior diagnosis goal not detected")
 	}
 	recovery := diagnosisRecoveryGuidance("this is for mankind stock why all jobs missed it today")
-	for _, want := range []string{"exact symbol", "MANKIND", "decision_log.csv", "workflow file", "matching rows", "do not read a large decision log whole"} {
+	for _, want := range []string{"exact symbol", "MANKIND", "matching records", "runtime reports or logs", "supplied workflow URL", "do not read a large decision log whole"} {
 		if !strings.Contains(strings.ToLower(recovery), strings.ToLower(want)) {
 			t.Fatalf("diagnosis recovery missing %q: %s", want, recovery)
 		}
@@ -285,8 +285,8 @@ func TestDiagnosisSynthesisScopesCodesToSymbol(t *testing.T) {
 	if strings.Contains(out, "SKIP_NO_CASH") || strings.Contains(out, "SKIP_NO_SUPPORT") {
 		t.Fatalf("attributed BEL codes to MANKIND: %s", out)
 	}
-	if !strings.Contains(out, "MANKIND EQ: none") || !strings.Contains(out, "MANKIND CE: none") {
-		t.Fatalf("missing position evidence: %s", out)
+	if !strings.Contains(out, "symbol-scoped evidence") || !strings.Contains(out, "MANKIND,SKIP") {
+		t.Fatalf("missing generic symbol evidence: %s", out)
 	}
 }
 

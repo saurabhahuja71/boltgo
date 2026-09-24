@@ -363,9 +363,9 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	// @path mentions → attach file/dir context.
 	payload, attached := expandMentions(user)
 	if diagnosisTask {
-		payload += "\n\n[agenterm] Debug with evidence first: read decision_log.csv and strategy code for SKIP/HOLD reasons before editing. Do not rewrite workflow YAML unless the root cause is proven to be the workflow file."
+		payload += "\n\n[agenterm] Debug with evidence first: locate the target record, map its reason to the responsible source, inspect matching runtime evidence, and inspect workflow/configuration last. Do not rewrite files unless the root cause is proven."
 		if symbol := extractDiagnosisSymbol(user); symbol != "" {
-			payload += "\n[agenterm] Diagnosis order for " + symbol + ": first call grep for the exact symbol in decision_log.csv; next map the observed reason in common/decision_audit.py or common/delivery_strategy.py; then inspect the matching dated monitor/data/intraday/eod_*.json or logs/bot_*.log line; inspect .github/workflows/bot.yml or the URL last. Do not begin with the workflow URL."
+			payload += "\n[agenterm] Diagnosis order for " + symbol + ": first search the workspace for the exact target; next follow the returned source/file references, then inspect matching runtime reports or logs, and inspect the supplied URL last. Do not begin with the URL."
 		}
 		emit(Event{Kind: EventStatus, Text: "diagnosis mode: inspect decision evidence before edits"})
 	}
@@ -717,22 +717,6 @@ Do not answer with only a markdown plan or shell snippets.`,
 				if len(grepOnly) > 0 {
 					roundTools = grepOnly
 				}
-			} else if round > 0 && (!diagnosisHasLogEvidence(user, a.RunState) || !diagnosisHasWorkflowEvidence(user, a.RunState)) {
-				// After the decision and source mapping are known, require the
-				// dated operational evidence before allowing more broad reads.
-				wanted := "grep"
-				if diagnosisHasLogEvidence(user, a.RunState) && !diagnosisHasWorkflowEvidence(user, a.RunState) {
-					wanted = "read_file"
-				}
-				focused := make([]llm.Tool, 0, 1)
-				for _, tool := range roundTools {
-					if tool.Function.Name == wanted {
-						focused = append(focused, tool)
-					}
-				}
-				if len(focused) > 0 {
-					roundTools = focused
-				}
 			}
 		}
 		actionEditOnly := actionRecoveryNudged && !workerPoolTask && !processChannelTask && !diagnosisTask &&
@@ -981,16 +965,6 @@ Do not answer with only a markdown plan or shell snippets.`,
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
-			if diagnosisTask && !a.RunState.hasMutation() && diagnosisHasLogEvidence(user, a.RunState) {
-				// A local model may emit an ignored tool call after the required
-				// decision/source/log evidence is already present. Close with the
-				// deterministic evidence report instead of returning an empty or
-				// generic "verified" response.
-				a.RunState.Phase = PhaseBlocked
-				emit(Event{Kind: EventToken, Text: diagnosisSynthesisFromState(user, a.RunState)})
-				emit(Event{Kind: EventDone})
-				return nil
-			}
 			if synthesisOnly && synthesisFallbackArmed && !a.RunState.hasMutation() {
 				a.RunState.Phase = PhaseBlocked
 				fallback := noProgressSynthesisFallback()
@@ -1228,15 +1202,6 @@ Do not answer with only a markdown plan or shell snippets.`,
 			msg.ToolCalls[i].Function.Arguments = sanitizeToolArgsJSON(msg.ToolCalls[i].Function.Name, msg.ToolCalls[i].Function.Arguments)
 			if diagnosisTask && round == 0 && toolsUsed == 0 && msg.ToolCalls[i].Function.Name == "grep" {
 				msg.ToolCalls[i].Function.Arguments = forceDiagnosisSymbolSearch(msg.ToolCalls[i].Function.Arguments, user)
-			}
-			if diagnosisTask && round == 1 && msg.ToolCalls[i].Function.Name == "grep" {
-				msg.ToolCalls[i].Function.Arguments = forceDiagnosisSourceSearch(msg.ToolCalls[i].Function.Arguments)
-			}
-			if diagnosisTask && round >= 2 && msg.ToolCalls[i].Function.Name == "grep" && !diagnosisHasLogEvidence(user, a.RunState) {
-				msg.ToolCalls[i].Function.Arguments = forceDiagnosisLogSearch(msg.ToolCalls[i].Function.Arguments, user)
-			}
-			if diagnosisTask && round > 0 && msg.ToolCalls[i].Function.Name == "read_file" && diagnosisHasDecisionEvidence(user, a.RunState) && diagnosisHasSourceEvidence(a.RunState) && diagnosisHasLogEvidence(user, a.RunState) && !diagnosisHasWorkflowEvidence(user, a.RunState) {
-				msg.ToolCalls[i].Function.Arguments = forceDiagnosisWorkflowRead(msg.ToolCalls[i].Function.Arguments)
 			}
 			if msg.ToolCalls[i].ID == "" {
 				msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", round, i)
@@ -1654,42 +1619,7 @@ func forceDiagnosisSymbolSearch(args, user string) string {
 		return args
 	}
 	payload["pattern"] = symbol
-	payload["path"] = "decision_log.csv"
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return args
-	}
-	return string(encoded)
-}
-
-func forceDiagnosisLogSearch(args, user string) string {
-	return forceDiagnosisSearchArgs(args, extractDiagnosisSymbol(user), "logs")
-}
-
-func forceDiagnosisSourceSearch(args string) string {
-	return forceDiagnosisSearchArgs(args, "SKIP_ASSIGNMENT_NOT_REQUIRED", "common")
-}
-
-func forceDiagnosisSearchArgs(args, pattern, path string) string {
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(args), &payload); err != nil {
-		return args
-	}
-	payload["pattern"] = pattern
-	payload["path"] = path
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return args
-	}
-	return string(encoded)
-}
-
-func forceDiagnosisWorkflowRead(args string) string {
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(args), &payload); err != nil {
-		return args
-	}
-	payload["path"] = ".github/workflows/bot.yml"
+	payload["path"] = "."
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return args
