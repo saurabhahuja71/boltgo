@@ -90,6 +90,7 @@ type ToolCallRecord struct {
 
 type Observation struct {
 	Tool    string
+	Args    string
 	Summary string
 	Success bool
 	Source  string
@@ -145,7 +146,7 @@ func (s *AgentRunState) addObservation(tool, args string, result tools.Execution
 	if diagnosisOriented(s.OriginalGoal) {
 		observation = compactDiagnosisText(result.Output, observationLimit)
 	}
-	s.Observations = append(s.Observations, Observation{Tool: tool, Summary: observation, Success: result.Category == tools.FailureSuccess})
+	s.Observations = append(s.Observations, Observation{Tool: tool, Args: compactStateText(args, 240), Summary: observation, Success: result.Category == tools.FailureSuccess})
 	if result.Category != tools.FailureSuccess {
 		s.Failures = append(s.Failures, FailureRecord{Tool: tool, Category: result.Category, Retryable: result.Retryable, Summary: compactStateText(result.Output, 240)})
 		s.Plan = fmt.Sprintf("diagnose %s failure, choose a corrective action, then verify the original goal", result.Category)
@@ -163,7 +164,7 @@ func (s *AgentRunState) addPostflightObservation(tool, args string, result tools
 	s.Phase = PhaseObserve
 	record := ToolCallRecord{Name: tool, Arguments: compactStateText(args, 240), Outcome: result.Category, Source: "postflight_verifier"}
 	s.ToolCalls = append(s.ToolCalls, record)
-	s.Observations = append(s.Observations, Observation{Tool: tool, Summary: compactStateText(result.Output, 280), Success: result.Category == tools.FailureSuccess, Source: "postflight_verifier"})
+	s.Observations = append(s.Observations, Observation{Tool: tool, Args: compactStateText(args, 240), Summary: compactStateText(result.Output, 280), Success: result.Category == tools.FailureSuccess, Source: "postflight_verifier"})
 	if result.Category != tools.FailureSuccess {
 		s.Plan = fmt.Sprintf("postflight verification %s did not pass; completion remains blocked", result.Category)
 		s.Phase = PhaseReplan
@@ -745,6 +746,43 @@ func (s *AgentRunState) controlContext() string {
 	}
 	b.WriteString("Preserve the original goal. Use tool results as authoritative current state. Do not claim completion without verifying every applicable acceptance criterion. Keep internal reasoning private.\n")
 	return b.String()
+}
+
+// authoritativeObservationContext is the compact, model-facing ledger used
+// when conversation history must be compacted. It contains tool observations,
+// not model prose, so compaction cannot silently replace an earlier fact with
+// a later interpretation.
+func (s *AgentRunState) authoritativeObservationContext(max int) string {
+	if max <= 0 || len(s.Observations) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, observation := range s.Observations {
+		remaining := len(s.Observations) - i
+		budget := (max - b.Len()) / remaining
+		if budget < 160 {
+			budget = 160
+		}
+		args := compactStateText(observation.Args, min(180, budget/3))
+		line := fmt.Sprintf("- observation %d tool=%s success=%t", i+1, observation.Tool, observation.Success)
+		if args != "" {
+			line += " args=" + args
+		}
+		line += " result=" + compactStateText(observation.Summary, budget)
+		remainingBudget := max - b.Len()
+		if remainingBudget <= 1 {
+			break
+		}
+		if len(line)+1 > remainingBudget {
+			line = compactStateText(line, remainingBudget-1)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func compactStateText(s string, n int) string {

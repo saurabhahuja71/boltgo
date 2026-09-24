@@ -1878,9 +1878,18 @@ func (a *Agent) modelHistoryForRequest() []llm.Message {
 	remaining := modelHistoryBudget - len(system.Content) - messageChars(current)
 	result := []llm.Message{system}
 	if remaining > 0 {
+		evidence := a.RunState.authoritativeObservationContext(min(remaining, 4_000))
+		stateSummary := capToolResult(a.FactualSummary(), min(remaining/3, 1_000))
+		context := "[agenterm] Earlier conversation was compacted for the provider context window. Tool observations below are authoritative; preserve contradictions and distinguish them from model interpretation.\n"
+		if evidence != "" {
+			context += "authoritative tool observations:\n" + evidence + "\n"
+		}
+		if stateSummary != "" {
+			context += "control summary:\n" + stateSummary
+		}
 		result = append(result, llm.Message{
 			Role:    llm.RoleUser,
-			Content: "[agenterm] Earlier conversation was compacted for the provider context window. Use the authoritative workspace observations and the current request; do not claim details that are not present below.\n" + capToolResult(a.FactualSummary(), min(remaining, 3_000)),
+			Content: context,
 		})
 	}
 	result = append(result, current...)
@@ -1901,16 +1910,29 @@ func messageChars(messages []llm.Message) int {
 func cloneAndCapMessages(messages []llm.Message, budget int) []llm.Message {
 	result := make([]llm.Message, 0, len(messages))
 	used := 0
-	for _, message := range messages {
-		copyMessage := message
-		copyMessage.Content = capToolResult(copyMessage.Content, 3_000)
-		cost := messageChars([]llm.Message{copyMessage})
-		if used+cost > budget && len(result) > 0 {
-			// Keep the most recent exchange complete; an omitted old tool result is
-			// safer than sending an orphaned tool message to the provider.
+	for i := 0; i < len(messages); i++ {
+		message := messages[i]
+		message.Content = capToolResult(message.Content, 3_000)
+		group := []llm.Message{message}
+		if message.Role == llm.RoleAssistant && len(message.ToolCalls) > 0 {
+			// Assistant tool calls and their tool results are one protocol
+			// exchange. Never retain a result after dropping its call.
+			for i+1 < len(messages) && messages[i+1].Role == llm.RoleTool {
+				i++
+				toolMessage := messages[i]
+				toolMessage.Content = capToolResult(toolMessage.Content, 3_000)
+				group = append(group, toolMessage)
+			}
+		} else if message.Role == llm.RoleTool {
+			// An orphaned tool result is not useful to the provider and may
+			// violate the chat protocol after compaction.
 			continue
 		}
-		result = append(result, copyMessage)
+		cost := messageChars(group)
+		if used+cost > budget && len(result) > 0 {
+			continue
+		}
+		result = append(result, group...)
 		used += cost
 	}
 	return result
