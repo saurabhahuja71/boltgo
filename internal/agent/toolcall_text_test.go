@@ -33,6 +33,23 @@ func TestExtractToolCallsFromContent(t *testing.T) {
 	}
 }
 
+func TestExtractQwenMarkupWithOpenParametersAndRepeatedCalls(t *testing.T) {
+	known := map[string]struct{}{"read_file": {}, "list_dir": {}}
+	raw := `No, I haven't found any reference yet.
+<tool_call> <function=read_file> <parameter=path> covered/README.md </tool_call> <tool_call>
+<function=read_file> <parameter=path> .github/workflows/covered_call.yml </tool_call> <tool_call>
+<function=list_dir> <parameter=path> covered/scripts </tool_call>`
+	calls, rest := extractToolCallsFromContent(raw, known)
+	if len(calls) != 3 || rest != "No, I haven't found any reference yet." {
+		t.Fatalf("calls=%d rest=%q", len(calls), rest)
+	}
+	if !contains(calls[0].Function.Arguments, `"path":"covered/README.md"`) ||
+		!contains(calls[1].Function.Arguments, `"path":".github/workflows/covered_call.yml"`) ||
+		!contains(calls[2].Function.Arguments, `"path":"covered/scripts"`) {
+		t.Fatalf("unexpected args: %q, %q, %q", calls[0].Function.Arguments, calls[1].Function.Arguments, calls[2].Function.Arguments)
+	}
+}
+
 func TestExtractNamedToolCallFromProviderText(t *testing.T) {
 	known := map[string]struct{}{"str_replace": {}}
 	raw := `The implementation is already correct. str_replace{"path":"calc/calc_test.go","old":"old","new":"new"}`

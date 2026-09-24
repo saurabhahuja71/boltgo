@@ -473,6 +473,7 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	}
 
 	toolsUsed := 0
+	unsupportedMarkupRetries := 0
 	investigationGenerations := make(map[string]uint64)
 	investigationEvidence := make(map[string]struct{})
 	var workspaceGeneration uint64
@@ -741,12 +742,12 @@ Do not answer with only a markdown plan or shell snippets.`,
 				}
 			}
 		}
-		if stream != nil && len(msg.ToolCalls) == 0 && !stream.quiet && !isShellOnlyAssistantText(msg.Content) {
-			stream.commit()
-		}
 		unsupportedToolMarkup := hasUnsupportedToolMarkup(msg.Content)
 		if unsupportedToolMarkup {
 			a.compatibilityMalformedToolMarkup = true
+		}
+		if stream != nil && len(msg.ToolCalls) == 0 && !stream.quiet && !unsupportedToolMarkup && !isShellOnlyAssistantText(msg.Content) {
+			stream.commit()
 		}
 
 		// Persist assistant turn (without the ephemeral after-tools system nudge)
@@ -796,8 +797,9 @@ Do not answer with only a markdown plan or shell snippets.`,
 			}
 			if unsupportedToolMarkup && len(roundTools) > 0 {
 				emit(Event{Kind: EventStatus, Text: "unsupported tool-call format; expected structured tool calls"})
-				if toolsUsed == 0 && round == 0 {
-					a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "[agenterm] Your previous tool request used unsupported markup. Use the provided API tools and emit a structured tool call; do not print <function=...> or </tool_call>."})
+				if unsupportedMarkupRetries < maxRetries {
+					unsupportedMarkupRetries++
+					a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: "[agenterm] Your previous response contained malformed tool markup and was not executed. Use the advertised API tools now. Emit a structured tool call; do not print <function=...>, <tool_call>, or </tool_call>. Do not answer the user's repository question until a real tool result is available."})
 					continue
 				}
 				if a.compatibilityTerminalComplete(emit) {
